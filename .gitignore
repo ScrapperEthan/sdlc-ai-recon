@@ -1,0 +1,9 @@
+# recon working data — regenerated, never commit
+poms/
+recon_out/
+names.txt
+repos/
+
+# python
+__pycache__/
+*.pyc

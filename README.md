@@ -27,7 +27,9 @@ a GitHub org — worth evaluating before building bespoke.
 
 | File | What it does |
 |---|---|
-| `harvest_poms.sh` | Pull only `pom.xml` from every repo in an org via the GitHub API (no clone) |
+| `RUNBOOK.md` | **Start here.** Step-by-step instructions to hand opencode on the internal machine; produces one `RECON-REPORT.md` |
+| `harvest_poms.py` | Pull only `pom.xml` from every repo in an org via the GitHub API (no clone). Cross-platform / Windows-friendly — **use this on Windows** |
+| `harvest_poms.sh` | Same as above for bash / Git Bash users |
 | `recon_maven_graph.py` | Parse the poms, decide *is this Maven multi-repo + shared libs?*, emit the dependency graph |
 | `prompts/recon-opencode-tasks.md` | Qualitative recon prompts for opencode (runtime coupling, platform base, a representative slice) |
 
@@ -35,14 +37,22 @@ a GitHub org — worth evaluating before building bespoke.
 
 ```bash
 # 1) Harvest poms (replace <ORG> with the GitHub org/owner of the 400 repos)
-./harvest_poms.sh <ORG> ./poms
+python harvest_poms.py <ORG> ./poms
 
 # 2) Build the verdict + dependency graph
 python recon_maven_graph.py ./poms
 
 # 3) Read the result
+#    Windows PowerShell:  Get-Content recon_out/summary.txt
 cat recon_out/summary.txt
 ```
+
+**Internal / enterprise GitHub:** the repos are reached through whatever host
+`gh` is logged into. If they live on an internal GitHub Enterprise host, first
+`gh auth login --hostname <host>` and set `GH_HOST` (PowerShell:
+`$env:GH_HOST="<host>"`) before harvesting.
+
+For the full guided flow on the internal machine, follow **`RUNBOOK.md`**.
 
 Don't have all repos? Run on any subset — the verdict and top shared libs show
 up immediately; only the full graph needs the full set.

@@ -35,6 +35,8 @@ reports) live in separate folders (`recon_out/`, `index/`), never inside a repo.
 | `RUNBOOK-2-cross-repo-qa.md` | **Step 2 — cross-repo Q&A.** Mirror (read-only) + build an index + answer questions with citations |
 | `prompts/qa-system-prompt.md` | Operating instructions for the Q&A assistant |
 | `impact.py` | Query the dependency graph: blast radius of changing a repo |
+| `RUNBOOK-3-message-map.md` | **Step 3 — message map.** Extract who-publishes/consumes which queue/topic (the async wiring) |
+| `group.py` | Auto-derive a business-flow bundle of repos to index together (no tribal knowledge needed) |
 | `harvest_poms.py` | Pull only `pom.xml` from every repo in an org via the GitHub API (no clone). Cross-platform / Windows-friendly — **use this on Windows** |
 | `harvest_poms.sh` | Same as above for bash / Git Bash users |
 | `recon_maven_graph.py` | Parse the poms, decide *is this Maven multi-repo + shared libs?*, emit the dependency graph |

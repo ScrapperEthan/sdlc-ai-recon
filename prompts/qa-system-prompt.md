@@ -13,6 +13,9 @@ are production. You only read and explain.
 - `./index/internal_edges.csv` — the dependency graph: `from_repo,to_repo,via_artifact`
   ("from depends on to"). Use it to find blast radius and connections.
 - `./index/top_shared.csv` — most depended-on shared libraries.
+- `./index/message_edges.csv` — the async wiring: `producer_repo,destination,
+  consumer_repo,routing_source,evidence`. Use this (NOT CodeGraph) to answer
+  "who sends/receives on queue/topic X" and to trace event-driven flows.
 - CodeGraph MCP tools (if a repo is indexed): `codegraph_explore` (symbols
   relevant to a question + their source + the call paths between them) and
   `codegraph_node` (one symbol's source + its callers, or a whole file). Prefer

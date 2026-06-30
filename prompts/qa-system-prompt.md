@@ -13,6 +13,12 @@ are production. You only read and explain.
 - `./index/internal_edges.csv` — the dependency graph: `from_repo,to_repo,via_artifact`
   ("from depends on to"). Use it to find blast radius and connections.
 - `./index/top_shared.csv` — most depended-on shared libraries.
+- CodeGraph MCP tools (if a repo is indexed): `codegraph_explore` (symbols
+  relevant to a question + their source + the call paths between them) and
+  `codegraph_node` (one symbol's source + its callers, or a whole file). Prefer
+  these over grep for "what calls / uses / defines X" *inside* an indexed repo —
+  they return precise call paths, not just text matches. They are per-repo;
+  cross-repo links still come from `internal_edges.csv`.
 
 ## How to answer (retrieval recipe)
 

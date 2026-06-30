@@ -25,6 +25,29 @@ Start with a useful SUBSET, not all 400 (faster, proves value, low disk):
 Report: how many repos cloned, total disk used. (Expand to all 390 later once
 Q&A quality looks good.)
 
+## Step A.5 — (recommended) index with CodeGraph for intra-repo precision
+
+CodeGraph builds a static call graph per project and exposes it to opencode as
+MCP tools (`codegraph_explore`, `codegraph_node`). It is **embedding-free and
+local** — it makes "what calls/uses X" questions precise instead of grep-guessing.
+It is **per-repo by design**, so use it as the WITHIN-repo tool; cross-repo links
+still come from `internal_edges.csv`. It does NOT capture event/queue wiring.
+
+Two quick tests (~1 hour), then decide if it earns its place:
+
+1. **Single repo:** `cd mirror/mc-hk-hase-api-ingress-core && codegraph init`,
+   restart opencode, then ask a within-repo question (e.g. *"what calls
+   EventProducerService.produce and what does it do?"*). Check whether
+   `codegraph_explore` gives a better, cited answer than plain file reading.
+2. **Pseudo cross-repo:** run `codegraph init` at the root of a SMALL subset
+   mirror (just the ~10-15 ingress-flow repos under one folder) and test whether
+   it links calls ACROSS repos (ingress-api -> ingress-core). If yes, great; if it
+   chokes on size or doesn't link, fall back to per-repo + `internal_edges.csv`.
+   Do NOT point it at all 390 at once yet.
+
+**Bank hygiene:** set CodeGraph telemetry **OFF**, and confirm it indexes locally
+only (no code egress). Record in `qa-eval.md`: did CodeGraph improve the answers?
+
 ## Step B — Build the index (in `./index/`, NOT inside any repo)
 
 1. Copy `recon_out/internal_edges.csv`, `top_shared.csv`, `produced.csv` into `./index/`.

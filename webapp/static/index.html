@@ -5,83 +5,631 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HASE code assistant</title>
 <style>
-  :root { --bg:#1d1f23; --panel:#26282d; --ink:#e9e9ec; --muted:#9aa0a8;
-          --accent:#6c8cff; --line:#34373d; --user:#2f3a52; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;
-         background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column; }
-  header { padding:12px 18px; border-bottom:1px solid var(--line); font-weight:600; }
-  header small { color:var(--muted); font-weight:400; margin-left:8px; }
-  #log { flex:1; overflow-y:auto; padding:18px; max-width:900px; width:100%; margin:0 auto; }
-  .msg { margin:0 0 16px; }
-  .msg .who { font-size:12px; color:var(--muted); margin-bottom:4px; }
-  .bubble { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px;
-            white-space:pre-wrap; word-wrap:break-word; }
-  .user .bubble { background:var(--user); }
-  .tools { font-size:12px; color:var(--muted); margin-top:6px; }
-  .tools code { background:#000; padding:1px 5px; border-radius:4px; }
-  form { display:flex; gap:8px; padding:14px 18px; border-top:1px solid var(--line);
-         max-width:900px; width:100%; margin:0 auto; }
-  textarea { flex:1; resize:none; height:46px; background:var(--panel); color:var(--ink);
-             border:1px solid var(--line); border-radius:8px; padding:11px; font:inherit; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:0 18px;
-           font-weight:600; cursor:pointer; }
-  button:disabled { opacity:.5; cursor:default; }
-  .hint { color:var(--muted); font-size:13px; }
+  :root {
+    --bg: #f5f7fb;
+    --sidebar: #10233f;
+    --sidebar-ink: #eef5ff;
+    --sidebar-muted: #9eb3d1;
+    --surface: #ffffff;
+    --surface-soft: #f8fafc;
+    --ink: #172033;
+    --muted: #65748b;
+    --line: #d9e1ee;
+    --line-strong: #c4cfdd;
+    --accent: #2563eb;
+    --accent-strong: #1d4ed8;
+    --accent-soft: #eaf1ff;
+    --success: #0f766e;
+    --success-soft: #e7f7f3;
+    --warning-soft: #fff7ed;
+    --shadow: 0 18px 45px rgba(15, 23, 42, .08);
+  }
+
+  * { box-sizing: border-box; }
+
+  [hidden] { display: none !important; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font: 15px/1.5 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(circle at top left, rgba(37, 99, 235, .10), transparent 30rem),
+      linear-gradient(180deg, #fbfcff 0%, var(--bg) 42%);
+  }
+
+  button, textarea { font: inherit; }
+
+  .app-shell {
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: 318px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    padding: 26px;
+    background:
+      linear-gradient(180deg, rgba(30, 64, 175, .36), transparent 34%),
+      var(--sidebar);
+    color: var(--sidebar-ink);
+    border-right: 1px solid rgba(255, 255, 255, .12);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+  }
+
+  .brand-mark {
+    width: 42px;
+    height: 42px;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    background: #ffffff;
+    color: var(--sidebar);
+    font-weight: 800;
+    letter-spacing: 0;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .18);
+  }
+
+  .brand strong {
+    display: block;
+    font-size: 18px;
+    line-height: 1.15;
+  }
+
+  .brand span span {
+    display: block;
+    color: var(--sidebar-muted);
+    font-size: 13px;
+    margin-top: 2px;
+  }
+
+  .sidebar-section {
+    padding-top: 18px;
+    border-top: 1px solid rgba(255, 255, 255, .12);
+  }
+
+  .sidebar-title {
+    margin: 0 0 10px;
+    color: #dbeafe;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .scope-list,
+  .tool-list {
+    display: grid;
+    gap: 9px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .scope-list li,
+  .tool-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    color: var(--sidebar-muted);
+    font-size: 13px;
+  }
+
+  .scope-list strong,
+  .tool-list strong {
+    color: var(--sidebar-ink);
+    font-weight: 650;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .10);
+    color: #dbeafe;
+    border: 1px solid rgba(255, 255, 255, .14);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .main {
+    min-width: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 18px 28px;
+    background: rgba(255, 255, 255, .86);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(12px);
+  }
+
+  .topbar h1 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
+  .topbar p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .topbar .status-pill {
+    color: #2453a6;
+    background: #eef4ff;
+    border-color: #cbdaf7;
+  }
+
+  .workspace {
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    padding: 24px 28px 20px;
+  }
+
+  #log {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    max-width: 980px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 2px 0 18px;
+  }
+
+  .empty-state {
+    display: grid;
+    gap: 22px;
+    padding: 26px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+  }
+
+  .empty-state h2 {
+    margin: 0;
+    font-size: 28px;
+    line-height: 1.15;
+    letter-spacing: 0;
+  }
+
+  .empty-state p {
+    max-width: 680px;
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  .prompt-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .prompt-card {
+    min-height: 98px;
+    padding: 16px;
+    text-align: left;
+    color: var(--ink);
+    background: var(--surface-soft);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+  }
+
+  .prompt-card:hover,
+  .prompt-card:focus-visible {
+    border-color: #9bb7ea;
+    box-shadow: 0 12px 28px rgba(37, 99, 235, .10);
+    outline: 0;
+    transform: translateY(-1px);
+  }
+
+  .prompt-card strong {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 14px;
+  }
+
+  .prompt-card span {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .msg {
+    display: grid;
+    gap: 7px;
+  }
+
+  .msg .who {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+
+  .bubble {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 15px 16px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .05);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .user {
+    justify-items: end;
+  }
+
+  .user .who {
+    justify-self: end;
+  }
+
+  .user .bubble {
+    max-width: 78%;
+    color: #0f2f58;
+    background: var(--accent-soft);
+    border-color: #bfd2f8;
+  }
+
+  .assistant .bubble {
+    border-left: 4px solid var(--accent);
+  }
+
+  .bubble.loading {
+    color: var(--muted);
+    background: linear-gradient(90deg, #ffffff 0%, #f3f7fd 50%, #ffffff 100%);
+    background-size: 220% 100%;
+    animation: pulse 1.4s linear infinite;
+  }
+
+  @keyframes pulse {
+    from { background-position: 220% 0; }
+    to { background-position: -220% 0; }
+  }
+
+  .tools {
+    width: 100%;
+    margin-top: 2px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .tools summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .tools summary::-webkit-details-marker { display: none; }
+
+  .tools-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 12px 12px;
+  }
+
+  .tool-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    color: var(--success);
+    background: var(--success-soft);
+    border: 1px solid #b9e6dc;
+    font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .composer-wrap {
+    max-width: 980px;
+    width: 100%;
+    margin: 0 auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    padding: 12px;
+    background: rgba(255, 255, 255, .82);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 18px 42px rgba(15, 23, 42, .08);
+  }
+
+  label {
+    display: block;
+    margin: 0 0 7px 2px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+
+  textarea {
+    width: 100%;
+    height: 54px;
+    resize: none;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    padding: 14px 15px;
+    outline: 0;
+  }
+
+  textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
+  }
+
+  #send {
+    min-width: 104px;
+    height: 54px;
+    padding: 0 18px;
+    color: #ffffff;
+    background: var(--accent);
+    border: 0;
+    border-radius: 12px;
+    font-weight: 750;
+    cursor: pointer;
+    box-shadow: 0 12px 24px rgba(37, 99, 235, .20);
+    transition: background .16s ease, transform .16s ease, box-shadow .16s ease;
+  }
+
+  #send:hover:not(:disabled),
+  #send:focus-visible:not(:disabled) {
+    background: var(--accent-strong);
+    outline: 0;
+    transform: translateY(-1px);
+    box-shadow: 0 16px 30px rgba(37, 99, 235, .26);
+  }
+
+  #send:disabled {
+    opacity: .58;
+    cursor: progress;
+    box-shadow: none;
+  }
+
+  @media (max-width: 980px) {
+    .app-shell { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .prompt-grid { grid-template-columns: 1fr; }
+    .workspace { padding: 18px; }
+    .topbar { padding: 16px 18px; }
+  }
 </style>
 </head>
 <body>
-  <header>HASE code assistant <small>read-only · cites repo/path:line</small></header>
-  <div id="log">
-    <div class="msg"><div class="bubble hint">Ask about the system across repos, e.g.
-      “How does a message get from ingress-api to a tracking job?”,
-      “If I change EventPayload, what breaks?”, “Which repos consume otx_bat_letter?”</div></div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Assistant scope">
+      <div class="brand">
+        <div class="brand-mark">HA</div>
+        <span>
+          <strong>HASE Assistant</strong>
+          <span>Cross-repo code intelligence</span>
+        </span>
+      </div>
+
+      <section class="sidebar-section">
+        <p class="sidebar-title">Operating Mode</p>
+        <ul class="scope-list">
+          <li><strong>Repository access</strong><span class="status-pill">Read-only</span></li>
+          <li><strong>Evidence style</strong><span>repo/path:line</span></li>
+          <li><strong>Primary users</strong><span>Engineers</span></li>
+        </ul>
+      </section>
+
+      <section class="sidebar-section">
+        <p class="sidebar-title">Retrieval Tools</p>
+        <ul class="tool-list">
+          <li><strong>Impact</strong><span>dependency graph</span></li>
+          <li><strong>Messages</strong><span>producer/consumer</span></li>
+          <li><strong>Code Search</strong><span>mirror files</span></li>
+          <li><strong>Call Graph</strong><span>CodeGraph</span></li>
+        </ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1>Ask about the Java estate</h1>
+          <p>Answers are grounded in repository maps, message routes, code search, and cited source lines.</p>
+        </div>
+        <div class="topbar-actions" aria-label="Current guarantees">
+          <span class="status-pill">No repo writes</span>
+          <span class="status-pill">Cited answers</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <div id="log" aria-live="polite">
+          <div id="empty" class="empty-state">
+            <div>
+              <h2>Investigate changes before they move.</h2>
+              <p>Start from impact, message routing, or code evidence and keep the answer tied to source.</p>
+            </div>
+            <div class="prompt-grid" aria-label="Prompt starters">
+              <button class="prompt-card" type="button" data-prompt="If I change EventPayload, what breaks?">
+                <strong>Impact analysis</strong>
+                <span>If I change EventPayload, what breaks?</span>
+              </button>
+              <button class="prompt-card" type="button" data-prompt="Which repos consume otx_bat_letter?">
+                <strong>Message consumers</strong>
+                <span>Which repos consume otx_bat_letter?</span>
+              </button>
+              <button class="prompt-card" type="button" data-prompt="How does a message get from ingress-api to a tracking job?">
+                <strong>Route tracing</strong>
+                <span>How does a message get from ingress-api to a tracking job?</span>
+              </button>
+              <button class="prompt-card" type="button" data-prompt="Find where payment status is mapped and cite the source lines.">
+                <strong>Code evidence</strong>
+                <span>Find where payment status is mapped and cite the source lines.</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <form id="f" aria-busy="false">
+            <div>
+              <label for="q">Question</label>
+              <textarea id="q" placeholder="Ask about repos, messages, impact, or source evidence"></textarea>
+            </div>
+            <button id="send">Send</button>
+          </form>
+        </div>
+      </section>
+    </main>
   </div>
-  <form id="f">
-    <textarea id="q" placeholder="Ask a question…  (Enter to send, Shift+Enter for newline)"></textarea>
-    <button id="send">Send</button>
-  </form>
+
 <script>
 const log = document.getElementById('log'), q = document.getElementById('q'),
-      f = document.getElementById('f'), send = document.getElementById('send');
+      f = document.getElementById('f'), send = document.getElementById('send'),
+      empty = document.getElementById('empty');
 const history = [];
 
+function hideEmptyState() {
+  if (empty) empty.hidden = true;
+}
+
 function add(role, text, who) {
-  const m = document.createElement('div'); m.className = 'msg ' + role;
-  m.innerHTML = `<div class="who"></div><div class="bubble"></div>`;
-  m.querySelector('.who').textContent = who || role;
-  m.querySelector('.bubble').textContent = text;
-  log.appendChild(m); log.scrollTop = log.scrollHeight;
+  hideEmptyState();
+  const m = document.createElement('div');
+  m.className = 'msg ' + role;
+  const label = document.createElement('div');
+  label.className = 'who';
+  label.textContent = who || role;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  m.append(label, bubble);
+  log.appendChild(m);
+  log.scrollTop = log.scrollHeight;
   return m;
+}
+
+function addToolTrace(container, trace) {
+  const details = document.createElement('details');
+  details.className = 'tools';
+  details.open = true;
+
+  const summary = document.createElement('summary');
+  summary.textContent = `${trace.length} retrieval step${trace.length === 1 ? '' : 's'} completed`;
+
+  const list = document.createElement('div');
+  list.className = 'tools-list';
+  trace.forEach((item) => {
+    const chip = document.createElement('span');
+    chip.className = 'tool-chip';
+    chip.textContent = item.tool || 'tool';
+    list.appendChild(chip);
+  });
+
+  details.append(summary, list);
+  container.appendChild(details);
 }
 
 async function ask(text) {
   add('user', text, 'you');
   history.push({role:'user', content:text});
-  const pending = add('assistant', '…thinking', 'assistant');
+  const pending = add('assistant', 'Thinking through the relevant retrieval steps...', 'assistant');
+  pending.querySelector('.bubble').classList.add('loading');
   send.disabled = true;
+  f.setAttribute('aria-busy', 'true');
   try {
     const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({question:text, history: history.slice(0,-1)})});
     const d = await r.json();
-    if (d.error) { pending.querySelector('.bubble').textContent = 'Error: ' + d.error; }
-    else {
+    pending.querySelector('.bubble').classList.remove('loading');
+    if (d.error) {
+      pending.querySelector('.bubble').textContent = 'Error: ' + d.error;
+    } else {
       pending.querySelector('.bubble').textContent = d.answer || '(empty)';
       history.push({role:'assistant', content:d.answer || ''});
-      if (d.tool_trace && d.tool_trace.length) {
-        const t = document.createElement('div'); t.className = 'tools';
-        t.innerHTML = 'tools: ' + d.tool_trace.map(x => `<code>${x.tool}</code>`).join(' ');
-        pending.appendChild(t);
-      }
+      if (d.tool_trace && d.tool_trace.length) addToolTrace(pending, d.tool_trace);
     }
-  } catch (e) { pending.querySelector('.bubble').textContent = 'Request failed: ' + e; }
-  send.disabled = false; q.focus();
+  } catch (e) {
+    pending.querySelector('.bubble').classList.remove('loading');
+    pending.querySelector('.bubble').textContent = 'Request failed: ' + e;
+  }
+  send.disabled = false;
+  f.setAttribute('aria-busy', 'false');
+  q.focus();
 }
 
-f.addEventListener('submit', e => { e.preventDefault();
-  const t = q.value.trim(); if (!t) return; q.value = ''; ask(t); });
+document.querySelectorAll('.prompt-card').forEach((button) => {
+  button.addEventListener('click', () => {
+    q.value = button.dataset.prompt || '';
+    q.focus();
+  });
+});
+
+f.addEventListener('submit', e => {
+  e.preventDefault();
+  const t = q.value.trim();
+  if (!t) return;
+  q.value = '';
+  ask(t);
+});
+
 q.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); f.requestSubmit(); }});
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    f.requestSubmit();
+  }
+});
 </script>
 </body>
 </html>

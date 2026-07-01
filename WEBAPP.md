@@ -38,6 +38,13 @@ developers just open the URL. Nobody installs opencode or anything.
 
 ## Notes
 
+- **LLM providers (merge-conflict rule):** `webapp/llm.py` is a small stable
+  facade — do NOT edit it for provider work. Provider code lives in
+  `webapp/llm_providers/`: `copilot_responses.py` (local copilot-api `/responses`,
+  the default) and `openai_chat.py` (standard `/chat/completions`). Pick with
+  `LLM_PROVIDER`. Put provider/protocol/network changes in those files so
+  `git pull` stays fast-forward. Per-question token/credit usage is aggregated in
+  `webapp/llm_usage.py` and returned as `result["usage"]`.
 - The assistant's behaviour/citation rules come from `prompts/qa-system-prompt.md`.
 - It only reads `mirror/`, `recon_out/`, `index/`. No DB, no credentials.
 - Chat sessions are stored locally in JSON at `webapp_data/chat_sessions.json` by default.

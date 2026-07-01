@@ -88,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
                 question,
                 result.get("answer") or "",
                 result.get("tool_trace"),
+                result.get("usage"),
             )
             result["session"] = {
                 "id": session["id"],

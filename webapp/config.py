@@ -1,10 +1,12 @@
 """Web app config — all via env vars so Codex/ops can set them without code edits."""
 import os
 
-# ---- model (Codex sets these) ----
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+# ---- model: pick a provider, then point it at the endpoint ----
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "copilot_responses")  # or "openai_chat"
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:4141/v1")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "dummy")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-5.5")
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 LLM_MOCK = os.environ.get("LLM_MOCK", "") not in ("", "0", "false", "False")
 

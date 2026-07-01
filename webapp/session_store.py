@@ -79,6 +79,7 @@ def _session_detail(session):
             "content": message.get("content", ""),
             "created_at": message.get("created_at"),
             "tool_trace": deepcopy(message.get("tool_trace") or []),
+            "usage": deepcopy(message.get("usage")) if message.get("usage") else None,
         }
         for message in session.get("messages") or []
     ]
@@ -129,7 +130,7 @@ def history_for_agent(session_id):
     ]
 
 
-def append_exchange(session_id, question, answer, tool_trace=None):
+def append_exchange(session_id, question, answer, tool_trace=None, usage=None):
     question = (question or "").strip()
     if not question:
         raise ValueError("Question is required")
@@ -158,6 +159,7 @@ def append_exchange(session_id, question, answer, tool_trace=None):
                 "content": assistant_content,
                 "created_at": assistant_time,
                 "tool_trace": trace,
+                "usage": deepcopy(usage) if usage else None,
             }
         )
         session["updated_at"] = assistant_time

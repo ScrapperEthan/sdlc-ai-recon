@@ -632,6 +632,42 @@
     .session-toolbar { flex-direction: column; align-items: stretch; }
     .secondary-button { width: 100%; }
   }
+
+  /* citations: make repo/path:line references pop as evidence */
+  .bubble code.cite {
+    background: var(--accent-soft, #eaf1ff);
+    color: var(--accent-strong, #1d4ed8);
+    border: 1px solid #bfd2f8;
+    border-radius: 6px;
+    padding: 1px 6px;
+    white-space: nowrap;
+  }
+  .bubble code.cite::before { content: "\1F4CE"; margin-right: 4px; opacity: .75; }
+
+  /* the evidence / validation block, visually separated from the answer */
+  .evidence-section {
+    margin-top: 14px;
+    border: 1px solid var(--line, #d9e1ee);
+    border-left: 3px solid var(--success, #0f766e);
+    border-radius: 10px;
+    background: var(--success-soft, #e7f7f3);
+    padding: 0 12px 10px;
+  }
+  .evidence-section > summary {
+    margin: 0 -12px;
+    padding: 9px 12px;
+    cursor: pointer;
+    list-style: none;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--success, #0f766e);
+  }
+  .evidence-section > summary::-webkit-details-marker { display: none; }
+  .evidence-section > summary::before { content: "\25B8 "; }
+  .evidence-section[open] > summary::before { content: "\25BE "; }
+  .evidence-section :is(h1, h2, h3, h4) { font-size: 14px; margin: 10px 0 6px; }
 </style>
 </head>
 <body>
@@ -657,10 +693,10 @@
       <section class="sidebar-section">
         <p class="sidebar-title">Retrieval Tools</p>
         <ul class="tool-list">
-          <li><strong>Impact</strong><span>dependency graph</span></li>
-          <li><strong>Messages</strong><span>producer/consumer</span></li>
-          <li><strong>Code Search</strong><span>mirror files</span></li>
-          <li><strong>Call Graph</strong><span>CodeGraph</span></li>
+          <li title="Which repos are affected if you change a given repo"><strong>Impact</strong><span>what a change breaks</span></li>
+          <li title="Which service publishes a message to a queue/topic, and which service consumes it"><strong>Message routing</strong><span>who sends &amp; receives</span></li>
+          <li title="Search the actual source code and return exact file:line"><strong>Code search</strong><span>find &amp; cite source</span></li>
+          <li title="Synchronous call paths — which method calls which"><strong>Call graph</strong><span>who calls what</span></li>
         </ul>
       </section>
     </aside>
@@ -1096,10 +1132,39 @@ function renderMarkdown(text) {
   return blocks.join('');
 }
 
+const CITE_RE = /(?:[\w.\-\/]+)?[\w.\-]+\.(?:java|xml|ya?ml|properties|kts?|json|sql)(?::\d+(?:-\d+)?)?$|:\d+(?:-\d+)?$/i;
+const EVIDENCE_RE = /^(evidence|verified|what i verified|unverified|partial|references?|证据|依据|验证)/i;
+
+function decorateAnswer(bubble) {
+  // 1) make repo/path:line references stand out as evidence pills
+  bubble.querySelectorAll('code').forEach((c) => {
+    if (CITE_RE.test((c.textContent || '').trim())) c.classList.add('cite');
+  });
+  // 2) fold everything from the first "Evidence"-style heading into a labeled block
+  if (bubble.querySelector('.evidence-section')) return;
+  const heads = Array.from(bubble.querySelectorAll('h1, h2, h3, h4'));
+  const marker = heads.find((h) => EVIDENCE_RE.test((h.textContent || '').trim()));
+  if (!marker) return;
+  const details = document.createElement('details');
+  details.className = 'evidence-section';
+  details.open = true;
+  const summary = document.createElement('summary');
+  const moved = [];
+  for (let n = marker; n; n = n.nextElementSibling) moved.push(n);
+  details.appendChild(summary);
+  moved.forEach((n) => details.appendChild(n));
+  const count = details.querySelectorAll('code.cite').length;
+  summary.textContent = count
+    ? `Evidence & validation · ${count} cited reference${count === 1 ? '' : 's'}`
+    : 'Evidence & validation';
+  bubble.appendChild(details);
+}
+
 function setBubbleContent(bubble, text, renderMarkdownContent = false) {
   if (renderMarkdownContent) {
     bubble.classList.add('markdown');
     bubble.innerHTML = renderMarkdown(text || '');
+    decorateAnswer(bubble);
     return;
   }
 

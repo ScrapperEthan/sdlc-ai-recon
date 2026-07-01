@@ -7,3 +7,6 @@ repos/
 # python
 __pycache__/
 *.pyc
+
+# local webapp session history
+webapp_data/

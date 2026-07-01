@@ -39,7 +39,7 @@
       linear-gradient(180deg, #fbfcff 0%, var(--bg) 42%);
   }
 
-  button, textarea { font: inherit; }
+  button, textarea, select { font: inherit; }
 
   .app-shell {
     min-height: 100vh;
@@ -190,8 +190,86 @@
   .workspace {
     min-height: 0;
     display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 14px;
     padding: 24px 28px 20px;
+  }
+
+  .session-toolbar {
+    max-width: 980px;
+    width: 100%;
+    margin: 0 auto;
+    display: flex;
+    align-items: end;
+    gap: 12px;
+  }
+
+  .session-picker {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .session-picker label {
+    display: block;
+    margin: 0 0 7px 2px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+
+  .session-picker select {
+    width: 100%;
+    height: 46px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, .92);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0 14px;
+    outline: 0;
+  }
+
+  .session-picker select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
+  }
+
+  .session-actions {
+    display: grid;
+    gap: 8px;
+  }
+
+  .secondary-button {
+    min-width: 132px;
+    height: 46px;
+    padding: 0 16px;
+    color: var(--accent-strong);
+    background: #f8fbff;
+    border: 1px solid #cddcf8;
+    border-radius: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: border-color .16s ease, background .16s ease, transform .16s ease;
+  }
+
+  .secondary-button:hover:not(:disabled),
+  .secondary-button:focus-visible:not(:disabled) {
+    background: #eef4ff;
+    border-color: #9bb7ea;
+    outline: 0;
+    transform: translateY(-1px);
+  }
+
+  .secondary-button:disabled {
+    opacity: .58;
+    cursor: progress;
+  }
+
+  .session-meta {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
   }
 
   #log {
@@ -551,6 +629,8 @@
     .prompt-grid { grid-template-columns: 1fr; }
     .workspace { padding: 18px; }
     .topbar { padding: 16px 18px; }
+    .session-toolbar { flex-direction: column; align-items: stretch; }
+    .secondary-button { width: 100%; }
   }
 </style>
 </head>
@@ -598,6 +678,19 @@
       </header>
 
       <section class="workspace">
+        <div class="session-toolbar" aria-label="Saved sessions">
+          <div class="session-picker">
+            <label for="session-select">Session</label>
+            <select id="session-select">
+              <option value="">No saved sessions yet</option>
+            </select>
+          </div>
+          <div class="session-actions">
+            <button id="new-session" class="secondary-button" type="button">New session</button>
+            <p id="session-meta" class="session-meta">Sessions are saved locally in JSON for internal testing.</p>
+          </div>
+        </div>
+
         <div id="log" aria-live="polite">
           <div id="empty" class="empty-state">
             <div>
@@ -641,11 +734,178 @@
 <script>
 const log = document.getElementById('log'), q = document.getElementById('q'),
       f = document.getElementById('f'), send = document.getElementById('send'),
+      sessionSelect = document.getElementById('session-select'),
+      newSessionButton = document.getElementById('new-session'),
+      sessionMeta = document.getElementById('session-meta'),
       empty = document.getElementById('empty');
 const history = [];
+let currentSessionId = null;
+let sessions = [];
 
 function hideEmptyState() {
   if (empty) empty.hidden = true;
+}
+
+function resetLog(showEmptyState = true) {
+  while (log.firstChild) log.removeChild(log.firstChild);
+  empty.hidden = !showEmptyState;
+  log.appendChild(empty);
+}
+
+function setSessionMeta(text) {
+  sessionMeta.textContent = text;
+}
+
+function setBusy(isBusy) {
+  send.disabled = isBusy;
+  sessionSelect.disabled = isBusy;
+  newSessionButton.disabled = isBusy;
+  f.setAttribute('aria-busy', String(isBusy));
+}
+
+function sessionOptionLabel(session) {
+  const count = Number(session.message_count || 0);
+  const suffix = count ? ` (${count} message${count === 1 ? '' : 's'})` : '';
+  return `${session.title || 'New session'}${suffix}`;
+}
+
+function updateSessionSelect(selectedId = '') {
+  sessionSelect.innerHTML = '';
+
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = sessions.length ? 'Select a session' : 'No saved sessions yet';
+  placeholder.disabled = sessions.length > 0;
+  placeholder.selected = !selectedId;
+  sessionSelect.appendChild(placeholder);
+
+  sessions.forEach((session) => {
+    const option = document.createElement('option');
+    option.value = session.id;
+    option.textContent = sessionOptionLabel(session);
+    option.selected = session.id === selectedId;
+    sessionSelect.appendChild(option);
+  });
+
+  sessionSelect.value = selectedId || '';
+}
+
+function syncHistory(messages) {
+  history.length = 0;
+  (messages || []).forEach((message) => {
+    if (message.role === 'user' || message.role === 'assistant') {
+      history.push({role: message.role, content: message.content || ''});
+    }
+  });
+}
+
+function renderSessionMessages(messages) {
+  if (!messages || !messages.length) {
+    resetLog(true);
+    syncHistory([]);
+    return;
+  }
+
+  resetLog(false);
+  messages.forEach((message) => {
+    const who = message.role === 'user' ? 'you' : 'assistant';
+    const container = add(message.role, message.content || '', who);
+    if (message.role === 'assistant' && message.tool_trace && message.tool_trace.length) {
+      addToolTrace(container, message.tool_trace);
+    }
+  });
+  syncHistory(messages);
+}
+
+function updateSessionMetaFromSession(session) {
+  if (!session) {
+    setSessionMeta('Sessions are saved locally in JSON for internal testing.');
+    return;
+  }
+  const count = Number(
+    session.message_count != null ? session.message_count : (session.messages || []).length
+  );
+  const messageLabel = `${count} message${count === 1 ? '' : 's'}`;
+  setSessionMeta(`Saved locally in JSON. ${messageLabel} in "${session.title || 'New session'}".`);
+}
+
+async function fetchJson(url, options = {}) {
+  const headers = {...(options.headers || {})};
+  if (options.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(url, {...options, headers});
+  const raw = await response.text();
+  const data = raw ? JSON.parse(raw) : {};
+
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+async function refreshSessions(preferredId = currentSessionId) {
+  const data = await fetchJson('/api/sessions');
+  sessions = data.sessions || [];
+
+  const nextId = sessions.some((session) => session.id === preferredId)
+    ? preferredId
+    : (sessions[0] && sessions[0].id) || '';
+
+  currentSessionId = nextId || null;
+  updateSessionSelect(currentSessionId);
+  updateSessionMetaFromSession(sessions.find((session) => session.id === currentSessionId));
+  return sessions;
+}
+
+async function loadSession(sessionId) {
+  if (!sessionId) {
+    currentSessionId = null;
+    resetLog(true);
+    syncHistory([]);
+    updateSessionMetaFromSession(null);
+    updateSessionSelect('');
+    return;
+  }
+
+  const session = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  currentSessionId = session.id;
+  renderSessionMessages(session.messages || []);
+  updateSessionMetaFromSession(session);
+  await refreshSessions(session.id);
+}
+
+async function createSession() {
+  const session = await fetchJson('/api/sessions', {
+    method: 'POST',
+    body: JSON.stringify({title: 'New session'})
+  });
+  currentSessionId = session.id;
+  renderSessionMessages(session.messages || []);
+  updateSessionMetaFromSession(session);
+  await refreshSessions(session.id);
+  return session;
+}
+
+async function initializeSessions() {
+  setBusy(true);
+  try {
+    const storedSessions = await refreshSessions();
+    if (storedSessions.length) {
+      await loadSession(currentSessionId);
+    } else {
+      resetLog(true);
+      syncHistory([]);
+      updateSessionMetaFromSession(null);
+    }
+  } catch (error) {
+    resetLog(true);
+    syncHistory([]);
+    setSessionMeta(`Failed to load saved sessions: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function escapeHtml(value) {
@@ -886,11 +1146,10 @@ async function ask(text) {
   history.push({role:'user', content:text});
   const pending = add('assistant', 'Thinking through the relevant retrieval steps...', 'assistant');
   pending.querySelector('.bubble').classList.add('loading');
-  send.disabled = true;
-  f.setAttribute('aria-busy', 'true');
+  setBusy(true);
   try {
     const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({question:text, history: history.slice(0,-1)})});
+      body: JSON.stringify({question:text, session_id: currentSessionId})});
     const d = await r.json();
     pending.querySelector('.bubble').classList.remove('loading');
     if (d.error) {
@@ -899,13 +1158,16 @@ async function ask(text) {
       setBubbleContent(pending.querySelector('.bubble'), d.answer || '(empty)', true);
       history.push({role:'assistant', content:d.answer || ''});
       if (d.tool_trace && d.tool_trace.length) addToolTrace(pending, d.tool_trace);
+      if (d.session) {
+        currentSessionId = d.session.id;
+        await refreshSessions(currentSessionId);
+      }
     }
   } catch (e) {
     pending.querySelector('.bubble').classList.remove('loading');
     setBubbleContent(pending.querySelector('.bubble'), 'Request failed: ' + e, false);
   }
-  send.disabled = false;
-  f.setAttribute('aria-busy', 'false');
+  setBusy(false);
   q.focus();
 }
 
@@ -914,6 +1176,30 @@ document.querySelectorAll('.prompt-card').forEach((button) => {
     q.value = button.dataset.prompt || '';
     q.focus();
   });
+});
+
+sessionSelect.addEventListener('change', async () => {
+  if (sessionSelect.value === currentSessionId) return;
+  setBusy(true);
+  try {
+    await loadSession(sessionSelect.value);
+  } catch (error) {
+    setSessionMeta(`Failed to load session: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
+});
+
+newSessionButton.addEventListener('click', async () => {
+  setBusy(true);
+  try {
+    await createSession();
+    q.focus();
+  } catch (error) {
+    setSessionMeta(`Failed to create session: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
 });
 
 f.addEventListener('submit', e => {
@@ -930,6 +1216,9 @@ q.addEventListener('keydown', e => {
     f.requestSubmit();
   }
 });
+
+resetLog(true);
+initializeSessions();
 </script>
 </body>
 </html>

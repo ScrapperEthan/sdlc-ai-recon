@@ -14,6 +14,9 @@ SYSTEM_PROMPT = os.environ.get(
 )
 MAX_TOOL_ITERS = int(os.environ.get("SDLC_MAX_TOOL_ITERS", "8"))
 TOOL_RESULT_CAP = int(os.environ.get("SDLC_TOOL_RESULT_CAP", "12000"))
+SESSION_STORE = os.environ.get(
+    "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
+)
 
 # ---- server ----
 HOST = os.environ.get("SDLC_HOST", "127.0.0.1")

@@ -40,6 +40,8 @@ developers just open the URL. Nobody installs opencode or anything.
 
 - The assistant's behaviour/citation rules come from `prompts/qa-system-prompt.md`.
 - It only reads `mirror/`, `recon_out/`, `index/`. No DB, no credentials.
+- Chat sessions are stored locally in JSON at `webapp_data/chat_sessions.json` by default.
+- Override the session file path with `SDLC_SESSION_STORE=/path/to/chat_sessions.json`.
 - `call_graph` shells out to the `codegraph` CLI if present (synchronous
   who-calls-whom); everything else is pure retrieval-layer.
 - Tune with env: `SDLC_MAX_TOOL_ITERS`, `SDLC_TOOL_RESULT_CAP`, `SDLC_PORT`, `SDLC_HOST`.

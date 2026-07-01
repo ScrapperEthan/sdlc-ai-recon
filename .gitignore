@@ -10,3 +10,12 @@ __pycache__/
 
 # local webapp session history
 webapp_data/
+
+# eval output
+evals/last_run.json
+
+# generated index freshness metadata
+index/last_indexed.json
+
+# human-reviewed generated scratch outputs
+scratch/

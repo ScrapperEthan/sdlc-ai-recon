@@ -67,26 +67,67 @@ def _to_responses_input(messages):
 def _from_responses(body):
     """Responses API body -> chat-style assistant message (+ private usage)."""
     content_parts, tool_calls = [], []
-    for item in body.get("output") or []:
+
+    def add_text(value):
+        if isinstance(value, str) and value:
+            content_parts.append(value)
+
+    def normalize_arguments(value):
+        if isinstance(value, str):
+            return value
+        return json.dumps(value or {}, ensure_ascii=False)
+
+    output_items = body.get("output") or []
+    if isinstance(output_items, str):
+        add_text(output_items)
+        output_items = []
+    elif isinstance(output_items, dict):
+        output_items = [output_items]
+
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
         itype = item.get("type")
         if itype == "message":
-            for part in item.get("content") or []:
-                if part.get("type") in ("output_text", "text") and part.get("text"):
-                    content_parts.append(part["text"])
+            content = item.get("content") or []
+            if isinstance(content, str):
+                add_text(content)
+                continue
+            for part in content:
+                if isinstance(part, str):
+                    add_text(part)
+                elif isinstance(part, dict):
+                    if part.get("type") in ("output_text", "text", "summary_text"):
+                        add_text(part.get("text") or part.get("content") or "")
+                    else:
+                        add_text(part.get("text") or "")
+        elif itype in ("output_text", "text"):
+            add_text(item.get("text") or item.get("content") or "")
         elif itype == "function_call":
             tool_calls.append({
                 "id": item.get("call_id") or item.get("id") or "",
                 "type": "function",
                 "function": {"name": item.get("name", ""),
-                             "arguments": item.get("arguments") or "{}"},
+                             "arguments": normalize_arguments(item.get("arguments"))},
             })
-    content = "".join(content_parts) or body.get("output_text") or None
+    output_text = body.get("output_text")
+    if isinstance(output_text, list):
+        output_text = "".join(str(part) for part in output_text)
+    elif isinstance(output_text, dict):
+        output_text = output_text.get("text") or output_text.get("content")
+    content = "".join(content_parts) or output_text or None
 
     message = {"role": "assistant", "content": content}
     if tool_calls:
         message["tool_calls"] = tool_calls
-    message["_usage"] = body.get("usage") or {}
-    message["_copilot_usage"] = body.get("copilot_usage") or {}
+    usage = body.get("usage") or {}
+    message["_usage"] = {
+        "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+        "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
+        "total_tokens": usage.get("total_tokens", 0),
+        "output_tokens_details": usage.get("output_tokens_details") or {},
+    }
+    message["_copilot_usage"] = body.get("copilot_usage") or usage.get("copilot_usage") or {}
     return message
 
 

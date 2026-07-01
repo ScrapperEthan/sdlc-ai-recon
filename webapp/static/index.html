@@ -186,6 +186,14 @@
     background: #eef4ff;
     border-color: #cbdaf7;
   }
+  .usage-button {
+    cursor: pointer;
+  }
+  .usage-button:hover,
+  .usage-button:focus-visible {
+    border-color: #9bb7ea;
+    outline: 0;
+  }
 
   .workspace {
     min-height: 0;
@@ -641,8 +649,31 @@
     border-radius: 6px;
     padding: 1px 6px;
     white-space: nowrap;
+    cursor: pointer;
   }
   .bubble code.cite::before { content: "\1F4CE"; margin-right: 4px; opacity: .75; }
+  .bubble code.cite-ok {
+    background: var(--success-soft, #e7f7f3);
+    color: var(--success, #0f766e);
+    border-color: #b9e6dc;
+  }
+  .bubble code.cite-bad {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fecaca;
+  }
+  .bubble code.cite-bad::before {
+    content: "\26A0";
+    color: #b91c1c;
+  }
+  .cite-summary {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .cite-summary.is-ok { color: var(--success, #0f766e); }
+  .cite-summary.is-bad { color: #b45309; }
 
   /* the evidence / validation block, visually separated from the answer */
   .evidence-section {
@@ -668,6 +699,157 @@
   .evidence-section > summary::before { content: "\25B8 "; }
   .evidence-section[open] > summary::before { content: "\25BE "; }
   .evidence-section :is(h1, h2, h3, h4) { font-size: 14px; margin: 10px 0 6px; }
+
+  #source-panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    z-index: 20;
+    width: min(760px, 92vw);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    background: #0f172a;
+    color: #e2e8f0;
+    border-left: 1px solid rgba(255, 255, 255, .16);
+    box-shadow: -24px 0 60px rgba(15, 23, 42, .22);
+  }
+  .src-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(226, 232, 240, .14);
+  }
+  .src-title {
+    min-width: 0;
+    overflow: hidden;
+    color: #f8fafc;
+    font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .src-close {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, .08);
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .src-close:hover,
+  .src-close:focus-visible {
+    background: rgba(255, 255, 255, .16);
+    outline: 0;
+  }
+  .src-body {
+    overflow: auto;
+    padding: 12px 0 18px;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .src-line {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 16px;
+    white-space: pre;
+  }
+  .src-line.hit {
+    background: rgba(250, 204, 21, .18);
+    box-shadow: inset 3px 0 0 #facc15;
+  }
+  .src-n {
+    color: #94a3b8;
+    text-align: right;
+    user-select: none;
+  }
+  .src-t {
+    min-width: 0;
+  }
+  #usage-panel {
+    position: fixed;
+    right: 24px;
+    top: 76px;
+    z-index: 21;
+    width: min(460px, calc(100vw - 32px));
+    max-height: calc(100vh - 104px);
+    overflow: auto;
+    padding: 16px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+  }
+  .usage-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .usage-head h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .usage-close {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    background: var(--surface-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .usage-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .usage-metric {
+    padding: 10px;
+    background: var(--surface-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .usage-metric span {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .usage-metric strong {
+    display: block;
+    margin-top: 3px;
+    font-size: 16px;
+  }
+  .usage-days {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .usage-days th,
+  .usage-days td {
+    padding: 7px 6px;
+    text-align: right;
+    border-bottom: 1px solid var(--line);
+  }
+  .usage-days th:first-child,
+  .usage-days td:first-child {
+    text-align: left;
+  }
+  .usage-note {
+    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -710,6 +892,8 @@
         <div class="topbar-actions" aria-label="Current guarantees">
           <span class="status-pill">No repo writes</span>
           <span class="status-pill">Cited answers</span>
+          <span class="status-pill" id="index-status">Index status unknown</span>
+          <button class="status-pill usage-button" id="usage-button" type="button">Usage</button>
         </div>
       </header>
 
@@ -767,12 +951,33 @@
     </main>
   </div>
 
+  <aside id="source-panel" hidden aria-label="Source viewer">
+    <div class="src-head">
+      <span class="src-title"></span>
+      <button class="src-close" type="button" aria-label="Close source viewer"
+        onclick="document.getElementById('source-panel').hidden = true">&times;</button>
+    </div>
+    <div class="src-body"></div>
+  </aside>
+
+  <aside id="usage-panel" hidden aria-label="Usage dashboard">
+    <div class="usage-head">
+      <h2>Usage</h2>
+      <button class="usage-close" type="button" aria-label="Close usage dashboard"
+        onclick="document.getElementById('usage-panel').hidden = true">&times;</button>
+    </div>
+    <div class="usage-body">Loading...</div>
+  </aside>
+
 <script>
 const log = document.getElementById('log'), q = document.getElementById('q'),
       f = document.getElementById('f'), send = document.getElementById('send'),
       sessionSelect = document.getElementById('session-select'),
       newSessionButton = document.getElementById('new-session'),
       sessionMeta = document.getElementById('session-meta'),
+      indexStatus = document.getElementById('index-status'),
+      usageButton = document.getElementById('usage-button'),
+      usagePanel = document.getElementById('usage-panel'),
       empty = document.getElementById('empty');
 const history = [];
 let currentSessionId = null;
@@ -848,6 +1053,9 @@ function renderSessionMessages(messages) {
     const container = add(message.role, message.content || '', who);
     if (message.role === 'assistant' && message.tool_trace && message.tool_trace.length) {
       addToolTrace(container, message.tool_trace);
+    }
+    if (message.role === 'assistant' && message.citations) {
+      markCitations(container.querySelector('.bubble'), message.citations);
     }
     if (message.role === 'assistant' && message.usage) {
       renderUsage(container, message.usage);
@@ -1160,6 +1368,134 @@ function decorateAnswer(bubble) {
   bubble.appendChild(details);
 }
 
+async function refreshIndexStatus() {
+  if (!indexStatus) return;
+  try {
+    const status = await fetchJson('/api/index-status');
+    if (!status.available) {
+      indexStatus.textContent = 'Index freshness unknown';
+      return;
+    }
+    const when = status.generated_at ? new Date(status.generated_at) : null;
+    indexStatus.textContent = when && !Number.isNaN(when.getTime())
+      ? `Indexed ${when.toLocaleString()}`
+      : 'Index metadata loaded';
+    indexStatus.title = `${Number((status.repos || []).length)} repos tracked`;
+  } catch (error) {
+    indexStatus.textContent = 'Index status unavailable';
+  }
+}
+
+function usageMetric(label, value) {
+  return `<div class="usage-metric"><span>${escapeHtml(label)}</span><strong>${formatCount(value)}</strong></div>`;
+}
+
+function renderUsageDashboard(data) {
+  const body = usagePanel.querySelector('.usage-body');
+  const total = data.total || {};
+  const rows = (data.by_day || []).map((day) => (
+    `<tr><td>${escapeHtml(day.date)}</td><td>${formatCount(day.total_tokens)}</td>`
+    + `<td>${formatCount(day.total_nano_aiu)}</td><td>${formatCount(day.model_calls)}</td></tr>`
+  )).join('');
+  body.innerHTML = ''
+    + '<div class="usage-grid">'
+    + usageMetric('Sessions', data.session_count || 0)
+    + usageMetric('Answers', total.answers || 0)
+    + usageMetric('Tokens', total.total_tokens || 0)
+    + usageMetric('Nano AIU', total.total_nano_aiu || 0)
+    + '</div>'
+    + '<table class="usage-days"><thead><tr><th>Date</th><th>Tokens</th><th>Nano AIU</th><th>Calls</th></tr></thead>'
+    + `<tbody>${rows || '<tr><td colspan="4">No usage recorded yet</td></tr>'}</tbody></table>`
+    + `<p class="usage-note">${escapeHtml(data.unit_note || '')}</p>`;
+}
+
+async function openUsageDashboard() {
+  usagePanel.hidden = false;
+  usagePanel.querySelector('.usage-body').textContent = 'Loading...';
+  try {
+    renderUsageDashboard(await fetchJson('/api/usage'));
+  } catch (error) {
+    usagePanel.querySelector('.usage-body').textContent = 'Failed: ' + error.message;
+  }
+}
+
+function markCitations(bubble, report) {
+  if (!bubble || !report) return;
+  const status = {};
+  (report.items || []).forEach((item) => {
+    status[item.ref] = item;
+  });
+
+  bubble.querySelectorAll('code.cite').forEach((code) => {
+    const ref = (code.textContent || '').trim();
+    const item = status[ref];
+    if (!item) return;
+    code.classList.add(item.ok ? 'cite-ok' : 'cite-bad');
+    if (!item.ok) code.title = 'Unverified: ' + (item.reason || 'citation not verified');
+  });
+
+  const total = Number(report.total) || 0;
+  const verified = Number(report.verified) || 0;
+  const chip = document.createElement('div');
+  chip.className = 'cite-summary ' + (total && verified === total ? 'is-ok' : (total ? 'is-bad' : ''));
+  chip.textContent = total
+    ? `${verified}/${total} citations verified against source`
+    : 'no citations to verify';
+
+  const wrap = bubble.querySelector('.evidence-section') || bubble;
+  wrap.appendChild(chip);
+}
+
+function parseCite(text) {
+  const match = (text || '').trim().match(/^(.*?)(?::(\d+))?(?:-\d+)?$/);
+  return match ? {path: match[1], line: match[2] ? Number(match[2]) : null} : null;
+}
+
+async function openSource(ref) {
+  const citation = parseCite(ref);
+  if (!citation || !citation.path) return;
+
+  const panel = document.getElementById('source-panel');
+  const title = panel.querySelector('.src-title');
+  const body = panel.querySelector('.src-body');
+  panel.hidden = false;
+  title.textContent = ref;
+  body.textContent = 'Loading...';
+
+  const url = '/api/source?path=' + encodeURIComponent(citation.path)
+    + (citation.line ? '&line=' + encodeURIComponent(citation.line) : '');
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      body.textContent = data.error || `Request failed (${response.status})`;
+      return;
+    }
+
+    body.innerHTML = '';
+    (data.lines || []).forEach((line) => {
+      const row = document.createElement('div');
+      row.className = 'src-line' + (line.n === data.line ? ' hit' : '');
+
+      const num = document.createElement('span');
+      num.className = 'src-n';
+      num.textContent = line.n;
+
+      const code = document.createElement('span');
+      code.className = 'src-t';
+      code.textContent = line.text || '';
+
+      row.append(num, code);
+      body.appendChild(row);
+    });
+
+    const hit = body.querySelector('.hit');
+    if (hit) hit.scrollIntoView({block: 'center'});
+  } catch (error) {
+    body.textContent = 'Failed: ' + error.message;
+  }
+}
+
 function setBubbleContent(bubble, text, renderMarkdownContent = false) {
   if (renderMarkdownContent) {
     bubble.classList.add('markdown');
@@ -1209,6 +1545,31 @@ function addToolTrace(container, trace) {
   container.appendChild(details);
 }
 
+function showLiveTools(container, trace, completed = false) {
+  const existing = container.querySelector('.tools');
+  if (existing) existing.remove();
+  if (!trace.length) return;
+  const details = document.createElement('details');
+  details.className = 'tools';
+  details.open = true;
+
+  const summary = document.createElement('summary');
+  summary.textContent = `${trace.length} retrieval step${trace.length === 1 ? '' : 's'} ${completed ? 'completed' : 'running'}`;
+
+  const list = document.createElement('div');
+  list.className = 'tools-list';
+  trace.forEach((item) => {
+    const chip = document.createElement('span');
+    chip.className = 'tool-chip';
+    chip.textContent = item.tool || 'tool';
+    list.appendChild(chip);
+  });
+
+  details.append(summary, list);
+  container.appendChild(details);
+  log.scrollTop = log.scrollHeight;
+}
+
 function formatCount(value) {
   return (Number(value) || 0).toLocaleString('en-US');
 }
@@ -1246,7 +1607,9 @@ async function ask(text) {
     if (d.error) {
       setBubbleContent(pending.querySelector('.bubble'), 'Error: ' + d.error, false);
     } else {
-      setBubbleContent(pending.querySelector('.bubble'), d.answer || '(empty)', true);
+      const bubble = pending.querySelector('.bubble');
+      setBubbleContent(bubble, d.answer || '(empty)', true);
+      markCitations(bubble, d.citations);
       history.push({role:'assistant', content:d.answer || ''});
       if (d.tool_trace && d.tool_trace.length) addToolTrace(pending, d.tool_trace);
       if (d.usage) renderUsage(pending, d.usage);
@@ -1263,12 +1626,102 @@ async function ask(text) {
   q.focus();
 }
 
+async function askStream(text) {
+  add('user', text, 'you');
+  history.push({role:'user', content:text});
+  const pending = add('assistant', '', 'assistant');
+  const bubble = pending.querySelector('.bubble');
+  bubble.classList.add('loading');
+  bubble.textContent = 'Working...';
+  setBusy(true);
+
+  const trace = [];
+  let answer = '';
+  let started = false;
+
+  try {
+    const response = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: text, session_id: currentSessionId})
+    });
+
+    if (!response.ok || !response.body) {
+      let message = `Request failed (${response.status})`;
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch (error) {}
+      throw new Error(message);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line.trim()) continue;
+
+        const event = JSON.parse(line);
+        if (event.type === 'tool_start') {
+          trace.push({tool: event.name || 'tool'});
+          showLiveTools(pending, trace);
+        } else if (event.type === 'token') {
+          if (!started) {
+            bubble.classList.remove('loading');
+            bubble.textContent = '';
+            started = true;
+          }
+          answer += event.text || '';
+          bubble.textContent = answer;
+          log.scrollTop = log.scrollHeight;
+        } else if (event.type === 'done') {
+          answer = event.answer || answer;
+          bubble.classList.remove('loading');
+          setBubbleContent(bubble, answer || '(empty)', true);
+          markCitations(bubble, event.citations);
+          history.push({role:'assistant', content: answer || ''});
+          if (event.tool_trace && event.tool_trace.length) showLiveTools(pending, event.tool_trace, true);
+          if (event.usage) renderUsage(pending, event.usage);
+          if (event.session) {
+            currentSessionId = event.session.id;
+            await refreshSessions(currentSessionId);
+          }
+        } else if (event.type === 'error') {
+          bubble.classList.remove('loading');
+          setBubbleContent(bubble, 'Error: ' + event.error, false);
+        }
+      }
+    }
+  } catch (error) {
+    bubble.classList.remove('loading');
+    setBubbleContent(bubble, 'Request failed: ' + error.message, false);
+  } finally {
+    setBusy(false);
+    q.focus();
+  }
+}
+
 document.querySelectorAll('.prompt-card').forEach((button) => {
   button.addEventListener('click', () => {
     q.value = button.dataset.prompt || '';
     q.focus();
   });
 });
+
+document.addEventListener('click', (event) => {
+  const pill = event.target.closest('code.cite');
+  if (pill) openSource(pill.textContent || '');
+});
+
+usageButton.addEventListener('click', openUsageDashboard);
 
 sessionSelect.addEventListener('change', async () => {
   if (sessionSelect.value === currentSessionId) return;
@@ -1299,7 +1752,7 @@ f.addEventListener('submit', e => {
   const t = q.value.trim();
   if (!t) return;
   q.value = '';
-  ask(t);
+  askStream(t);
 });
 
 q.addEventListener('keydown', e => {
@@ -1311,6 +1764,7 @@ q.addEventListener('keydown', e => {
 
 resetLog(true);
 initializeSessions();
+refreshIndexStatus();
 </script>
 </body>
 </html>

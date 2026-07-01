@@ -8,7 +8,7 @@ def _load():
     fwd = collections.defaultdict(set)   # repo -> repos it depends on
     rev = collections.defaultdict(set)   # repo -> repos that depend on it
     try:
-        with open(config.EDGES_CSV, newline='', encoding='utf-8') as f:
+        with open(config.EDGES_CSV, newline='', encoding='utf-8-sig') as f:
             for r in csv.DictReader(f):
                 a = (r.get('from_repo') or '').strip()
                 b = (r.get('to_repo') or '').strip()

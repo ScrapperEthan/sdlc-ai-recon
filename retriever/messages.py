@@ -8,7 +8,7 @@ _EDGE_COLS = ('producer_repo', 'destination', 'consumer_repo', 'routing_source',
 
 def _load_edges():
     try:
-        with open(config.MESSAGE_EDGES_CSV, newline='', encoding='utf-8') as f:
+        with open(config.MESSAGE_EDGES_CSV, newline='', encoding='utf-8-sig') as f:
             return list(csv.DictReader(f))
     except FileNotFoundError:
         return []
@@ -42,7 +42,7 @@ def routes_for_repo(repo):
 
 def _load_usecase():
     try:
-        with open(config.USECASE_SNAPSHOT_CSV, newline='', encoding='utf-8') as f:
+        with open(config.USECASE_SNAPSHOT_CSV, newline='', encoding='utf-8-sig') as f:
             rows = list(csv.DictReader(f))
         cols = list(rows[0].keys()) if rows else []
         return rows, cols

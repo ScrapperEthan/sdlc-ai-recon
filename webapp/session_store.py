@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from . import config
+from . import llm_usage
 
 _LOCK = threading.Lock()
 
@@ -80,6 +81,7 @@ def _session_detail(session):
             "created_at": message.get("created_at"),
             "tool_trace": deepcopy(message.get("tool_trace") or []),
             "usage": deepcopy(message.get("usage")) if message.get("usage") else None,
+            "citations": deepcopy(message.get("citations")) if message.get("citations") else None,
         }
         for message in session.get("messages") or []
     ]
@@ -130,7 +132,7 @@ def history_for_agent(session_id):
     ]
 
 
-def append_exchange(session_id, question, answer, tool_trace=None, usage=None):
+def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None):
     question = (question or "").strip()
     if not question:
         raise ValueError("Question is required")
@@ -160,8 +162,54 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None):
                 "created_at": assistant_time,
                 "tool_trace": trace,
                 "usage": deepcopy(usage) if usage else None,
+                "citations": deepcopy(citations) if citations else None,
             }
         )
         session["updated_at"] = assistant_time
         _save_unlocked(data)
         return _session_detail(session)
+
+
+def _empty_usage_bucket():
+    bucket = {key: 0 for key in llm_usage.usage_keys()}
+    bucket["answers"] = 0
+    bucket["model_calls"] = 0
+    return bucket
+
+
+def _add_usage(bucket, usage):
+    if not usage:
+        return
+    bucket["answers"] += 1
+    bucket["model_calls"] += len(usage.get("calls") or [])
+    for key in llm_usage.usage_keys():
+        bucket[key] += int(usage.get(key) or 0)
+
+
+def usage_summary():
+    with _LOCK:
+        data = _load_unlocked()
+        total = _empty_usage_bucket()
+        by_day = {}
+        session_count = len(data.get("sessions") or [])
+        for session in data.get("sessions") or []:
+            for message in session.get("messages") or []:
+                if message.get("role") != "assistant":
+                    continue
+                usage = message.get("usage")
+                if not usage:
+                    continue
+                day = (message.get("created_at") or session.get("updated_at") or "")[:10] or "unknown"
+                by_day.setdefault(day, _empty_usage_bucket())
+                _add_usage(total, usage)
+                _add_usage(by_day[day], usage)
+
+    return {
+        "session_count": session_count,
+        "total": total,
+        "by_day": [
+            {"date": day, **bucket}
+            for day, bucket in sorted(by_day.items(), reverse=True)
+        ],
+        "unit_note": "nano-AIU is the raw copilot-api usage field; no dollar mapping is applied.",
+    }

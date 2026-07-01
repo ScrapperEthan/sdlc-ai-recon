@@ -15,6 +15,10 @@ def empty_usage():
     }
 
 
+def usage_keys():
+    return ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "total_nano_aiu")
+
+
 def add_call(total, message):
     """Fold one model message's usage into `total`. Returns `total`."""
     usage = message.get("_usage") or {}

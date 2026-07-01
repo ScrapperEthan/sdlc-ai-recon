@@ -12,19 +12,37 @@ from . import config
 from .llm_providers import copilot_responses, openai_chat
 
 
+def _provider_module():
+    provider = config.LLM_PROVIDER
+    if provider == "copilot_responses":
+        return copilot_responses
+    if provider == "openai_chat":
+        return openai_chat
+    raise RuntimeError(
+        f"Unknown LLM_PROVIDER: {provider!r} (expected 'copilot_responses' or 'openai_chat')"
+    )
+
+
 def chat(messages, tools=None, temperature=0):
     """Route to the configured provider; return an OpenAI chat-style message."""
     if config.LLM_MOCK:
         return _mock(messages, tools)
 
-    provider = config.LLM_PROVIDER
-    if provider == "copilot_responses":
-        return copilot_responses.chat(messages, tools, temperature)
-    if provider == "openai_chat":
-        return openai_chat.chat(messages, tools, temperature)
-    raise RuntimeError(
-        f"Unknown LLM_PROVIDER: {provider!r} (expected 'copilot_responses' or 'openai_chat')"
-    )
+    return _provider_module().chat(messages, tools, temperature)
+
+
+def stream_text(message):
+    """Yield assistant text in chunks, using provider streaming when available."""
+    if not config.LLM_MOCK:
+        provider = _provider_module()
+        streamer = getattr(provider, "stream_text", None)
+        if streamer and message.get("_stream_handle"):
+            yield from streamer(message)
+            return
+
+    text = message.get("content") or ""
+    for i in range(0, len(text), 24):
+        yield text[i:i + 24]
 
 
 def _mock(messages, tools):

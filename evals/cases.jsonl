@@ -1,0 +1,3 @@
+{"id":"ingress-to-job","question":"How does a message get from ingress-api to a tracking job?","must_call_tools":["search_code"],"must_mention_repos":["mc-hk-hase-api-ingress-core"],"must_cite_globs":["**/EventProducerService.java","**/*Listener.java"],"must_flag_partial":true}
+{"id":"eventpayload-impact","question":"If I change EventPayload, what breaks?","must_call_tools":["impact"],"must_mention_repos":[],"must_cite_globs":[],"must_flag_partial":false}
+{"id":"otx-consumers","question":"Which repos consume otx_bat_letter?","must_call_tools":["consumers"],"must_mention_repos":["mc-hk-hase-svc-bat-tracking-job"],"must_cite_globs":["**/*Listener.java"],"must_flag_partial":false}

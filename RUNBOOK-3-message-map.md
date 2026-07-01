@@ -69,3 +69,19 @@ Answer and save:
 qa-eval answers. Note explicitly how much of the producer→consumer mapping was
 provable vs config-driven/partial — that tells us how much config modelling the
 final assistant needs.
+
+## Producer coverage enrichment
+
+After the read-only dev/SCT export is placed at
+`index/tbl_event_router_usecase_topic.snapshot.csv`, run:
+
+```bash
+python message_map_enrich.py --dry-run
+python message_map_enrich.py
+```
+
+The script scans `mirror/` for unique topic/router enum constants, resolves
+symbolic destinations in `index/message_edges.csv` to literal topic strings when
+the enum evidence is provable, and prints producer coverage plus the remaining
+partial ratio. Keep all generated data in `index/`; never write into production
+repos.

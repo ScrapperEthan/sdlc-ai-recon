@@ -9,9 +9,10 @@ Run from the workspace root (where mirror/, recon_out/, index/ live):
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import agent, config, session_store
+from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
 INDEX = os.path.join(HERE, "static", "index.html")
@@ -39,8 +40,36 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             with open(INDEX, "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
+        elif path == "/api/source":
+            qs = parse_qs(urlparse(self.path).query)
+            relpath = (qs.get("path") or [""])[0]
+            raw_line = (qs.get("line") or [""])[0]
+            try:
+                line = int(raw_line) if raw_line else None
+            except ValueError:
+                line = None
+            try:
+                self._send_json(200, rcode.read_window(relpath, line))
+            except ValueError:
+                self._send_json(403, {"error": "forbidden path"})
+            except FileNotFoundError:
+                self._send_json(404, {"error": "not found"})
         elif path == "/api/sessions":
             self._send_json(200, {"sessions": session_store.list_sessions()})
+        elif path == "/api/index-status":
+            status_path = os.path.join(rconfig.INDEX_DIR, "last_indexed.json")
+            try:
+                with open(status_path, encoding="utf-8-sig") as handle:
+                    payload = json.load(handle)
+            except FileNotFoundError:
+                payload = {"available": False, "error": "index freshness metadata not found"}
+            except (OSError, json.JSONDecodeError) as e:
+                payload = {"available": False, "error": f"invalid index freshness metadata: {e}"}
+            else:
+                payload["available"] = True
+            self._send_json(200, payload)
+        elif path == "/api/usage":
+            self._send_json(200, session_store.usage_summary())
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
@@ -54,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/sessions"):
+        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions"):
             self._send(404, b"not found", "text/plain")
             return
 
@@ -82,6 +111,10 @@ class Handler(BaseHTTPRequestHandler):
                 session_id = session_store.create_session()["id"]
                 history = []
 
+            if path == "/api/chat/stream":
+                self._send_chat_stream(session_id, question, history)
+                return
+
             result = agent.answer(question, history)
             session = session_store.append_exchange(
                 session_id,
@@ -89,6 +122,7 @@ class Handler(BaseHTTPRequestHandler):
                 result.get("answer") or "",
                 result.get("tool_trace"),
                 result.get("usage"),
+                result.get("citations"),
             )
             result["session"] = {
                 "id": session["id"],
@@ -103,6 +137,46 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON request body"})
         except Exception as e:  # noqa: BLE001
             self._send_json(500, {"error": str(e)})
+
+    def _send_chat_stream(self, session_id, question, history):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        def emit(payload):
+            line = json.dumps(payload, ensure_ascii=False) + "\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            for event in agent.answer_events(question, history):
+                if event.get("type") == "done":
+                    session = session_store.append_exchange(
+                        session_id,
+                        question,
+                        event.get("answer") or "",
+                        event.get("tool_trace"),
+                        event.get("usage"),
+                        event.get("citations"),
+                    )
+                    event["session"] = {
+                        "id": session["id"],
+                        "title": session["title"],
+                        "created_at": session["created_at"],
+                        "updated_at": session["updated_at"],
+                        "message_count": session["message_count"],
+                        "href": f"/api/sessions/{quote(session['id'])}",
+                    }
+                emit(event)
+        except Exception as e:  # noqa: BLE001
+            try:
+                emit({"type": "error", "error": str(e)})
+            except Exception:
+                pass
 
     def log_message(self, *args):
         pass

@@ -38,6 +38,18 @@ are production. You only read and explain.
    queue/topic) is often resolved from use-case configuration, NOT from code. If
    a connection can't be proven from source, say so and point to the relevant
    config/use-case file instead of guessing.
+6. **Don't stop at a thin wrapper.** Many service repos (e.g. `*-ingress-api`)
+   are thin Spring Boot shells whose real logic lives in a `*-core` library or the
+   shared starter, pulled in transitively — so the repo's own `pom.xml` may list
+   only the starter. Before concluding "no producing/handling code here," SEARCH
+   THE WHOLE MIRROR for the relevant classes (the publishing service, e.g.
+   `EventProducerService` / `publishIngressEvent`, or the topic enum value) and
+   check the `*-core` repos. The end-to-end flow is usually:
+   entry `*-api` → `*-ingress-core` (IngressService / EventProducerService) →
+   shared producer (`api-cloud-client` EventProducerManager) → SQS queue →
+   `*-tracking-job` listener → tracker. Trace as far as the code proves; only the
+   final use-case → concrete-topic hop is genuinely config/DB-driven — mark that
+   one partial, not the whole upstream.
 
 ## Style
 

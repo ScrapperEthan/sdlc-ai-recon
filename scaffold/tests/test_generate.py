@@ -159,13 +159,33 @@ class GenerateServiceTests(unittest.TestCase):
             # JSON environment link blanked; service name kept.
             self.assertIn('"environment": "<REVIEW>"', docprops)
             self.assertIn('"service": "payments"', docprops)
-            # api.meta is a JSON governance descriptor: EVERY string value is blanked
-            # except the service identity (org/business metadata must not be inherited).
+            # api.meta is a JSON governance descriptor: EVERY string value (incl. list
+            # items) is blanked except the service identity (assetName/contractFileName,
+            # rewritten to the new name). Bools / numbers / empty structures are kept.
             meta_obj = json.loads(api_meta)
-            self.assertEqual(meta_obj["service"], "payments")
-            for key, value in meta_obj.items():
-                if isinstance(value, str) and key != "service":
-                    self.assertEqual(value, "<REVIEW>", f"api.meta.{key} not sanitized")
+            identity = {"assetName", "contractFileName"}
+            self.assertEqual(meta_obj["assetName"], "payments")
+            self.assertEqual(meta_obj["contractFileName"], "payments")
+
+            def assert_sanitized(node):
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        if isinstance(value, (dict, list)):
+                            assert_sanitized(value)
+                        elif isinstance(value, str) and key not in identity:
+                            self.assertEqual(value, "<REVIEW>", f"api.meta.{key} not sanitized")
+                elif isinstance(node, list):
+                    for item in node:
+                        if isinstance(item, (dict, list)):
+                            assert_sanitized(item)
+                        elif isinstance(item, str):
+                            self.assertEqual(item, "<REVIEW>")
+
+            assert_sanitized(meta_obj)
+            # config flags / empty structures are kept as-is (not org values).
+            self.assertIs(meta_obj["autoIncrementAssetVersion"], True)
+            self.assertIs(meta_obj["privateAPI"], False)
+            self.assertEqual(meta_obj["dataModels"], [])
             # Legit content preserved.
             self.assertIn("const: payments", deploy)
             self.assertIn("title: Payments API", api)

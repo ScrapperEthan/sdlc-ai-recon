@@ -309,10 +309,12 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 # api.meta is a per-service governance/ownership descriptor where essentially every
-# value is org/business/account metadata the new service must supply itself. Rather
-# than chase individual keys, `aggressive` mode blanks EVERY string value except the
-# service's own identity (already rewritten to the new name).
-_META_IDENTITY_KEYS = frozenset({"service", "servicename", "name", "apiname", "artifactid"})
+# STRING value is org/business/account metadata the new service must supply itself.
+# Rather than chase individual keys, `aggressive` mode blanks every string (and string
+# list item) except the service's own identity — the keys below, which the name-rewrite
+# already set to the new service name. Booleans / numbers / empty structures are config
+# and structure, not org values, so they are left as-is.
+_META_IDENTITY_KEYS = frozenset({"assetname", "contractfilename"})
 
 
 def _sanitize_json(text: str, aggressive: bool = False) -> tuple[str, list[str]]:
@@ -339,8 +341,12 @@ def _sanitize_json(text: str, aggressive: bool = False) -> tuple[str, list[str]]
                     node[key] = SANITIZE_PLACEHOLDER
                     changed.append(key)
         elif isinstance(node, list):
-            for item in node:
-                walk(item)
+            for index, item in enumerate(node):
+                if isinstance(item, (dict, list)):
+                    walk(item)
+                elif aggressive and isinstance(item, str):
+                    node[index] = SANITIZE_PLACEHOLDER
+                    changed.append("<list-item>")
 
     walk(data)
     if not changed:

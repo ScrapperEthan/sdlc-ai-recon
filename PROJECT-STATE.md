@@ -38,6 +38,37 @@ system — so this is where we keep investing. Model + UI are swappable; the moa
 
 ---
 
+## Target architecture & future task flow
+
+**How the assistant works (mechanism).** The model does not memorize the code — it's a
+tool-using loop: a question triggers retrieval tools (`search_code`/`impact`/`trace`/
+`call_graph`…) that read pre-built indexes (code mirror, dependency graph, message map,
+CodeGraph), and it answers with `repo/path:line` citations. The indexes + tools are the
+durable asset (the moat); the model is swappable.
+
+**Scaling 15 → 390 repos — keep two things separate:**
+- **Indexing is FORCED to partition.** CodeGraph can't hold 390 repos in one graph
+  (~150 MB / 15 repos), so split the estate into per-domain bundles (public/shared, SMS,
+  PN, WhatsApp…), each with its own index — `group.py` bundles + `index/REPOMAP.md` so the
+  agent can "narrow first". **Invest here; this is the moat and the key 15→390 step.**
+- **Agent topology is a CHOICE.** Start with **ONE agent + a narrow-first router** (pick
+  the relevant domain(s), then query only those bundles). **Not** a multi-agent orchestra:
+  orchestration (routing, stitching answers, latency, cost, debugging) is fragile, and
+  HASE is event-driven / cross-domain by nature (flows span domains) — so a "domain" must
+  be a **storage partition, not a wall**. Multi-agent (orchestrator + domain specialists)
+  is a valid *later* evolution when a domain gets huge or you want parallelism/isolation —
+  it's the swappable brain, so defer it.
+
+**Future task pipeline (one task, end-to-end):**
+
+`read code → write spec.md → design → generate code → compile+test → diff → human review`
+
+Status: read 🟢 (retrieval) · generate 🟡 (`scaffold/` new modules + `change/` edits) ·
+diff 🟢 · compile+test ⏳ (blocked on toolchain) · **write-spec / design ⚪ not built —
+the pipeline's front-end is the next big gap.** "Read" comes first because the spec must
+be grounded in real code; serve it via the narrow-first router (a domain sub-agent only
+later, if needed).
+
 ## Current focus / recommended next: a thin **vertical slice** of the loop
 
 Rather than pushing right toward deploy, the highest-value next move is to close a

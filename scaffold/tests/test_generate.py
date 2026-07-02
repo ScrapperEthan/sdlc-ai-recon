@@ -141,6 +141,7 @@ class GenerateServiceTests(unittest.TestCase):
             deploy = (target / "SHP/DeployConfigSchema.yaml").read_text(encoding="utf-8")
             api = (target / "src/main/api/payments-openapi.yaml").read_text(encoding="utf-8")
             docprops = (target / "src/main/api/doc-properties.json").read_text(encoding="utf-8")
+            api_meta = (target / "src/main/api/api.meta").read_text(encoding="utf-8")
             review = (target / "REVIEW_DIFF.md").read_text(encoding="utf-8")
 
             # Branch policy blanked; projectKey (the service name) kept.
@@ -157,6 +158,10 @@ class GenerateServiceTests(unittest.TestCase):
             # JSON environment link blanked; service name kept.
             self.assertIn('"environment": "<REVIEW>"', docprops)
             self.assertIn('"service": "payments"', docprops)
+            # api.meta is JSON-shaped despite the .meta extension: account/org/team blanked.
+            for key in ("applicationId", "serviceLine", "teamName", "teamEmailAddress"):
+                self.assertIn(f'"{key}": "<REVIEW>"', api_meta)
+            self.assertIn('"service": "payments"', api_meta)
             # Legit content preserved.
             self.assertIn("const: payments", deploy)
             self.assertIn("title: Payments API", api)

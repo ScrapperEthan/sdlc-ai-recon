@@ -41,20 +41,39 @@ PLATFORM_FILE_PATHS = (
 SANITIZE_PLACEHOLDER = "<REVIEW>"
 SANITIZE_KEYS = frozenset(
     {
+        # sonar branch policy
         "sonar.branch.name",
         "sonar.newcode.referencebranch",
+        # SHP app config account/org/team
         "sonaraccountid",
         "serviceaccountid",
         "nexusiqorgname",
         "checkmarxteampath",
-        "baseuri",
+        # api.meta ownership / account / team (JSON-shaped descriptor)
+        "applicationid",
+        "serviceline",
+        "teamname",
+        "teamemail",
+        "teamemailaddress",
+        "supportgroup",
+        "supportcontact",
+        "costcenter",
+        "owner",
         "ownership",
         "account",
+        # RAML / environment
+        "baseuri",
         "environment",
         "environmentlink",
     }
 )
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+_EMAIL_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.[A-Za-z]{2,}")
+
+
+def _value_is_sensitive(value: str) -> bool:
+    """A value whose shape (URL or email) marks it inherited/environment-specific."""
+    return bool(_URL_RE.search(value) or _EMAIL_RE.search(value))
 _PROP_LINE_RE = re.compile(r"^(?P<prefix>\s*(?P<key>[\w.\-]+)\s*=\s*)(?P<value>.+)$")
 _YAML_LINE_RE = re.compile(r"^(?P<prefix>\s*(?:-\s*)?(?P<key>[\w.\-]+)\s*:\s*)(?P<value>.+)$")
 
@@ -302,7 +321,7 @@ def _sanitize_json(text: str) -> tuple[str, list[str]]:
                 value = node[key]
                 if isinstance(value, (dict, list)):
                     walk(value)
-                elif _is_sensitive_key(key) or (isinstance(value, str) and _URL_RE.search(value)):
+                elif _is_sensitive_key(key) or (isinstance(value, str) and _value_is_sensitive(value)):
                     node[key] = SANITIZE_PLACEHOLDER
                     changed.append(key)
         elif isinstance(node, list):
@@ -321,7 +340,7 @@ def _sanitize_lines(text: str, pattern: "re.Pattern[str]") -> tuple[str, list[st
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\n")
         match = pattern.match(body)
-        if match and (_is_sensitive_key(match.group("key")) or _URL_RE.search(match.group("value"))):
+        if match and (_is_sensitive_key(match.group("key")) or _value_is_sensitive(match.group("value"))):
             newline = line[len(body):]
             out.append(f"{match.group('prefix')}{SANITIZE_PLACEHOLDER}{newline}")
             changed.append(match.group("key"))
@@ -331,16 +350,23 @@ def _sanitize_lines(text: str, pattern: "re.Pattern[str]") -> tuple[str, list[st
 
 
 def _sanitize_reference_text(text: str, rel_path: str) -> tuple[str, list[str]]:
-    """Blank inherited governance/environment values (and any URL) in a copied file."""
+    """Blank inherited governance/environment values (URLs, emails) in a copied file."""
     lower = rel_path.lower()
-    if lower.endswith(".json"):
-        return _sanitize_json(text)
+    # api.meta is JSON content despite the .meta extension — parse it as JSON when it
+    # actually parses; otherwise fall through to the line-based handling.
+    if lower.endswith(".json") or lower.endswith(".meta"):
+        try:
+            json.loads(text)
+            return _sanitize_json(text)
+        except ValueError:
+            pass
     pattern = _PROP_LINE_RE if lower.endswith(".properties") else _YAML_LINE_RE
     sanitized, changed = _sanitize_lines(text, pattern)
-    # Catch-all: any absolute URL a key:value line pass missed (e.g. bare list items).
-    sanitized, hits = _URL_RE.subn(SANITIZE_PLACEHOLDER, sanitized)
-    if hits:
-        changed = changed + ["<url>"]
+    # Catch-all: any URL / email a key:value line pass missed (e.g. bare list items).
+    sanitized, url_hits = _URL_RE.subn(SANITIZE_PLACEHOLDER, sanitized)
+    sanitized, email_hits = _EMAIL_RE.subn(SANITIZE_PLACEHOLDER, sanitized)
+    if url_hits or email_hits:
+        changed = changed + ["<url/email>"]
     return sanitized, changed
 
 

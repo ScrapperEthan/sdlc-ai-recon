@@ -1,0 +1,7 @@
+{
+  "applicationId": "FIXTURE-APPID",
+  "serviceLine": "Fixture Service Line",
+  "teamName": "Fixture Team",
+  "teamEmailAddress": "fixture-team@noexternalmail.example.com",
+  "service": "mc-hk-hase-ingress-api"
+}

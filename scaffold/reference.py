@@ -24,6 +24,13 @@ DEFAULTS = {
 PARENT_REPO = "mc-hk-hase-api-parent"
 STARTER_REPO = "mc-hk-hase-api-starter"
 DEFAULT_REFERENCE_REPO = "mc-hk-hase-ingress-api"
+PLATFORM_FILE_PATHS = (
+    "sonar-project.properties",
+    "SHP/AppConfigFiles/app.yaml",
+    "SHP/AppConfigSchema.yaml",
+    "SHP/DeployConfigSchema.yaml",
+    ".gitignore",
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,13 @@ class TemplateDetails:
     build_stanza: str | None = None
     build_citation: str | None = None
     notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReferenceFile:
+    rel_path: str
+    text: str
+    citation: str
 
 
 def _clone_defaults() -> dict:
@@ -92,7 +106,7 @@ def _line_with(pom_path: str, tag: str, expected: str | None = None) -> int:
     return 1
 
 
-def _repo_ref(mirror: str, path: str, line: int) -> str:
+def _repo_ref(mirror: str, path: str, line: int = 1) -> str:
     rel = os.path.relpath(path, mirror).replace(os.sep, "/")
     return f"{rel}:{line}"
 
@@ -134,10 +148,56 @@ def _package_from_java(path: str) -> tuple[str, int] | None:
     return None
 
 
-def _detect_base_package(mirror: str, reference: str) -> tuple[str, str | None]:
+def _reference_artifact_id(mirror: str, reference: str) -> str:
+    pom_path = os.path.join(mirror, reference, "pom.xml")
+    if os.path.exists(pom_path):
+        try:
+            artifact_id = _coords(pom_path).get("artifactId")
+            if artifact_id:
+                return artifact_id
+        except ET.ParseError:
+            pass
+    return reference
+
+
+def _reference_short_name(reference: str, artifact_id: str | None = None) -> str:
+    value = artifact_id or reference
+    candidates = [value]
+    if reference != value:
+        candidates.append(reference)
+
+    for candidate in candidates:
+        name = candidate
+        if name.startswith("mc-hk-hase-"):
+            name = name[len("mc-hk-hase-") :]
+        if name.startswith("api-") and name.endswith("-core"):
+            name = name[len("api-") : -len("-core")]
+        elif name.endswith("-api"):
+            name = name[: -len("-api")]
+        elif name.startswith("svc-") and name.endswith("-job"):
+            name = name[len("svc-") : -len("-job")]
+        name = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+        if name:
+            return name
+
+    return "service"
+
+
+def _derive_base_namespace(package_name: str, reference_short: str) -> str | None:
+    parts = package_name.split(".")
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].lower() == reference_short.lower():
+            base_parts = parts[:index]
+            return ".".join(base_parts) if base_parts else None
+    return None
+
+
+def _detect_reference_namespace(mirror: str, reference: str) -> tuple[str, str | None, str | None, str]:
     reference_root = os.path.join(mirror, reference, "src", "main", "java")
+    artifact_id = _reference_artifact_id(mirror, reference)
+    reference_short = _reference_short_name(reference, artifact_id)
     if not os.path.isdir(reference_root):
-        return DEFAULTS["base_package"], None
+        return DEFAULTS["base_package"], None, None, reference_short
 
     packages: list[tuple[str, str, int]] = []
     for dirpath, dirnames, filenames in os.walk(reference_root):
@@ -152,23 +212,111 @@ def _detect_base_package(mirror: str, reference: str) -> tuple[str, str | None]:
                 packages.append((package_name, path, line))
 
     if not packages:
-        return DEFAULTS["base_package"], None
+        return DEFAULTS["base_package"], None, None, reference_short
+
+    packages.sort(
+        key=lambda item: (
+            item[0].split(".")[-1].lower() != reference_short.lower(),
+            not os.path.basename(item[1]).endswith("Application.java"),
+            item[0],
+        )
+    )
 
     for package_name, path, line in packages:
-        if package_name == DEFAULTS["base_package"] or package_name.startswith(DEFAULTS["base_package"] + "."):
-            return DEFAULTS["base_package"], _repo_ref(mirror, path, line)
+        base_namespace = _derive_base_namespace(package_name, reference_short)
+        if base_namespace:
+            return base_namespace, _repo_ref(mirror, path, line), package_name, reference_short
 
-    split_packages = [package_name.split(".") for package_name, _, _ in packages]
-    common = split_packages[0]
-    for parts in split_packages[1:]:
-        keep = 0
-        for left, right in zip(common, parts):
-            if left != right:
-                break
-            keep += 1
-        common = common[:keep]
-    base_package = ".".join(common) if common else DEFAULTS["base_package"]
-    return base_package, _repo_ref(mirror, packages[0][1], packages[0][2])
+    return DEFAULTS["base_package"], _repo_ref(mirror, packages[0][1], packages[0][2]), packages[0][0], reference_short
+
+
+def _transform_reference_text(text: str, reference: str, details: TemplateDetails, slug: str, package: str) -> str:
+    reference_package = details.template.get("reference_package")
+    reference_short = details.template.get("reference_short_name") or _reference_short_name(reference)
+    class_stem = "".join(part[:1].upper() + part[1:] for part in re.split(r"[^a-zA-Z0-9]+", slug) if part)
+    reference_class_stem = reference_short[:1].upper() + reference_short[1:]
+    replacements = []
+    if reference_package:
+        replacements.extend(
+            [
+                (reference_package.replace(".", "/"), package.replace(".", "/")),
+                (reference_package, package),
+            ]
+        )
+    replacements.extend(
+        [
+            (reference, slug),
+            (reference_short.upper(), slug.upper()),
+            (reference_class_stem, class_stem or slug),
+            (reference_short, slug),
+        ]
+    )
+
+    transformed = text
+    for old, new in sorted(((old, new) for old, new in replacements if old), key=lambda pair: len(pair[0]), reverse=True):
+        transformed = transformed.replace(old, new)
+    return transformed
+
+
+def _load_reference_files(
+    mirror: str,
+    reference: str,
+    slug: str,
+    package: str,
+    rel_paths: tuple[str, ...],
+    details: TemplateDetails,
+) -> list[ReferenceFile]:
+    if not details.from_mirror:
+        return []
+
+    loaded: list[ReferenceFile] = []
+    reference_root = os.path.join(mirror, reference)
+    for rel_path in rel_paths:
+        normalized = rel_path.replace("/", os.sep)
+        source_path = os.path.join(reference_root, normalized)
+        if not os.path.isfile(source_path):
+            continue
+        with open(source_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        output_rel = _transform_reference_text(rel_path, reference, details, slug, package)
+        output_text = _transform_reference_text(text, reference, details, slug, package)
+        loaded.append(ReferenceFile(output_rel, output_text, _repo_ref(mirror, source_path)))
+    return loaded
+
+
+def load_platform_files(
+    mirror: str,
+    reference: str,
+    slug: str,
+    package: str,
+    details: TemplateDetails,
+) -> list[ReferenceFile]:
+    """Read and rewrite the reference repo's platform/config files."""
+    return _load_reference_files(mirror, reference, slug, package, PLATFORM_FILE_PATHS, details)
+
+
+def load_api_files(
+    mirror: str,
+    reference: str,
+    slug: str,
+    package: str,
+    details: TemplateDetails,
+) -> list[ReferenceFile]:
+    """Read and rewrite contract files under the reference repo's src/main/api."""
+    if not details.from_mirror:
+        return []
+
+    api_root = os.path.join(mirror, reference, "src", "main", "api")
+    if not os.path.isdir(api_root):
+        return []
+
+    rel_paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(api_root):
+        dirnames[:] = [name for name in dirnames if name not in {"target", "build", ".git"}]
+        for filename in sorted(filenames):
+            source_path = os.path.join(dirpath, filename)
+            rel_paths.append(os.path.relpath(source_path, os.path.join(mirror, reference)).replace(os.sep, "/"))
+    return _load_reference_files(mirror, reference, slug, package, tuple(rel_paths), details)
 
 
 def load_details(mirror: str = "mirror", reference: str = DEFAULT_REFERENCE_REPO) -> TemplateDetails:
@@ -182,12 +330,15 @@ def load_details(mirror: str = "mirror", reference: str = DEFAULT_REFERENCE_REPO
 
     parent = _coords(parent_pom)
     starter = _coords(starter_pom)
-    base_package, base_package_ref = _detect_base_package(mirror, reference)
+    base_namespace, base_namespace_ref, reference_package, reference_short = _detect_reference_namespace(mirror, reference)
 
     template = {
         "parent": parent,
         "starter": starter,
-        "base_package": base_package,
+        "base_package": base_namespace,
+        "base_namespace": base_namespace,
+        "reference_package": reference_package,
+        "reference_short_name": reference_short,
     }
 
     citations = {
@@ -202,8 +353,9 @@ def load_details(mirror: str = "mirror", reference: str = DEFAULT_REFERENCE_REPO
             _line_with(starter_pom, "artifactId", starter.get("artifactId")),
         ),
     }
-    if base_package_ref:
-        citations["base_package"] = base_package_ref
+    if base_namespace_ref:
+        citations["base_package"] = base_namespace_ref
+        citations["base_namespace"] = base_namespace_ref
 
     reference_pom = os.path.join(mirror, reference, "pom.xml")
     build_stanza, build_citation = _extract_build_stanza(reference_pom, mirror)

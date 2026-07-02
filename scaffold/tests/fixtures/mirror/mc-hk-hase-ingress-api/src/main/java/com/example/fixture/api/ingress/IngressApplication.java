@@ -1,4 +1,4 @@
-package com.hsbc.hase.ingress;
+package com.example.fixture.api.ingress;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

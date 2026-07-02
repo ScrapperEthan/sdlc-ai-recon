@@ -1,0 +1,7 @@
+type: object
+properties:
+  ingress:
+    type: object
+    properties:
+      sample:
+        type: object

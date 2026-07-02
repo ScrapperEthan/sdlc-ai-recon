@@ -7,7 +7,13 @@ import shutil
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 
-from .reference import DEFAULT_REFERENCE_REPO, load_details, validate_reference
+from .reference import (
+    DEFAULT_REFERENCE_REPO,
+    load_api_files,
+    load_details,
+    load_platform_files,
+    validate_reference,
+)
 
 
 def _slug(value):
@@ -29,6 +35,30 @@ def _package_path(package):
     if not re.match(r"^[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*$", package):
         raise ValueError(f"invalid Java package: {package}")
     return os.path.join(*package.split("."))
+
+
+def _package_segment(slug):
+    segment = re.sub(r"[^a-zA-Z0-9_]+", "_", slug).strip("_").lower()
+    if not segment:
+        raise ValueError("service name does not contain a valid Java package segment")
+    if segment[0].isdigit():
+        segment = "_" + segment
+    return segment
+
+
+def _resolve_package(package, slug, details):
+    if package:
+        _package_path(package)
+        return package, "override"
+    if not details.from_mirror:
+        raise ValueError("--package is required when the mirror is absent")
+    if "base_namespace" not in details.citations:
+        raise ValueError("reference service did not expose a cited base namespace")
+    base_namespace = details.template.get("base_namespace") or details.template.get("base_package")
+    if not base_namespace:
+        raise ValueError("reference service did not expose a derivable base namespace")
+    _package_path(base_namespace)
+    return f"{base_namespace}.{_package_segment(slug)}", "derived"
 
 
 def _inside(root, path):
@@ -92,13 +122,17 @@ def _pom_xml(slug, details):
 """
 
 
-def _review_diff(slug, files, package, reference, details):
+def _review_diff(slug, files, package, reference, details, directories, file_sources, package_source, api_note):
     listed_files = sorted([*files, "REVIEW_DIFF.md"])
+    listed_dirs = sorted(directories)
     lines = [
         f"# Review Diff for {slug}",
         "",
         "Generated files:",
         *[f"- {rel}" for rel in listed_files],
+        "",
+        "Generated directories:",
+        *[f"- {rel}/" for rel in listed_dirs],
         "",
         "Template evidence:",
     ]
@@ -107,9 +141,13 @@ def _review_diff(slug, files, package, reference, details):
             [
                 f"- Parent POM coordinates: {details.citations.get('parent', 'mirror anchor missing')}",
                 f"- Starter dependency coordinates: {details.citations.get('starter', 'mirror anchor missing')}",
-                f"- Base package convention: {details.citations.get('base_package', 'documented default com.hsbc.hase')}",
+                f"- Base namespace convention: {details.citations.get('base_namespace', 'reference package citation missing')}",
             ]
         )
+        if package_source == "derived":
+            lines.append(f"- Generated package: {package} (derived from the base namespace above)")
+        else:
+            lines.append(f"- Generated package: {package} (explicit --package override)")
         if details.build_citation:
             lines.append(f"- Spring Boot build stanza copied from: {details.build_citation}")
     else:
@@ -117,8 +155,17 @@ def _review_diff(slug, files, package, reference, details):
             [
                 "- Mirror anchors unavailable; used documented fallback defaults from scaffold/reference.py.",
                 "- Internal Codex must confirm parent/starter coordinates against the real mirror before use.",
+                "- SHP and sonar platform files are generated only when the reference mirror is available.",
             ]
         )
+
+    if file_sources:
+        lines.extend(["", "Reference-derived files:"])
+        for rel, citation in sorted(file_sources.items()):
+            lines.append(f"- {rel}: {citation}")
+
+    if api_note:
+        lines.extend(["", "API contract layout:", f"- {api_note}"])
 
     lines.extend(
         [
@@ -127,6 +174,8 @@ def _review_diff(slug, files, package, reference, details):
             "- Confirm the generated parent POM coordinates against mc-hk-hase-api-parent.",
             "- Confirm the generated starter dependency against mc-hk-hase-api-starter.",
             f"- Confirm package {package} matches the target domain and the {reference} convention.",
+            "- Confirm the service is starter-only and does not declare a dedicated *-core dependency.",
+            "- Confirm SHP/sonar values contain no secrets or environment-specific values before porting.",
             "- Replace sample listener queue and payload with reviewed message contracts.",
             "- Keep this output in scratch/ until a human explicitly ports it to a production repo.",
         ]
@@ -136,7 +185,7 @@ def _review_diff(slug, files, package, reference, details):
 
 def generate_service(
     service_name,
-    package,
+    package=None,
     out_dir="scratch",
     force=False,
     reference=DEFAULT_REFERENCE_REPO,
@@ -144,7 +193,7 @@ def generate_service(
     with_core=False,
 ):
     if with_core:
-        raise ValueError("--with-core is reserved for Phase 2 after the repo-vs-module decision")
+        raise ValueError("--with-core is explicitly deferred; Phase 2 keeps generated services starter-only")
     slug = _slug(service_name)
     class_name = _class_name(slug)
     out_root = os.path.abspath(out_dir)
@@ -152,6 +201,8 @@ def generate_service(
     mirror_root = os.path.abspath(mirror)
     if _same_or_inside(mirror_root, out_root):
         raise ValueError("output root must not be inside the read-only mirror")
+    details = load_details(mirror=mirror, reference=reference)
+    package, package_source = _resolve_package(package, slug, details)
     target = _safe_join(out_root, slug)
     package_dir = _package_path(package)
     if os.path.exists(target):
@@ -159,7 +210,17 @@ def generate_service(
             raise FileExistsError(f"{target} already exists; pass --force to replace it")
         shutil.rmtree(target)
 
-    details = load_details(mirror=mirror, reference=reference)
+    directories = {
+        os.path.join("src", "main", "api"),
+        os.path.join("src", "test", "java", package_dir),
+    }
+    file_sources = {}
+    readme_note = ""
+    if not details.from_mirror:
+        readme_note = (
+            "\nNOTE: SHP and sonar platform files are generated only when the reference mirror is available. "
+            "Re-run on the internal mirror box to derive them.\n"
+        )
     files = {
         "pom.xml": _pom_xml(slug, details),
         os.path.join("src", "main", "resources", "application.yml"): f"""spring:
@@ -178,6 +239,7 @@ Scratch scaffold generated at {_timestamp()} for human review.
 
 This output is intentionally outside production repos. Review package names,
 parent POM conventions, headers/interceptors, and messaging bindings before use.
+{readme_note}
 """,
         os.path.join("src", "main", "java", package_dir, f"{class_name}Application.java"): f"""package {package};
 
@@ -219,9 +281,55 @@ public class SampleMessageListener {{
     }}
 }}
 """,
-    }
-    files["REVIEW_DIFF.md"] = _review_diff(slug, files, package, reference, details)
+        os.path.join("src", "test", "java", package_dir, f"{class_name}ApplicationTest.java"): f"""package {package};
 
+import org.junit.jupiter.api.Test;
+
+class {class_name}ApplicationTest {{
+    @Test
+    void contextLoads() {{
+    }}
+}}
+""",
+    }
+
+    if details.from_mirror:
+        for reference_file in load_platform_files(mirror, reference, slug, package, details):
+            files[reference_file.rel_path] = reference_file.text
+            file_sources[reference_file.rel_path] = reference_file.citation
+        api_files = load_api_files(mirror, reference, slug, package, details)
+        for reference_file in api_files:
+            files[reference_file.rel_path] = reference_file.text
+            file_sources[reference_file.rel_path] = reference_file.citation
+        if api_files:
+            api_note = "src/main/api contract files were derived from the reference repo files listed above."
+        else:
+            api_note = "src/main/api/ was created empty because the reference repo did not expose contract files."
+    else:
+        files[".gitignore"] = """target/
+*.class
+.classpath
+.project
+.settings/
+.idea/
+*.iml
+"""
+        api_note = "src/main/api/ was created empty; contract stubs require the reference mirror."
+
+    files["REVIEW_DIFF.md"] = _review_diff(
+        slug,
+        files,
+        package,
+        reference,
+        details,
+        directories,
+        file_sources,
+        package_source,
+        api_note,
+    )
+
+    for rel in directories:
+        os.makedirs(_safe_join(target, rel), exist_ok=True)
     for rel, text in files.items():
         _write(_safe_join(target, rel), text)
 
@@ -231,14 +339,14 @@ public class SampleMessageListener {{
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate a scratch service scaffold.")
     parser.add_argument("service_name")
-    parser.add_argument("--package", required=True, help="base Java package, e.g. com.hsbc.hase.example")
+    parser.add_argument("--package", help="base Java package, e.g. com.hsbc.hase.example")
     parser.add_argument("--out-dir", default="scratch")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--reference", default=DEFAULT_REFERENCE_REPO)
     parser.add_argument("--with-core", action="store_true", help="reserved for Phase 2; currently rejected")
     args = parser.parse_args(argv)
     if args.with_core:
-        parser.error("--with-core is reserved for Phase 2 after the repo-vs-module decision")
+        parser.error("--with-core is explicitly deferred; Phase 2 keeps generated services starter-only")
 
     result = generate_service(
         args.service_name,

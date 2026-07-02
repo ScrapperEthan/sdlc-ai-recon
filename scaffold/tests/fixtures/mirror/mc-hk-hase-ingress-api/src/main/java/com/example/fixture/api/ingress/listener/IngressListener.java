@@ -1,4 +1,4 @@
-package com.hsbc.hase.ingress.listener;
+package com.example.fixture.api.ingress.listener;
 
 import org.springframework.jms.annotation.JmsListener;
 import org.springframework.stereotype.Component;

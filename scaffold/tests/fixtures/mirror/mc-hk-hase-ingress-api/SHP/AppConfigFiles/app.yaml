@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: mc-hk-hase-ingress-api
+
+ingress:
+  sample:
+    queue: ingress.sample.queue

@@ -1,0 +1,11 @@
+openapi: 3.0.3
+info:
+  title: Ingress API
+  version: 0.0.1
+paths:
+  /ingress/health:
+    get:
+      operationId: getIngressHealth
+      responses:
+        "200":
+          description: OK

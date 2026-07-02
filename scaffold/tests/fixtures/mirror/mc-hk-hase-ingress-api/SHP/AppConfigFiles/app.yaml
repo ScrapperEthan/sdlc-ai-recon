@@ -5,3 +5,9 @@ spring:
 ingress:
   sample:
     queue: ingress.sample.queue
+
+governance:
+  sonarAccountID: FIXTURE-ACCT
+  serviceAccountID: FIXTURE-SVC
+  nexusIQOrgName: FIXTURE-ORG
+  checkMarxTeamPath: /Fixture/Team

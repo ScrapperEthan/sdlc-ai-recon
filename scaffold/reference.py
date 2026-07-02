@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -32,6 +33,31 @@ PLATFORM_FILE_PATHS = (
     ".gitignore",
 )
 
+# When copying a reference repo's platform/API-metadata files, the reference
+# service's own governance / environment / account values must NOT be inherited
+# by the new service (a governance and correctness issue — see
+# docs/specs/scaffolding-p2-sanitize.md). Blank the value of any leaf key below
+# (case-insensitive) and any absolute URL to this placeholder. Easy to extend.
+SANITIZE_PLACEHOLDER = "<REVIEW>"
+SANITIZE_KEYS = frozenset(
+    {
+        "sonar.branch.name",
+        "sonar.newcode.referencebranch",
+        "sonaraccountid",
+        "serviceaccountid",
+        "nexusiqorgname",
+        "checkmarxteampath",
+        "baseuri",
+        "ownership",
+        "account",
+        "environment",
+        "environmentlink",
+    }
+)
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+_PROP_LINE_RE = re.compile(r"^(?P<prefix>\s*(?P<key>[\w.\-]+)\s*=\s*)(?P<value>.+)$")
+_YAML_LINE_RE = re.compile(r"^(?P<prefix>\s*(?:-\s*)?(?P<key>[\w.\-]+)\s*:\s*)(?P<value>.+)$")
+
 
 @dataclass(frozen=True)
 class TemplateDetails:
@@ -48,6 +74,7 @@ class ReferenceFile:
     rel_path: str
     text: str
     citation: str
+    sanitized: tuple = ()
 
 
 def _clone_defaults() -> dict:
@@ -258,6 +285,65 @@ def _transform_reference_text(text: str, reference: str, details: TemplateDetail
     return transformed
 
 
+def _is_sensitive_key(key: str) -> bool:
+    return key.strip().lower() in SANITIZE_KEYS
+
+
+def _sanitize_json(text: str) -> tuple[str, list[str]]:
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text, []
+    changed: list[str] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key in list(node):
+                value = node[key]
+                if isinstance(value, (dict, list)):
+                    walk(value)
+                elif _is_sensitive_key(key) or (isinstance(value, str) and _URL_RE.search(value)):
+                    node[key] = SANITIZE_PLACEHOLDER
+                    changed.append(key)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    if not changed:
+        return text, []
+    return json.dumps(data, indent=2) + "\n", changed
+
+
+def _sanitize_lines(text: str, pattern: "re.Pattern[str]") -> tuple[str, list[str]]:
+    changed: list[str] = []
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\n")
+        match = pattern.match(body)
+        if match and (_is_sensitive_key(match.group("key")) or _URL_RE.search(match.group("value"))):
+            newline = line[len(body):]
+            out.append(f"{match.group('prefix')}{SANITIZE_PLACEHOLDER}{newline}")
+            changed.append(match.group("key"))
+            continue
+        out.append(line)
+    return "".join(out), changed
+
+
+def _sanitize_reference_text(text: str, rel_path: str) -> tuple[str, list[str]]:
+    """Blank inherited governance/environment values (and any URL) in a copied file."""
+    lower = rel_path.lower()
+    if lower.endswith(".json"):
+        return _sanitize_json(text)
+    pattern = _PROP_LINE_RE if lower.endswith(".properties") else _YAML_LINE_RE
+    sanitized, changed = _sanitize_lines(text, pattern)
+    # Catch-all: any absolute URL a key:value line pass missed (e.g. bare list items).
+    sanitized, hits = _URL_RE.subn(SANITIZE_PLACEHOLDER, sanitized)
+    if hits:
+        changed = changed + ["<url>"]
+    return sanitized, changed
+
+
 def _load_reference_files(
     mirror: str,
     reference: str,
@@ -280,7 +366,10 @@ def _load_reference_files(
             text = handle.read()
         output_rel = _transform_reference_text(rel_path, reference, details, slug, package)
         output_text = _transform_reference_text(text, reference, details, slug, package)
-        loaded.append(ReferenceFile(output_rel, output_text, _repo_ref(mirror, source_path)))
+        output_text, sanitized = _sanitize_reference_text(output_text, output_rel)
+        loaded.append(
+            ReferenceFile(output_rel, output_text, _repo_ref(mirror, source_path), tuple(sanitized))
+        )
     return loaded
 
 

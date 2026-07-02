@@ -128,6 +128,41 @@ class GenerateServiceTests(unittest.TestCase):
             self.assertIn("sonar-project.properties: mc-hk-hase-ingress-api/sonar-project.properties:1", review)
             self.assertIn("src/main/api/payments-openapi.yaml: mc-hk-hase-ingress-api/src/main/api/ingress-openapi.yaml:1", review)
 
+    def test_sanitizes_inherited_governance_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = generate_service(
+                "payments",
+                out_dir=os.path.join(tmp, "scratch"),
+                mirror=str(FIXTURES),
+            )
+            target = Path(result["path"])
+            sonar = (target / "sonar-project.properties").read_text(encoding="utf-8")
+            app_yaml = (target / "SHP/AppConfigFiles/app.yaml").read_text(encoding="utf-8")
+            deploy = (target / "SHP/DeployConfigSchema.yaml").read_text(encoding="utf-8")
+            api = (target / "src/main/api/payments-openapi.yaml").read_text(encoding="utf-8")
+            docprops = (target / "src/main/api/doc-properties.json").read_text(encoding="utf-8")
+            review = (target / "REVIEW_DIFF.md").read_text(encoding="utf-8")
+
+            # Branch policy blanked; projectKey (the service name) kept.
+            self.assertIn("sonar.branch.name=<REVIEW>", sonar)
+            self.assertIn("sonar.newCode.referenceBranch=<REVIEW>", sonar)
+            self.assertIn("sonar.projectKey=payments", sonar)
+            # Account / org / team values blanked.
+            for key in ("sonarAccountID", "serviceAccountID", "nexusIQOrgName", "checkMarxTeamPath"):
+                self.assertRegex(app_yaml, rf"{key}:\s*<REVIEW>")
+            # No absolute URL survives in any copied platform/api file.
+            for text in (sonar, app_yaml, deploy, api, docprops):
+                self.assertNotIn("http://", text)
+                self.assertNotIn("https://", text)
+            # JSON environment link blanked; service name kept.
+            self.assertIn('"environment": "<REVIEW>"', docprops)
+            self.assertIn('"service": "payments"', docprops)
+            # Legit content preserved.
+            self.assertIn("const: payments", deploy)
+            self.assertIn("title: Payments API", api)
+            # REVIEW_DIFF lists what was blanked.
+            self.assertIn("Sanitized (fill in before use):", review)
+
     def test_source_layout_includes_api_and_test_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = generate_service(

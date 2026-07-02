@@ -9,6 +9,7 @@ from xml.sax.saxutils import escape
 
 from .reference import (
     DEFAULT_REFERENCE_REPO,
+    SANITIZE_PLACEHOLDER,
     load_api_files,
     load_details,
     load_platform_files,
@@ -122,7 +123,7 @@ def _pom_xml(slug, details):
 """
 
 
-def _review_diff(slug, files, package, reference, details, directories, file_sources, package_source, api_note):
+def _review_diff(slug, files, package, reference, details, directories, file_sources, package_source, api_note, sanitized_fields):
     listed_files = sorted([*files, "REVIEW_DIFF.md"])
     listed_dirs = sorted(directories)
     lines = [
@@ -164,6 +165,15 @@ def _review_diff(slug, files, package, reference, details, directories, file_sou
         for rel, citation in sorted(file_sources.items()):
             lines.append(f"- {rel}: {citation}")
 
+    if sanitized_fields:
+        lines.extend(["", "Sanitized (fill in before use):"])
+        for rel, keys in sorted(sanitized_fields.items()):
+            named = sorted({k for k in keys if k != "<url>"})
+            shown = ", ".join(named)
+            if any(k == "<url>" for k in keys):
+                shown = f"{shown}, URL value(s)" if shown else "URL value(s)"
+            lines.append(f"- {rel}: {shown} -> {SANITIZE_PLACEHOLDER}")
+
     if api_note:
         lines.extend(["", "API contract layout:", f"- {api_note}"])
 
@@ -176,6 +186,7 @@ def _review_diff(slug, files, package, reference, details, directories, file_sou
             f"- Confirm package {package} matches the target domain and the {reference} convention.",
             "- Confirm the service is starter-only and does not declare a dedicated *-core dependency.",
             "- Confirm SHP/sonar values contain no secrets or environment-specific values before porting.",
+            f"- Fill in every {SANITIZE_PLACEHOLDER} placeholder (see 'Sanitized' above) with this service's own values.",
             "- Replace sample listener queue and payload with reviewed message contracts.",
             "- Keep this output in scratch/ until a human explicitly ports it to a production repo.",
         ]
@@ -215,6 +226,7 @@ def generate_service(
         os.path.join("src", "test", "java", package_dir),
     }
     file_sources = {}
+    sanitized_fields = {}
     readme_note = ""
     if not details.from_mirror:
         readme_note = (
@@ -297,10 +309,14 @@ class {class_name}ApplicationTest {{
         for reference_file in load_platform_files(mirror, reference, slug, package, details):
             files[reference_file.rel_path] = reference_file.text
             file_sources[reference_file.rel_path] = reference_file.citation
+            if reference_file.sanitized:
+                sanitized_fields[reference_file.rel_path] = list(reference_file.sanitized)
         api_files = load_api_files(mirror, reference, slug, package, details)
         for reference_file in api_files:
             files[reference_file.rel_path] = reference_file.text
             file_sources[reference_file.rel_path] = reference_file.citation
+            if reference_file.sanitized:
+                sanitized_fields[reference_file.rel_path] = list(reference_file.sanitized)
         if api_files:
             api_note = "src/main/api contract files were derived from the reference repo files listed above."
         else:
@@ -326,6 +342,7 @@ class {class_name}ApplicationTest {{
         file_sources,
         package_source,
         api_note,
+        sanitized_fields,
     )
 
     for rel in directories:

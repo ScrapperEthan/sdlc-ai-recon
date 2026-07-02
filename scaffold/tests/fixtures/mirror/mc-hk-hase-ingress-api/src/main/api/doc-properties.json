@@ -1,0 +1,5 @@
+{
+  "service": "mc-hk-hase-ingress-api",
+  "docUrl": "https://docs.internal.example/mc-hk-hase-ingress-api",
+  "environment": "sct"
+}

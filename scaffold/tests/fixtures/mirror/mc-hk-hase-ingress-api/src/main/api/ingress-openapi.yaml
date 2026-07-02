@@ -2,6 +2,8 @@ openapi: 3.0.3
 info:
   title: Ingress API
   version: 0.0.1
+servers:
+  - url: https://api.internal.example/ingress
 paths:
   /ingress/health:
     get:

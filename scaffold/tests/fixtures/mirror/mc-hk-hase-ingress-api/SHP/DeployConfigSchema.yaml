@@ -2,3 +2,4 @@ type: object
 properties:
   serviceName:
     const: mc-hk-hase-ingress-api
+opsRepo: https://ops.internal.example/mc-hk-hase-ingress-api

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -158,10 +159,13 @@ class GenerateServiceTests(unittest.TestCase):
             # JSON environment link blanked; service name kept.
             self.assertIn('"environment": "<REVIEW>"', docprops)
             self.assertIn('"service": "payments"', docprops)
-            # api.meta is JSON-shaped despite the .meta extension: account/org/team blanked.
-            for key in ("applicationId", "serviceLine", "teamName", "teamEmailAddress"):
-                self.assertIn(f'"{key}": "<REVIEW>"', api_meta)
-            self.assertIn('"service": "payments"', api_meta)
+            # api.meta is a JSON governance descriptor: EVERY string value is blanked
+            # except the service identity (org/business metadata must not be inherited).
+            meta_obj = json.loads(api_meta)
+            self.assertEqual(meta_obj["service"], "payments")
+            for key, value in meta_obj.items():
+                if isinstance(value, str) and key != "service":
+                    self.assertEqual(value, "<REVIEW>", f"api.meta.{key} not sanitized")
             # Legit content preserved.
             self.assertIn("const: payments", deploy)
             self.assertIn("title: Payments API", api)

@@ -308,12 +308,26 @@ def _is_sensitive_key(key: str) -> bool:
     return key.strip().lower() in SANITIZE_KEYS
 
 
-def _sanitize_json(text: str) -> tuple[str, list[str]]:
+# api.meta is a per-service governance/ownership descriptor where essentially every
+# value is org/business/account metadata the new service must supply itself. Rather
+# than chase individual keys, `aggressive` mode blanks EVERY string value except the
+# service's own identity (already rewritten to the new name).
+_META_IDENTITY_KEYS = frozenset({"service", "servicename", "name", "apiname", "artifactid"})
+
+
+def _sanitize_json(text: str, aggressive: bool = False) -> tuple[str, list[str]]:
     try:
         data = json.loads(text)
     except ValueError:
         return text, []
     changed: list[str] = []
+
+    def should_blank(key: str, value) -> bool:
+        if aggressive:
+            return isinstance(value, str) and key.strip().lower() not in _META_IDENTITY_KEYS
+        if _is_sensitive_key(key):
+            return True
+        return isinstance(value, str) and _value_is_sensitive(value)
 
     def walk(node):
         if isinstance(node, dict):
@@ -321,7 +335,7 @@ def _sanitize_json(text: str) -> tuple[str, list[str]]:
                 value = node[key]
                 if isinstance(value, (dict, list)):
                     walk(value)
-                elif _is_sensitive_key(key) or (isinstance(value, str) and _value_is_sensitive(value)):
+                elif should_blank(key, value):
                     node[key] = SANITIZE_PLACEHOLDER
                     changed.append(key)
         elif isinstance(node, list):
@@ -352,14 +366,17 @@ def _sanitize_lines(text: str, pattern: "re.Pattern[str]") -> tuple[str, list[st
 def _sanitize_reference_text(text: str, rel_path: str) -> tuple[str, list[str]]:
     """Blank inherited governance/environment values (URLs, emails) in a copied file."""
     lower = rel_path.lower()
-    # api.meta is JSON content despite the .meta extension — parse it as JSON when it
-    # actually parses; otherwise fall through to the line-based handling.
-    if lower.endswith(".json") or lower.endswith(".meta"):
+    # api.meta is a JSON governance descriptor (despite the .meta extension): blank ALL
+    # its org/business values, keeping only the service identity. doc-properties.json and
+    # other JSON use the denylist + URL/email rules.
+    if lower.endswith(".meta"):
         try:
             json.loads(text)
-            return _sanitize_json(text)
+            return _sanitize_json(text, aggressive=True)
         except ValueError:
             pass
+    elif lower.endswith(".json"):
+        return _sanitize_json(text, aggressive=False)
     pattern = _PROP_LINE_RE if lower.endswith(".properties") else _YAML_LINE_RE
     sanitized, changed = _sanitize_lines(text, pattern)
     # Catch-all: any URL / email a key:value line pass missed (e.g. bare list items).

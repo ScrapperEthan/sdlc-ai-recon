@@ -3,5 +3,9 @@
   "serviceLine": "Fixture Service Line",
   "teamName": "Fixture Team",
   "teamEmailAddress": "fixture-team@noexternalmail.example.com",
+  "valueStreamName": "Fixture Value Stream",
+  "subValueStreamName": "Fixture Sub Stream",
+  "modelRef": "Fixture Model Ref",
+  "GBGF": "WPB",
   "service": "mc-hk-hase-ingress-api"
 }

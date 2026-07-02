@@ -7,6 +7,13 @@ scaffolding specs first. This is the **next capability after Step 2 scaffolding*
 "generate a skeleton" into "generate a real code change to an existing service, prove it
 compiles and its tests pass, and hand a diff for review."
 
+## Current status (2026-07-02)
+
+Step 0 was probed on the box: **no Java/Maven toolchain yet** (`mvn`/`java` not on PATH;
+being requested from IT). So **build Phase 1 now against the mocked build runner** (the
+edit + diff logic needs no toolchain) and **defer the real `mvn` compile/test verification**
+until the toolchain lands. `change/build.py` must therefore be mock-injectable from day one.
+
 ## Why
 
 Scaffolding proves we can create a convention-faithful *new* service. The higher-value,

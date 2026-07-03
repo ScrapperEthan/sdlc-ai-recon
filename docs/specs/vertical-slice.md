@@ -7,12 +7,27 @@ scaffolding specs first. This is the **next capability after Step 2 scaffolding*
 "generate a skeleton" into "generate a real code change to an existing service, prove it
 compiles and its tests pass, and hand a diff for review."
 
-## Current status (2026-07-02)
+## Current status (2026-07-03)
 
-Step 0 was probed on the box: **no Java/Maven toolchain yet** (`mvn`/`java` not on PATH;
-being requested from IT). So **build Phase 1 now against the mocked build runner** (the
-edit + diff logic needs no toolchain) and **defer the real `mvn` compile/test verification**
-until the toolchain lands. `change/build.py` must therefore be mock-injectable from day one.
+**Step 0 PASSED on the internal box.** Toolchain landed (Zulu JDK 21 + Apache Maven 3.9.6);
+an *unmodified* `mc-hk-hase-ingress-api` copied to `scratch/probe/` compiled and tested
+green (`COMPILE_EXIT=0`, `TEST_EXIT=0`). So building a HASE service outside its repo is
+feasible — the feasibility gate is cleared.
+
+**First real slice run (2026-07-03) surfaced one Windows-portability bug, now fixed.**
+`python -m change.add_endpoint mc-hk-hase-ingress-api --path /status --out-dir scratch`
+generated a correct change — the `@GetMapping("/status")` was inserted into the existing
+`IngressResource.java`, `mirror/` was untouched (3659 files hash-identical), and running
+`mvn.cmd -q test` in the scratch copy **passed** — but the tool itself crashed with
+`[WinError 2]` *before* emitting `CHANGE_DIFF.md` / `BUILD_RESULT.md`. Root cause: on
+Windows Maven is `mvn.cmd`, and `subprocess.run(("mvn",...), shell=False)` can't find a
+bare `mvn`. Fixed in `change/build.py`: `_resolve_command` resolves `mvn`→`mvn.cmd` via
+`shutil.which`, and a failed launch is now recorded as a build failure (so the review
+artifacts are always emitted) instead of crashing the run. **Re-run the full command on
+the box to confirm the tool now emits `CHANGE_DIFF.md` + `BUILD_RESULT.md` (PASS) itself.**
+
+The build runner stays mock-injectable (`runner=` / `--skip-build`) so the edit + diff
+logic remains testable without a toolchain.
 
 ## Why
 

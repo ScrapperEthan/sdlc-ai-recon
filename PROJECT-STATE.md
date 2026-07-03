@@ -3,7 +3,7 @@
 Living status doc: **where we are across the full SDLC lifecycle**, updated as we go.
 Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready specs).
 
-**Last updated:** 2026-07-02
+**Last updated:** 2026-07-03
 
 > Legend: 🟢 live / done · 🟡 in progress (beachhead) · ⚪ not started · 🔵 TBD / optional
 > Rule: keep it honest — "compiling-shaped" ≠ "builds"; don't mark 🟢 until it actually runs.
@@ -17,8 +17,8 @@ Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready 
 | **Requirements analysis** | ⚪ | — | — | (later) natural-language ask → structured change spec |
 | **Architecture design / impact** | 🟢 foundation | 2026-07-01 | Cross-repo Q&A + impact / dependency / message-routing analysis over the mirror — the retrieval "moat" | Turn understanding into a design proposal for a specific change |
 | **Code generation** | 🟡 beachhead | 2026-07-02 | Scaffolding: one command → a convention-faithful new service (parent/starter inherited, SHP/sonar/api layout, package auto-derived, inherited governance values sanitized to `<REVIEW>`) | From skeleton → a real code change **in context** of an existing service |
-| **Run tests** | ⚪ | — | `evals/` tests the assistant's own answer quality — **not** generated Java | Run `mvn test` on generated/changed code in `scratch/` |
-| **Build** | ⚪ | — | Skeleton is "compiling-shaped" but has never actually been built | `mvn compile/package` verification in `scratch/` |
+| **Run tests** | 🟡 beachhead | 2026-07-03 | Internal box has the toolchain (Zulu JDK 21 + Maven 3.9.6). Vertical-slice Step 0 green: an *unmodified* `mc-hk-hase-ingress-api` compiled + tested green in `scratch/probe/`. First real change also passed `mvn test` when run manually | Re-run the full `change.add_endpoint` command post-fix so the tool emits `BUILD_RESULT.md` (PASS) itself |
+| **Build** | 🟡 beachhead | 2026-07-03 | Same toolchain; unmodified service compiles in `scratch/`. `change/build.py` now resolves `mvn`→`mvn.cmd` on Windows and never crashes the run on a launch failure | Confirm end-to-end artifact emission on the box |
 | **Deploy** | 🔵 TBD | — | — | Stays human-gated. Possibly an **MCP server / skills** so the internal copilot / opencode **assists** a human through deploy (never autonomous) — see "Deploy" below |
 
 ---
@@ -64,7 +64,8 @@ durable asset (the moat); the model is swappable.
 `read code → write spec.md → design → generate code → compile+test → diff → human review`
 
 Status: read 🟢 (retrieval) · generate 🟡 (`scaffold/` new modules + `change/` edits) ·
-diff 🟢 · compile+test ⏳ (blocked on toolchain) · **write-spec / design ⚪ not built —
+diff 🟢 · compile+test 🟡 (toolchain landed 2026-07-03; Step 0 green, one Windows build-runner
+bug fixed, full end-to-end re-run pending) · **write-spec / design ⚪ not built —
 the pipeline's front-end is the next big gap.** "Read" comes first because the spec must
 be grounded in real code; serve it via the narrow-first router (a domain sub-agent only
 later, if needed).
@@ -112,6 +113,7 @@ is solid.
   - **P2** — single thin `*-api` repo made structurally faithful to a real HASE repo: package auto-derived (`com.hsbc.hase.digital.api.<name>`), SHP/sonar platform files, full source layout, starter-only; `*-core` split & `--type job` deferred (`docs/specs/scaffolding-phase2.md`). Verified on real mirror.
   - **Vertical slice — Phase 1 started** (`docs/specs/vertical-slice.md`, `change/`): tool copies an existing service to `scratch/`, adds a GET endpoint in the house style, generates a test, and emits `CHANGE_DIFF.md`. Build is mock-injectable + a `--skip-build` flag; **real `mvn` compile/test deferred — the box has no Java/Maven toolchain yet (Step 0 probe failed; being requested from IT).** 5 tests pass. This begins the *Run tests / Build* stages once the toolchain lands.
   - **P2.1** — copied platform/API files sanitized: inherited governance/account/branch/URL/email values blanked to `<REVIEW>` and listed in `REVIEW_DIFF.md` (`docs/specs/scaffolding-p2-sanitize.md`). `api.meta` (a per-service JSON descriptor) uses aggressive blanking — every string value blanked except the identity keys `assetName`/`contractFileName` (rewritten to the new name); config flags/structure kept. **Verified on the real mirror: no real account/org/business/branch/URL values remain. → Step 2 scaffolding pilot COMPLETE.**
+- **2026-07-03** — **Vertical slice Step 0 PASSED on the internal box** (toolchain landed: Zulu JDK 21 + Maven 3.9.6). An *unmodified* `mc-hk-hase-ingress-api` copied to `scratch/probe/` compiled and tested green (`COMPILE_EXIT=0`, `TEST_EXIT=0`) — building a HASE service outside its repo is feasible. First real `change.add_endpoint` run generated a correct change (`@GetMapping("/status")` inserted into `IngressResource.java`, `mvn.cmd -q test` passed when run manually, `mirror/` untouched — 3659 files hash-identical) but the tool crashed with `[WinError 2]` before emitting the review artifacts. Root cause + fix: on Windows Maven is `mvn.cmd`; `change/build.py` now resolves `mvn`→`mvn.cmd` via `shutil.which` and records a launch failure as a build failure instead of crashing (so `CHANGE_DIFF.md`/`BUILD_RESULT.md` are always emitted). 8 unit tests pass. **Next: re-run the full command on the box to confirm the tool emits `BUILD_RESULT.md` (PASS) itself → then the generate→verify→diff loop is closed end-to-end.**
 
 ---
 

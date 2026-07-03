@@ -1,12 +1,33 @@
 """Build runner wrapper for scratch changes."""
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
 
 DEFAULT_COMMAND = ("mvn", "-q", "test")
+
+# On Windows, Maven ships as `mvn.cmd`; a bare "mvn" passed to subprocess with
+# shell=False fails with [WinError 2] because CreateProcess does not consult
+# PATHEXT. Resolve the real executable path up front so the launch is portable.
+_WINDOWS_EXTS = (".cmd", ".bat", ".exe")
+
+
+def _resolve_command(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Resolve command[0] to a real executable path (e.g. mvn -> mvn.cmd on Windows)."""
+    if not command:
+        return command
+    exe, *rest = command
+    resolved = shutil.which(exe)
+    if resolved is None and os.name == "nt":
+        for ext in _WINDOWS_EXTS:
+            resolved = shutil.which(exe + ext)
+            if resolved:
+                break
+    return (resolved or exe, *rest)
 
 
 @dataclass(frozen=True)
@@ -58,16 +79,24 @@ def run_maven_tests(
     """Run or mock `mvn -q test` and capture a compact result."""
     command_tuple = tuple(command)
     if runner is None:
-        raw = subprocess.run(
-            command_tuple,
-            cwd=project_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            check=False,
-        )
-    else:
-        raw = runner(command_tuple, project_dir)
+        resolved = _resolve_command(command_tuple)
+        try:
+            raw = subprocess.run(
+                resolved,
+                cwd=project_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            # The build tool could not be launched at all (e.g. mvn not on PATH).
+            # Record it as a failure instead of crashing, so CHANGE_DIFF.md /
+            # BUILD_RESULT.md still get emitted for review.
+            message = f"could not launch build command {resolved[0]!r}: {exc}"
+            return BuildResult(resolved, project_dir, 127, message, _tail(message, tail_lines))
+        return _coerce_result(raw, resolved, project_dir, tail_lines)
+    raw = runner(command_tuple, project_dir)
     return _coerce_result(raw, command_tuple, project_dir, tail_lines)
 

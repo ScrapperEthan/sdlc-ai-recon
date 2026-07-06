@@ -14,9 +14,9 @@ Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready 
 
 | Stage | Status | Reached | What we have | Next |
 |---|---|---|---|---|
-| **Requirements analysis** | ⚪ | — | — | (later) natural-language ask → structured change spec |
+| **Requirements analysis** | 🟡 beachhead | 2026-07-03 | Plain-language ask → structured `ChangeRequest` → **retrieval-grounded target** (repo + controller) with a citation-backed rationale; refuses to guess when ambiguous. Verified on the real mirror (`change.from_intent`). Parser is rule-based (swappable for an LLM) | Real LLM parser; free-form intent; widen beyond the add-endpoint template |
 | **Architecture design / impact** | 🟢 foundation | 2026-07-01 | Cross-repo Q&A + impact / dependency / message-routing analysis over the mirror — the retrieval "moat" | Turn understanding into a design proposal for a specific change |
-| **Code generation** | 🟡 beachhead | 2026-07-02 | Scaffolding: one command → a convention-faithful new service (parent/starter inherited, SHP/sonar/api layout, package auto-derived, inherited governance values sanitized to `<REVIEW>`) | From skeleton → a real code change **in context** of an existing service |
+| **Code generation** | 🟡 beachhead | 2026-07-03 | Scaffolding (new service) **+ in-context change to an existing service, now driven by intent+retrieval:** `from_intent` locates the target and `add_endpoint` applies a templated change, verified green on `mc-hk-hase-ingress-api`. Change *content* is still templated (add-endpoint) | Widen change kinds (message listener / DAO / config — REPOMAP already indexes these) beyond the endpoint template |
 | **Run tests** | 🟢 thin slice | 2026-07-03 | **Proven end-to-end on a real service:** the tool runs `mvn test` on the generated change in `scratch/` and emits `BUILD_RESULT.md` (PASS, exit 0) itself — verified on `mc-hk-hase-ingress-api` (real Maven 3.9.6, Zulu JDK 21) | Broaden beyond a single templated GET endpoint (message listener / DAO / config), and drive the change from a real ask not a hardcoded template |
 | **Build** | 🟢 thin slice | 2026-07-03 | Same run: real service compiles + tests green in `scratch/`; `change/build.py` resolves `mvn`→`mvn.cmd` on Windows and records launch failures instead of crashing | Same broadening; later `mvn package` / multi-module |
 | **Deploy** | 🔵 TBD | — | — | Stays human-gated. Possibly an **MCP server / skills** so the internal copilot / opencode **assists** a human through deploy (never autonomous) — see "Deploy" below |
@@ -63,12 +63,13 @@ durable asset (the moat); the model is swappable.
 
 `read code → write spec.md → design → generate code → compile+test → diff → human review`
 
-Status: read 🟢 (retrieval) · generate 🟡 (`scaffold/` new modules + `change/` edits) ·
-diff 🟢 · compile+test 🟢 (proven end-to-end 2026-07-03 on a real service: generate → `mvn test`
-PASS → diff, `mirror/` untouched) · **write-spec / design ⚪ not built —
-the pipeline's front-end is the next big gap.** "Read" comes first because the spec must
-be grounded in real code; serve it via the narrow-first router (a domain sub-agent only
-later, if needed).
+Status: read 🟢 (retrieval) · **locate/target 🟡 (intent → retrieval-grounded repo+controller
+with cited rationale, refuses to guess — verified on the real mirror 2026-07-03)** · generate 🟡
+(`scaffold/` new modules + `change/` edits, now intent-driven) · diff 🟢 · compile+test 🟢
+(proven end-to-end 2026-07-03: generate → `mvn test` PASS → diff, `mirror/` untouched) ·
+**full write-spec / design for non-templated changes ⚪ — the remaining front-end gap.** "Read"
+comes first because the spec must be grounded in real code; serve it via the narrow-first
+router (a domain sub-agent only later, if needed).
 
 ## Current focus / recommended next: a thin **vertical slice** of the loop
 
@@ -114,6 +115,7 @@ is solid.
   - **Vertical slice — Phase 1 started** (`docs/specs/vertical-slice.md`, `change/`): tool copies an existing service to `scratch/`, adds a GET endpoint in the house style, generates a test, and emits `CHANGE_DIFF.md`. Build is mock-injectable + a `--skip-build` flag; **real `mvn` compile/test deferred — the box has no Java/Maven toolchain yet (Step 0 probe failed; being requested from IT).** 5 tests pass. This begins the *Run tests / Build* stages once the toolchain lands.
   - **P2.1** — copied platform/API files sanitized: inherited governance/account/branch/URL/email values blanked to `<REVIEW>` and listed in `REVIEW_DIFF.md` (`docs/specs/scaffolding-p2-sanitize.md`). `api.meta` (a per-service JSON descriptor) uses aggressive blanking — every string value blanked except the identity keys `assetName`/`contractFileName` (rewritten to the new name); config flags/structure kept. **Verified on the real mirror: no real account/org/business/branch/URL values remain. → Step 2 scaffolding pilot COMPLETE.**
 - **2026-07-03** — **Vertical slice Step 0 PASSED on the internal box** (toolchain landed: Zulu JDK 21 + Maven 3.9.6). An *unmodified* `mc-hk-hase-ingress-api` copied to `scratch/probe/` compiled and tested green (`COMPILE_EXIT=0`, `TEST_EXIT=0`) — building a HASE service outside its repo is feasible. First real `change.add_endpoint` run generated a correct change (`@GetMapping("/status")` inserted into `IngressResource.java`, `mvn.cmd -q test` passed when run manually, `mirror/` untouched — 3659 files hash-identical) but the tool crashed with `[WinError 2]` before emitting the review artifacts. Root cause + fix: on Windows Maven is `mvn.cmd`; `change/build.py` now resolves `mvn`→`mvn.cmd` via `shutil.which` and records a launch failure as a build failure instead of crashing (so `CHANGE_DIFF.md`/`BUILD_RESULT.md` are always emitted). 8 unit tests pass.
+- **2026-07-03 (Phase 2 VERIFIED on real mirror)** — `change.from_intent` (intent → retrieval-grounded target → templated change → verify → diff) ran green end-to-end on the real box via RUNBOOK 4: unit tests 19 OK; `index/REPOMAP.md` regenerated; `--explain-only` resolved *"add a /status endpoint to the ingress service"* → `mc-hk-hase-ingress-api` + `IngressResource.java` with a cited rationale; full run → `mvn.CMD -q test` **PASS (exit 0)**, `CHANGE_DIFF.md` clean (2 files), `mirror/` untouched (`MIRROR_HASH_UNCHANGED=True`, 3659 files); a valid-path-but-vague ask (*"add a /status endpoint to the api"*) → **REFUSED**, non-zero, candidates listed, no guess. Note: a no-path ask is stopped earlier by the parser, not the resolver — two distinct refusal paths (RUNBOOK 4 Step 4 fixed to reflect this). **The NL-intent → locate front-end is now a working, verified beachhead. Next: widen change kinds (message listener / DAO / config) and/or a real LLM parser.**
 - **2026-07-03 (later)** — **Vertical slice CLOSED end-to-end.** After the box pulled the fix, `python -m change.add_endpoint mc-hk-hase-ingress-api --path /status --out-dir scratch` ran to completion: the tool itself emitted `CHANGE_DIFF.md` (2 files — `IngressResource.java` +4 lines, new `IngressResourceStatusTest.java`) and `BUILD_RESULT.md` (**`mvn.CMD -q test` → PASS, exit 0**); `mirror/` untouched (`MIRROR_HASH_UNCHANGED=True`, 3659 files). The **read → generate real change → compile+test → reviewable diff** loop now works on a real HASE service, prod untouched. Cosmetic caveat: an existing test prints a stack trace into the output tail (exit code still 0). **This is the thin-slice proof; next is widening the change kinds and driving the change from a real ask (NL intent + retrieval) rather than a hardcoded `--path` template — the pipeline front-end.**
 
 ---

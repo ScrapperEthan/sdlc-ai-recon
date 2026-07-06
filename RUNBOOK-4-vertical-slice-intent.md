@@ -63,12 +63,19 @@ Under `scratch/mc-hk-hase-ingress-api-change/`, confirm:
 
 ## Step 4 — Refuse-to-guess: does it decline when unsure?
 
+There are two distinct refusal paths — test the **resolver's** one (the interesting guardrail),
+so keep a valid endpoint path but make the *target* vague:
+
 ```
-python -m change.from_intent "add an endpoint to the api" --explain-only
+python -m change.from_intent "add a /status endpoint to the api" --explain-only
 ```
-A deliberately vague hint should **refuse**: `TARGET_RESOLUTION.md` status `REFUSED`, a ranked
-candidate list, **non-zero exit code**, and **no change applied**. (If it silently picks one,
-that's a bug — report it.)
+Expect the **resolver** to **refuse**: `TARGET_RESOLUTION.md` status `REFUSED`, a ranked candidate
+list, **non-zero exit code**, **no change applied**. (If it silently picks one, that's a bug.)
+
+Note: an ask with **no path at all** (e.g. `"add an endpoint to the api"`) is rejected earlier by
+the **parser** (`ValueError`, no `/path`) — also a valid "refuse", but it never reaches the
+resolver, so it does *not* exercise the ambiguity logic. Both behaviors are correct; just don't
+confuse them.
 
 ## Send back (paste this filled in)
 

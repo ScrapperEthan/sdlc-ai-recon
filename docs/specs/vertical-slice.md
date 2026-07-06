@@ -14,20 +14,27 @@ an *unmodified* `mc-hk-hase-ingress-api` copied to `scratch/probe/` compiled and
 green (`COMPILE_EXIT=0`, `TEST_EXIT=0`). So building a HASE service outside its repo is
 feasible — the feasibility gate is cleared.
 
-**First real slice run (2026-07-03) surfaced one Windows-portability bug, now fixed.**
+**Phase 1 CLOSED end-to-end (2026-07-03).**
 `python -m change.add_endpoint mc-hk-hase-ingress-api --path /status --out-dir scratch`
-generated a correct change — the `@GetMapping("/status")` was inserted into the existing
-`IngressResource.java`, `mirror/` was untouched (3659 files hash-identical), and running
-`mvn.cmd -q test` in the scratch copy **passed** — but the tool itself crashed with
-`[WinError 2]` *before* emitting `CHANGE_DIFF.md` / `BUILD_RESULT.md`. Root cause: on
-Windows Maven is `mvn.cmd`, and `subprocess.run(("mvn",...), shell=False)` can't find a
-bare `mvn`. Fixed in `change/build.py`: `_resolve_command` resolves `mvn`→`mvn.cmd` via
-`shutil.which`, and a failed launch is now recorded as a build failure (so the review
-artifacts are always emitted) instead of crashing the run. **Re-run the full command on
-the box to confirm the tool now emits `CHANGE_DIFF.md` + `BUILD_RESULT.md` (PASS) itself.**
+now runs to completion on the box: the tool emits `CHANGE_DIFF.md` (2 files —
+`IngressResource.java` +4 lines, new `IngressResourceStatusTest.java` 24 lines) and
+`BUILD_RESULT.md` (`mvn.CMD -q test` → **PASS, exit 0**); `mirror/` untouched
+(`MIRROR_HASH_UNCHANGED=True`, 3659 files). The generate → compile+test → diff loop works
+on a real HASE service, prod untouched.
 
-The build runner stays mock-injectable (`runner=` / `--skip-build`) so the edit + diff
-logic remains testable without a toolchain.
+The first run surfaced one Windows-portability bug (Maven is `mvn.cmd`;
+`subprocess.run(("mvn",...), shell=False)` couldn't find a bare `mvn` → `[WinError 2]`
+before artifacts were written). Fixed in `change/build.py`: `_resolve_command` resolves
+`mvn`→`mvn.cmd` via `shutil.which`, and a failed launch is recorded as a build failure so
+review artifacts are always emitted. The build runner stays mock-injectable (`runner=` /
+`--skip-build`) so the edit + diff logic remains testable without a toolchain.
+
+Cosmetic caveat: an existing test deliberately prints a stack trace into the `mvn` output
+tail — noisy but exit code is 0 and `BUILD_RESULT.md` shows `Status: PASS` at the top.
+
+**Next (Phase 2, not built):** drive the change from a real ask (NL intent + the retrieval
+layer to *locate* where) instead of a hardcoded `--path`, and widen the change kinds
+(message listener / DAO / config) — see "Explicitly deferred" below.
 
 ## Why
 

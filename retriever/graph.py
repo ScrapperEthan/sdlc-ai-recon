@@ -51,3 +51,9 @@ def hubs(top=20):
     _, rev = _load()
     ranked = sorted(rev.items(), key=lambda kv: -len(kv[1]))[:top]
     return [{"repo": k, "dependents": len(v)} for k, v in ranked]
+
+
+def known_repos():
+    """All repos seen in the dependency graph."""
+    fwd, rev = _load()
+    return set(fwd) | set(rev)

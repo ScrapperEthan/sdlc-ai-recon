@@ -38,6 +38,8 @@ reports) live in separate folders (`recon_out/`, `index/`), never inside a repo.
 | `RUNBOOK-3-message-map.md` | **Step 3 — message map.** Extract who-publishes/consumes which queue/topic (the async wiring) |
 | `group.py` | Auto-derive a business-flow bundle of repos to index together (no tribal knowledge needed) |
 | `RETRIEVER.md` + `retriever/` + `cli.py` | **Step 4 — the retrieval/index layer.** One read-only toolset (impact, message routing, use-case routing, code search) the assistant queries |
+| `retrieval_service.py` | Stdlib HTTP wrapper around the retrieval layer for curl-based Copilot / skill workflows |
+| `make_bundles.py` | Compute reviewable per-domain CodeGraph bundle plans and emit `index/bundles.json` |
 | `mcp_server.py` | Optional MCP wrapper for the retrieval layer (needs `pip install mcp`) |
 | `WEBAPP.md` + `webapp/` | **Step 5 — browser Q&A app.** Chat UI + agent loop over the retrieval layer; model wired in one file (`webapp/llm.py`) |
 | `harvest_poms.py` | Pull only `pom.xml` from every repo in an org via the GitHub API (no clone). Cross-platform / Windows-friendly — **use this on Windows** |

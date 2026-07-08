@@ -47,7 +47,19 @@ def _basename_index():
 
 
 def _resolve_inside_mirror(relpath):
-    parts = _clean_parts(relpath)
+    raw = (relpath or "").strip()
+    if not raw:
+        raise FileNotFoundError(relpath)
+
+    if os.path.isabs(raw) or _DRIVE_RE.match(raw):
+        full = os.path.realpath(raw)
+        if not _inside_mirror(full):
+            raise ValueError("path escapes mirror")
+        if os.path.isfile(full):
+            return full
+        raise FileNotFoundError(relpath)
+
+    parts = _clean_parts(raw)
     full = os.path.realpath(os.path.join(config.MIRROR, *parts))
     if not _inside_mirror(full):
         raise ValueError("path escapes mirror")
@@ -97,8 +109,8 @@ def search_code(pattern, glob="*.java", max_results=50):
 
 
 def read_file(relpath, start=1, end=None):
-    """Return line-numbered source. relpath is relative to mirror/ (or absolute)."""
-    path = relpath if os.path.isabs(relpath) else os.path.join(config.MIRROR, relpath)
+    """Return line-numbered source from a file inside the mirror."""
+    path = _resolve_inside_mirror(relpath)
     with open(path, encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     start = max(1, start)

@@ -10,6 +10,8 @@ from retriever import code, flow, graph, messages, glossary, repo_tags, config a
 
 RETRIEVAL_HOST = os.environ.get("RETRIEVAL_HOST", "127.0.0.1")
 RETRIEVAL_PORT = int(os.environ.get("RETRIEVAL_PORT", "8848"))
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+IMPACT_HTML_PATH = os.path.join(STATIC_DIR, "impact.html")
 
 
 def _int(qs, key, default):
@@ -78,6 +80,11 @@ def _repos_payload(qs):
     )
 
 
+def _impact_page_body():
+    with open(IMPACT_HTML_PATH, encoding="utf-8") as handle:
+        return handle.read()
+
+
 ROUTES = {
     "/impact": lambda qs: graph.impact(_required_repo(qs), _str(qs, "transitive").lower() in {"1", "true"}),
     "/hubs": lambda qs: graph.hubs(_int(qs, "top", 20)),
@@ -126,6 +133,9 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
         try:
+            if path in {"/", "/static", "/static/", "/static/impact.html"}:
+                self._send(200, _impact_page_body(), "text/html; charset=utf-8")
+                return
             if path == "/health":
                 self._send_json(200, _health_payload())
                 return

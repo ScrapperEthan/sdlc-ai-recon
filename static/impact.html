@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>影响分析演示台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230057d9'/%3E%3Cpath d='M20 44V20h8v16h16v8H20Z' fill='white'/%3E%3Ccircle cx='44' cy='20' r='8' fill='%23ffd166'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fb;
+      --panel: #ffffff;
+      --panel-alt: #eef3f9;
+      --line: #d7dfeb;
+      --text: #152033;
+      --muted: #5a6a82;
+      --accent: #0057d9;
+      --accent-soft: #dfeaff;
+      --success: #177245;
+      --warning: #8f5a00;
+      --warning-bg: #fff6db;
+      --danger: #9a2f2f;
+      --danger-bg: #ffe7e7;
+      --shadow: 0 20px 50px rgba(21, 32, 51, 0.08);
+      --repo: #0057d9;
+      --usecase: #ad5a00;
+      --topic: #0f766e;
+      --sms: #0057d9;
+      --push: #7d4df5;
+      --email: #107c41;
+      --whatsapp: #0d8f5b;
+      --wechat: #007a3d;
+      --letter: #8f5a00;
+      --unknown: #6b7280;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(0, 87, 217, 0.15), transparent 28rem),
+        linear-gradient(180deg, #fbfdff 0%, var(--bg) 45%, #eef2f8 100%);
+    }
+
+    .shell {
+      width: min(1240px, calc(100vw - 32px));
+      margin: 24px auto 40px;
+    }
+
+    .hero,
+    .panel {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(215, 223, 235, 0.9);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero-head {
+      display: grid;
+      gap: 10px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      width: fit-content;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(30px, 4vw, 52px);
+      line-height: 1.05;
+    }
+
+    .hero p,
+    .muted {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .toolbar {
+      display: grid;
+      gap: 12px;
+    }
+
+    .tabs {
+      display: inline-flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tab {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 10px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: 160ms ease;
+    }
+
+    .tab.active {
+      border-color: transparent;
+      background: var(--text);
+      color: #fff;
+      transform: translateY(-1px);
+    }
+
+    .controls {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 210px minmax(220px, 1fr) auto;
+      align-items: center;
+    }
+
+    .filter-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+    }
+
+    select,
+    input,
+    button {
+      min-height: 48px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      padding: 0 14px;
+      font: inherit;
+    }
+
+    select,
+    input {
+      background: #fff;
+      color: var(--text);
+    }
+
+    button {
+      border: none;
+      cursor: pointer;
+      font-weight: 700;
+      transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, #0057d9 0%, #2f7dff 100%);
+      color: #fff;
+      box-shadow: 0 14px 30px rgba(0, 87, 217, 0.25);
+    }
+
+    button.secondary {
+      background: #1f2d3d;
+      color: #fff;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.7;
+      cursor: wait;
+      transform: none;
+    }
+
+    .status {
+      min-height: 24px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .layout {
+      display: grid;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .panel {
+      padding: 22px;
+    }
+
+    .panel.hidden {
+      display: none;
+    }
+
+    .result-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .card-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+    }
+
+    .target-card {
+      grid-column: 1 / -1;
+      padding: 24px;
+      border-radius: 22px;
+      background:
+        linear-gradient(135deg, rgba(0, 87, 217, 0.08), rgba(255, 255, 255, 0.95)),
+        #fff;
+      border: 1px solid rgba(0, 87, 217, 0.12);
+    }
+
+    .target-meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .kind-pill,
+    .badge,
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 0 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .kind-pill {
+      background: rgba(21, 32, 51, 0.08);
+      color: var(--text);
+    }
+
+    .kind-pill.repo {
+      background: rgba(0, 87, 217, 0.12);
+      color: var(--repo);
+    }
+
+    .kind-pill.use-case {
+      background: rgba(173, 90, 0, 0.14);
+      color: var(--usecase);
+    }
+
+    .kind-pill.topic {
+      background: rgba(15, 118, 110, 0.14);
+      color: var(--topic);
+    }
+
+    .badge {
+      color: #fff;
+      background: var(--unknown);
+    }
+
+    .badge.sms { background: var(--sms); }
+    .badge.push,
+    .badge.pn { background: var(--push); }
+    .badge.email { background: var(--email); }
+    .badge.whatsapp { background: var(--whatsapp); }
+    .badge.wechat { background: var(--wechat); }
+    .badge.letter { background: var(--letter); }
+
+    .chip {
+      background: var(--panel-alt);
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+
+    .chip.direct {
+      background: rgba(0, 87, 217, 0.12);
+      color: var(--accent);
+      border-color: rgba(0, 87, 217, 0.2);
+    }
+
+    .chip.transitive {
+      background: rgba(90, 106, 130, 0.12);
+      color: #425168;
+    }
+
+    .columns {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .row-card {
+      padding: 16px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, #fff 0%, #f9fbff 100%);
+      border: 1px solid var(--line);
+    }
+
+    .row-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .repo-name {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .path-text,
+    .small-list {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 8px;
+    }
+
+    .small-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    details {
+      margin-top: 10px;
+      border-top: 1px dashed var(--line);
+      padding-top: 10px;
+    }
+
+    summary {
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }
+
+    li {
+      line-height: 1.6;
+    }
+
+    .banner-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .banner {
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid transparent;
+    }
+
+    .banner.honesty {
+      background: var(--warning-bg);
+      color: var(--warning);
+      border-color: rgba(143, 90, 0, 0.18);
+    }
+
+    .banner.hub {
+      background: var(--danger-bg);
+      color: var(--danger);
+      border-color: rgba(154, 47, 47, 0.16);
+    }
+
+    .channel-grid,
+    .route-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .channel-card,
+    .route-card {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .empty,
+    .error-box {
+      padding: 20px;
+      border-radius: 18px;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .empty {
+      color: var(--muted);
+      background: var(--panel-alt);
+      border: 1px dashed var(--line);
+    }
+
+    .error-box {
+      background: var(--danger-bg);
+      color: var(--danger);
+      border: 1px solid rgba(154, 47, 47, 0.15);
+    }
+
+    .repo-browser {
+      display: grid;
+      gap: 16px;
+    }
+
+    .repo-list {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .repo-pill {
+      display: flex;
+      align-items: center;
+      min-height: 52px;
+      padding: 0 14px;
+      border-radius: 16px;
+      background: #fff;
+      border: 1px solid var(--line);
+      font-weight: 600;
+    }
+
+    .meta-line {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .inline-code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      background: rgba(21, 32, 51, 0.06);
+      padding: 2px 6px;
+      border-radius: 8px;
+    }
+
+    @media (max-width: 960px) {
+      .controls,
+      .filter-grid,
+      .columns {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: min(100vw - 20px, 1240px);
+        margin-top: 10px;
+      }
+
+      .hero,
+      .panel {
+        border-radius: 20px;
+        padding: 18px;
+      }
+
+      h1 {
+        font-size: 30px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-head">
+        <span class="eyebrow">Impact Analysis Demo</span>
+        <h1>这条业务链，<br>究竟会影响谁？</h1>
+        <p>面向领导层与开发团队的只读演示台。输入仓库、用例或主题，快速看到上游依赖、下游受影响服务、异步链路，以及每一条结论的出处。</p>
+      </div>
+
+      <div class="toolbar">
+        <div class="tabs" role="tablist" aria-label="视图切换">
+          <button class="tab active" type="button" data-tab="analyze">分析影响</button>
+          <button class="tab" type="button" data-tab="browse">按标签浏览</button>
+        </div>
+
+        <div id="analyzePanel" class="panel">
+          <div class="controls">
+            <select id="targetKind" aria-label="目标类型">
+              <option value="repo">仓库 repo</option>
+              <option value="use-case">用例 use-case</option>
+              <option value="topic">主题 topic</option>
+            </select>
+            <input id="targetInput" type="text" placeholder="例如：mc-hk-hase-ingress-api" aria-label="目标值">
+            <button id="analyzeButton" class="primary" type="button">分析影响</button>
+          </div>
+          <div id="analyzeStatus" class="status" aria-live="polite"></div>
+        </div>
+
+        <div id="browsePanel" class="panel hidden">
+          <div class="repo-browser">
+            <div class="filter-grid">
+              <input id="channelFilter" type="text" placeholder="渠道，例如 sms" aria-label="渠道">
+              <input id="modeFilter" type="text" placeholder="模式，例如 realtime" aria-label="模式">
+              <input id="systemFilter" type="text" placeholder="系统，例如 hase" aria-label="系统">
+              <button id="browseButton" class="secondary" type="button">筛选仓库</button>
+            </div>
+            <div id="browseStatus" class="status" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div id="analyzeResult" class="result-grid"></div>
+      <div id="browseResult" class="result-grid"></div>
+    </section>
+  </main>
+
+  <script>
+    const targetKind = document.getElementById("targetKind");
+    const targetInput = document.getElementById("targetInput");
+    const analyzeButton = document.getElementById("analyzeButton");
+    const analyzeStatus = document.getElementById("analyzeStatus");
+    const analyzeResult = document.getElementById("analyzeResult");
+    const browseButton = document.getElementById("browseButton");
+    const browseStatus = document.getElementById("browseStatus");
+    const browseResult = document.getElementById("browseResult");
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const panels = {
+      analyze: document.getElementById("analyzePanel"),
+      browse: document.getElementById("browsePanel")
+    };
+
+    const placeholders = {
+      repo: "例如：mc-hk-hase-ingress-api",
+      "use-case": "例如：cancel-card",
+      topic: "例如：orders.topic"
+    };
+
+    const channelLabelMap = {
+      sms: "SMS",
+      push: "PUSH (PN)",
+      pn: "PUSH (PN)",
+      email: "Email",
+      whatsapp: "WhatsApp",
+      wechat: "WeChat",
+      letter: "Letter"
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function setAnalyzeStatus(message) {
+      analyzeStatus.textContent = message || "";
+    }
+
+    function setBrowseStatus(message) {
+      browseStatus.textContent = message || "";
+    }
+
+    function setLoading(button, loading) {
+      button.disabled = loading;
+      if (button === analyzeButton) {
+        button.textContent = loading ? "分析中..." : "分析影响";
+      } else {
+        button.textContent = loading ? "筛选中..." : "筛选仓库";
+      }
+    }
+
+    function normalizeTarget(kind, value) {
+      const text = value.trim();
+      if (!text) {
+        throw new Error("请输入要分析的仓库、用例或主题。");
+      }
+      if (kind === "repo") {
+        return text;
+      }
+      return kind + ":" + text;
+    }
+
+    function renderBadges(channels) {
+      if (!channels || !channels.length) {
+        return '<span class="chip">渠道未知</span>';
+      }
+      return channels.map((channel) => {
+        const key = String(channel || "").toLowerCase();
+        const label = channelLabelMap[key] || String(channel || "").toUpperCase();
+        return '<span class="badge ' + escapeHtml(key) + '">' + escapeHtml(label) + "</span>";
+      }).join("");
+    }
+
+    function renderDetails(label, items) {
+      if (!items || !items.length) {
+        return "";
+      }
+      const rows = items.map((item) => "<li><span class=\"inline-code\">" + escapeHtml(item) + "</span></li>").join("");
+      return "<details><summary>" + escapeHtml(label) + "</summary><ul>" + rows + "</ul></details>";
+    }
+
+    function renderRepoItems(items, emptyText) {
+      if (!items || !items.length) {
+        return '<div class="empty">' + escapeHtml(emptyText) + "</div>";
+      }
+      return '<div class="list">' + items.map((item) => {
+        const path = item.path && item.path.length ? '<div class="path-text">链路：' + escapeHtml(item.path.join(" -> ")) + "</div>" : "";
+        const via = item.via_repos && item.via_repos.length ? '<div class="path-text">经由：' + escapeHtml(item.via_repos.join(", ")) + "</div>" : "";
+        return '<article class="row-card">' +
+          '<div class="row-top">' +
+            '<div>' +
+              '<div class="repo-name">' + escapeHtml(item.repo) + "</div>" +
+              via +
+              path +
+            "</div>" +
+            '<span class="chip ' + escapeHtml(item.relation || "") + '">' + escapeHtml(item.relation || "unknown") + "</span>" +
+          "</div>" +
+          renderDetails("出处", item.citations) +
+        "</article>";
+      }).join("") + "</div>";
+    }
+
+    function renderRoutes(routes) {
+      if (!routes || !routes.length) {
+        return '<div class="empty">暂无已知异步链路</div>';
+      }
+      return '<div class="route-grid">' + routes.map((route) => {
+        const producers = route.producers && route.producers.length ? route.producers.join(", ") : "none";
+        const consumers = route.consumers && route.consumers.length ? route.consumers.join(", ") : "none";
+        const routingSources = route.routing_sources && route.routing_sources.length ? route.routing_sources.join(", ") : "none";
+        return '<article class="route-card">' +
+          '<div class="section-title">' +
+            '<h3>' + escapeHtml(route.destination || "unknown") + "</h3>" +
+            '<div class="target-meta">' + renderBadges(route.channels || []) + "</div>" +
+          "</div>" +
+          '<div class="small-list">' +
+            "<div><strong>生产方：</strong>" + escapeHtml(producers) + "</div>" +
+            "<div><strong>消费方：</strong>" + escapeHtml(consumers) + "</div>" +
+            "<div><strong>路由依据：</strong>" + escapeHtml(routingSources) + "</div>" +
+          "</div>" +
+          renderDetails("出处", route.citations) +
+        "</article>";
+      }).join("") + "</div>";
+    }
+
+    function renderRiskCallouts(items) {
+      if (!items || !items.length) {
+        return '<div class="empty">暂无额外风险提示</div>';
+      }
+      return '<div class="banner-stack">' + items.map((item) => {
+        const type = item.type === "honesty" ? "honesty" : "hub";
+        const headline = type === "honesty" ? "说明 / Honest note" : "风险提示 / Hub";
+        const meta = item.repo ? '<div class="path-text">仓库：' + escapeHtml(item.repo) + (item.dependents != null ? " · dependents=" + escapeHtml(item.dependents) : "") + "</div>" : "";
+        return '<article class="banner ' + type + '">' +
+          "<strong>" + headline + "</strong>" +
+          '<div class="small-list"><div>' + escapeHtml(item.message || "") + "</div></div>" +
+          meta +
+          renderDetails("出处", item.citations) +
+        "</article>";
+      }).join("") + "</div>";
+    }
+
+    function renderChannelChain(items) {
+      if (!items || !items.length) {
+        return '<div class="empty">暂无明确渠道线索</div>';
+      }
+      return '<div class="channel-grid">' + items.map((item) => {
+        const sources = item.sources && item.sources.length ? item.sources.join(", ") : "none";
+        return '<article class="channel-card">' +
+          '<div class="section-title">' +
+            '<h3>' + renderBadges([item.channel]) + "</h3>" +
+          "</div>" +
+          '<div class="path-text">判断依据：' + escapeHtml(sources) + "</div>" +
+          renderDetails("出处", item.citations) +
+        "</article>";
+      }).join("") + "</div>";
+    }
+
+    function renderCitations(citations) {
+      const total = citations ? citations.length : 0;
+      if (!total) {
+        return '<div class="empty">出处总数：0</div>';
+      }
+      return '<details><summary>出处总数：' + total + '</summary><ul>' +
+        citations.map((item) => "<li><span class=\"inline-code\">" + escapeHtml(item) + "</span></li>").join("") +
+        "</ul></details>";
+    }
+
+    function renderAnalyzeResult(report) {
+      const target = report.target || {};
+      const matchedTopics = target.matched_topics && target.matched_topics.length
+        ? '<div class="path-text">匹配主题：' + escapeHtml(target.matched_topics.join(", ")) + "</div>"
+        : "";
+      analyzeResult.innerHTML =
+        '<section class="card-grid">' +
+          '<article class="target-card">' +
+            '<div class="section-title">' +
+              '<div>' +
+                '<div class="meta-line">' +
+                  '<span class="kind-pill ' + escapeHtml(target.kind || "repo") + '">' + escapeHtml(target.kind || "repo") + "</span>" +
+                  '<span class="chip">输入：' + escapeHtml(target.input || "") + "</span>" +
+                "</div>" +
+                '<h2 style="margin-top: 12px;">' + escapeHtml(target.description || target.value || target.input || "未命名目标") + "</h2>" +
+                '<div class="path-text">目标值：' + escapeHtml(target.value || "") + "</div>" +
+                matchedTopics +
+              "</div>" +
+              '<div class="target-meta">' + renderBadges(target.channels || []) + "</div>" +
+            "</div>" +
+            renderDetails("目标出处", target.citations) +
+          "</article>" +
+        "</section>" +
+
+        '<section class="panel">' +
+          '<div class="section-title"><h2>风险提示</h2><span class="muted">包括 hub 风险与说明性提示</span></div>' +
+          renderRiskCallouts(report.risk_callouts || []) +
+        "</section>" +
+
+        '<section class="panel">' +
+          '<div class="section-title"><h2>上游 / 下游</h2><span class="muted">看依赖谁，以及谁会受影响</span></div>' +
+          '<div class="columns">' +
+            '<div>' +
+              '<div class="section-title"><h3>上游（依赖谁）</h3></div>' +
+              renderRepoItems(report.upstream || [], "暂无已知上游依赖") +
+            "</div>" +
+            '<div>' +
+              '<div class="section-title"><h3>下游（谁受影响）</h3></div>' +
+              renderRepoItems(report.downstream || [], "暂无已知下游影响") +
+            "</div>" +
+          "</div>" +
+        "</section>" +
+
+        '<section class="panel">' +
+          '<div class="section-title"><h2>异步链路</h2><span class="muted">按 destination 汇总 producer / consumer / channel</span></div>' +
+          renderRoutes(report.async_routes || []) +
+        "</section>" +
+
+        '<section class="panel">' +
+          '<div class="section-title"><h2>渠道线索</h2><span class="muted">为何判定是 SMS / Email / Push 等</span></div>' +
+          renderChannelChain(report.channel_chain || []) +
+        "</section>" +
+
+        '<section class="panel">' +
+          '<div class="section-title"><h2>出处汇总</h2><span class="muted">完整证据清单</span></div>' +
+          renderCitations(report.citations || []) +
+        "</section>";
+    }
+
+    function renderAnalyzeError(message) {
+      analyzeResult.innerHTML = '<section class="panel"><div class="error-box">' + escapeHtml(message) + "</div></section>";
+    }
+
+    function renderBrowseResult(payload) {
+      const repos = payload.repos || [];
+      const filters = payload.filters || {};
+      const activeFilters = [filters.channel, filters.mode, filters.system].filter(Boolean).join(" / ");
+      browseResult.innerHTML =
+        '<section class="panel">' +
+          '<div class="section-title"><h2>标签浏览结果</h2><span class="muted">共 ' + escapeHtml(payload.count || 0) + ' 个仓库' + (activeFilters ? " · " + escapeHtml(activeFilters) : "") + "</span></div>" +
+          (repos.length
+            ? '<div class="repo-list">' + repos.map((repo) => '<div class="repo-pill">' + escapeHtml(repo) + "</div>").join("") + "</div>"
+            : '<div class="empty">没有匹配到仓库，请调整渠道 / 模式 / 系统筛选条件。</div>') +
+        "</section>";
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const text = await response.text();
+      let payload;
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch (error) {
+        throw new Error("服务返回了非 JSON 响应。");
+      }
+      if (!response.ok) {
+        throw new Error(payload.error || "请求失败，请稍后重试。");
+      }
+      return payload;
+    }
+
+    async function analyze() {
+      try {
+        const normalized = normalizeTarget(targetKind.value, targetInput.value);
+        setLoading(analyzeButton, true);
+        setAnalyzeStatus("正在汇总依赖、消息链路与出处...");
+        const payload = await fetchJson("/impact-report?target=" + encodeURIComponent(normalized));
+        renderAnalyzeResult(payload);
+        setAnalyzeStatus("分析完成，可继续切换仓库 / 用例 / 主题。");
+      } catch (error) {
+        renderAnalyzeError(error.message || "分析失败。");
+        setAnalyzeStatus("分析失败，请检查输入是否存在。");
+      } finally {
+        setLoading(analyzeButton, false);
+      }
+    }
+
+    async function browse() {
+      const channel = document.getElementById("channelFilter").value.trim();
+      const mode = document.getElementById("modeFilter").value.trim();
+      const system = document.getElementById("systemFilter").value.trim();
+      const params = new URLSearchParams();
+      if (channel) params.set("channel", channel);
+      if (mode) params.set("mode", mode);
+      if (system) params.set("system", system);
+
+      try {
+        setLoading(browseButton, true);
+        setBrowseStatus("正在筛选仓库标签...");
+        const payload = await fetchJson("/repos?" + params.toString());
+        renderBrowseResult(payload);
+        setBrowseStatus("筛选完成。");
+      } catch (error) {
+        browseResult.innerHTML = '<section class="panel"><div class="error-box">' + escapeHtml(error.message || "筛选失败。") + "</div></section>";
+        setBrowseStatus("筛选失败，请确认 repo_tags 数据已生成。");
+      } finally {
+        setLoading(browseButton, false);
+      }
+    }
+
+    function activateTab(name) {
+      tabs.forEach((tab) => {
+        const active = tab.dataset.tab === name;
+        tab.classList.toggle("active", active);
+      });
+      Object.entries(panels).forEach(([key, panel]) => {
+        panel.classList.toggle("hidden", key !== name);
+      });
+      analyzeResult.style.display = name === "analyze" ? "" : "none";
+      browseResult.style.display = name === "browse" ? "" : "none";
+    }
+
+    targetKind.addEventListener("change", () => {
+      targetInput.placeholder = placeholders[targetKind.value] || placeholders.repo;
+    });
+
+    analyzeButton.addEventListener("click", analyze);
+    browseButton.addEventListener("click", browse);
+    targetInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        analyze();
+      }
+    });
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => activateTab(tab.dataset.tab));
+    });
+
+    activateTab("analyze");
+    targetInput.placeholder = placeholders[targetKind.value];
+    analyzeResult.innerHTML = '<section class="panel"><div class="empty">先输入一个仓库、用例或主题，再点击“分析影响”。页面会展示上游依赖、下游受影响服务、异步链路与出处。</div></section>';
+    browseResult.innerHTML = '<section class="panel"><div class="empty">切换到“按标签浏览”后，可以用渠道 / 模式 / 系统过滤仓库列表。</div></section>';
+  </script>
+</body>
+</html>

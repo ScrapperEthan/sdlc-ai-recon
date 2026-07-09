@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Read-only HTTP wrapper around the retrieval layer."""
+import impact_report
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from retriever import code, flow, graph, messages, config as rconfig
+from retriever import code, flow, graph, messages, glossary, repo_tags, config as rconfig
 
 RETRIEVAL_HOST = os.environ.get("RETRIEVAL_HOST", "127.0.0.1")
 RETRIEVAL_PORT = int(os.environ.get("RETRIEVAL_PORT", "8848"))
@@ -52,7 +53,29 @@ def _health_payload():
 
 def _repomap_text():
     with open(os.path.join(rconfig.INDEX_DIR, "REPOMAP.md"), encoding="utf-8-sig") as handle:
-        return handle.read()
+        text = handle.read()
+    lines = []
+    for line in text.splitlines():
+        lines.append(line)
+        if line.startswith("## "):
+            repo = line[3:].strip()
+            expanded = glossary.expand(repo)
+            if expanded != repo:
+                lines.append(f"- Name meaning: {expanded}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _impact_report_payload(qs):
+    return impact_report.build_report(_required(_str(qs, "target"), "target"))
+
+
+def _repos_payload(qs):
+    return repo_tags.filter_repos(
+        channel=_str(qs, "channel"),
+        mode=_str(qs, "mode"),
+        system=_str(qs, "system"),
+        bundle=_str(qs, "bundle"),
+    )
 
 
 ROUTES = {
@@ -78,6 +101,8 @@ ROUTES = {
         ),
     },
     "/trace": lambda qs: flow.trace(_str(qs, "use_case_id") or None, _str(qs, "destination") or None),
+    "/impact-report": _impact_report_payload,
+    "/repos": _repos_payload,
 }
 
 

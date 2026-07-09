@@ -1,0 +1,6 @@
+{
+  "svc": "servicing",
+  "rt": "realtime",
+  "bat": "batch",
+  "job": "scheduled job"
+}

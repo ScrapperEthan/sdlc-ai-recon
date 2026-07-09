@@ -16,6 +16,8 @@ evals/last_run.json
 
 # generated index freshness metadata
 index/last_indexed.json
+index/*.json
+index/reports/
 
 # human-reviewed generated scratch outputs
 scratch/

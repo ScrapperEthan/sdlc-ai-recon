@@ -33,13 +33,16 @@ reports) live in separate folders (`recon_out/`, `index/`), never inside a repo.
 |---|---|
 | `RUNBOOK.md` | **Step 1 — recon.** Hand to opencode; produces one `RECON-REPORT.md` |
 | `RUNBOOK-2-cross-repo-qa.md` | **Step 2 — cross-repo Q&A.** Mirror (read-only) + build an index + answer questions with citations |
+| `RUNBOOK-8-impact-report-and-tags-verify.md` | Internal verification flow for the cited impact report plus real box-local repo tags/glossary |
 | `prompts/qa-system-prompt.md` | Operating instructions for the Q&A assistant |
 | `impact.py` | Query the dependency graph: blast radius of changing a repo |
+| `impact_report.py` | Compose dependency, async-route, channel, and hub data into a cited impact report |
 | `RUNBOOK-3-message-map.md` | **Step 3 — message map.** Extract who-publishes/consumes which queue/topic (the async wiring) |
 | `group.py` | Auto-derive a business-flow bundle of repos to index together (no tribal knowledge needed) |
 | `RETRIEVER.md` + `retriever/` + `cli.py` | **Step 4 — the retrieval/index layer.** One read-only toolset (impact, message routing, use-case routing, code search) the assistant queries |
 | `retrieval_service.py` | Stdlib HTTP wrapper around the retrieval layer for curl-based Copilot / skill workflows |
 | `make_bundles.py` | Compute reviewable per-domain CodeGraph bundle plans and emit `index/bundles.json` |
+| `make_repo_tags.py` | Auto-derive per-repo business tags and emit `index/repo_tags.json` for narrow-first retrieval filters |
 | `mcp_server.py` | Optional MCP wrapper for the retrieval layer (needs `pip install mcp`) |
 | `WEBAPP.md` + `webapp/` | **Step 5 — browser Q&A app.** Chat UI + agent loop over the retrieval layer; model wired in one file (`webapp/llm.py`) |
 | `harvest_poms.py` | Pull only `pom.xml` from every repo in an org via the GitHub API (no clone). Cross-platform / Windows-friendly — **use this on Windows** |

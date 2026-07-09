@@ -17,3 +17,7 @@ MESSAGE_EDGES_CSV = _p("SDLC_MSG_EDGES", "index", "message_edges.csv")
 USECASE_SNAPSHOT_CSV = _p(
     "SDLC_USECASE_SNAPSHOT", "index", "tbl_event_router_usecase_topic.snapshot.csv"
 )
+BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
+GLOSSARY_JSON = _p("SDLC_GLOSSARY", "index", "glossary.json")
+REPO_TAGS_JSON = _p("SDLC_REPO_TAGS", "index", "repo_tags.json")
+REPO_TAGS_OVERRIDE_JSON = _p("SDLC_REPO_TAGS_OVERRIDE", "index", "repo_tags.override.json")

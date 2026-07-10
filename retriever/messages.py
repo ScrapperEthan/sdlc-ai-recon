@@ -1,6 +1,8 @@
 """Async message-wiring queries over index/message_edges.csv plus the
 use-case -> topic snapshot (dev/SCT). All read-only."""
 import csv
+import os
+import re
 from . import config
 
 _EDGE_COLS = ('producer_repo', 'destination', 'consumer_repo', 'routing_source', 'evidence')
@@ -50,6 +52,30 @@ def _load_usecase():
         return [], []
 
 
+def _usecase_columns(cols):
+    return _detect(cols, 'usecase', 'id') or _detect(cols, 'usecase'), _detect(cols, 'topic')
+
+
+def _snapshot_citation(line_no):
+    try:
+        path = config.USECASE_SNAPSHOT_CSV
+        root = config.ROOT
+        path = os.path.relpath(path, root)
+    except ValueError:
+        path = config.USECASE_SNAPSHOT_CSV
+    return path.replace(os.sep, '/') + ':' + str(line_no)
+
+
+def _load_usecase_with_lines():
+    try:
+        with open(config.USECASE_SNAPSHOT_CSV, newline='', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            cols = reader.fieldnames or []
+            return [(line_no, row) for line_no, row in enumerate(reader, 2)], cols
+    except FileNotFoundError:
+        return [], []
+
+
 def _detect(cols, *needles):
     for c in cols:
         flat = c.lower().replace('_', '')
@@ -67,8 +93,7 @@ def usecase_route(use_case_id=None, topic=None):
                      "(index/tbl_event_router_usecase_topic.snapshot.csv). "
                      "The async last-mile is DB-driven; export the table read-only to enable this."),
         }
-    uc = _detect(cols, 'usecase', 'id') or _detect(cols, 'usecase')
-    tp = _detect(cols, 'topic')
+    uc, tp = _usecase_columns(cols)
     matches = []
     for r in rows:
         if use_case_id and use_case_id.lower() not in (r.get(uc, '') or '').lower():
@@ -83,3 +108,45 @@ def usecase_route(use_case_id=None, topic=None):
         "topic_col": tp,
         "matches": matches,
     }
+
+
+def use_cases_for_topic(topic):
+    """Reverse lookup with snapshot-row citations; missing snapshot is harmless."""
+    rows, cols = _load_usecase_with_lines()
+    uc, tp = _usecase_columns(cols)
+    if not uc or not tp:
+        return []
+    needle = (topic or '').strip().lower()
+    if not needle:
+        return []
+    return [
+        {
+            "use_case": (row.get(uc) or '').strip(),
+            "topic": (row.get(tp) or '').strip(),
+            "citations": [_snapshot_citation(line_no)],
+        }
+        for line_no, row in rows
+        if needle == (row.get(tp) or '').strip().lower() and (row.get(uc) or '').strip()
+    ]
+
+
+def use_cases_for_channel(channel):
+    """Reverse lookup for topics containing an exact channel token."""
+    token = (channel or '').strip().lower()
+    if not token:
+        return []
+    rows, cols = _load_usecase_with_lines()
+    uc, tp = _usecase_columns(cols)
+    if not uc or not tp:
+        return []
+    out = []
+    for line_no, row in rows:
+        topic = (row.get(tp) or '').strip()
+        tokens = {part.lower() for part in re.split(r"[^a-zA-Z0-9]+", topic) if part}
+        if token in tokens and (row.get(uc) or '').strip():
+            out.append({
+                "use_case": (row.get(uc) or '').strip(),
+                "topic": topic,
+                "citations": [_snapshot_citation(line_no)],
+            })
+    return out

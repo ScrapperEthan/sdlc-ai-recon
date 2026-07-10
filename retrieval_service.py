@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only HTTP wrapper around the retrieval layer."""
 import impact_report
+import outage_report
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +81,14 @@ def _repos_payload(qs):
     )
 
 
+def _outage_impact_payload(qs):
+    supplied = [(key, _str(qs, key).strip()) for key in ("channel", "vendor", "repo") if _str(qs, key).strip()]
+    if len(supplied) != 1:
+        raise ValueError("exactly one of channel, vendor, or repo is required")
+    kind, value = supplied[0]
+    return outage_report.build_report(f"{kind}:{value}")
+
+
 def _impact_page_body():
     with open(IMPACT_HTML_PATH, encoding="utf-8") as handle:
         return handle.read()
@@ -110,6 +119,7 @@ ROUTES = {
     "/trace": lambda qs: flow.trace(_str(qs, "use_case_id") or None, _str(qs, "destination") or None),
     "/impact-report": _impact_report_payload,
     "/repos": _repos_payload,
+    "/outage-impact": _outage_impact_payload,
 }
 
 

@@ -510,6 +510,7 @@
         <div class="tabs" role="tablist" aria-label="视图切换">
           <button class="tab active" type="button" data-tab="analyze">分析影响</button>
           <button class="tab" type="button" data-tab="browse">按标签浏览</button>
+          <button class="tab" type="button" data-tab="outage">故障影响</button>
         </div>
 
         <div id="analyzePanel" class="panel">
@@ -536,12 +537,26 @@
             <div id="browseStatus" class="status" aria-live="polite"></div>
           </div>
         </div>
+
+        <div id="outagePanel" class="panel hidden">
+          <div class="controls">
+            <select id="outageKind" aria-label="故障目标类型">
+              <option value="channel">渠道 channel</option>
+              <option value="vendor">供应商 vendor</option>
+              <option value="repo">投递任务 repo</option>
+            </select>
+            <input id="outageInput" type="text" placeholder="例如：sms" aria-label="故障目标值">
+            <button id="outageButton" class="primary" type="button">分析故障影响</button>
+          </div>
+          <div id="outageStatus" class="status" aria-live="polite"></div>
+        </div>
       </div>
     </section>
 
     <section class="layout">
       <div id="analyzeResult" class="result-grid"></div>
       <div id="browseResult" class="result-grid"></div>
+      <div id="outageResult" class="result-grid"></div>
     </section>
   </main>
 
@@ -554,16 +569,27 @@
     const browseButton = document.getElementById("browseButton");
     const browseStatus = document.getElementById("browseStatus");
     const browseResult = document.getElementById("browseResult");
+    const outageKind = document.getElementById("outageKind");
+    const outageInput = document.getElementById("outageInput");
+    const outageButton = document.getElementById("outageButton");
+    const outageStatus = document.getElementById("outageStatus");
+    const outageResult = document.getElementById("outageResult");
     const tabs = Array.from(document.querySelectorAll(".tab"));
     const panels = {
       analyze: document.getElementById("analyzePanel"),
-      browse: document.getElementById("browsePanel")
+      browse: document.getElementById("browsePanel"),
+      outage: document.getElementById("outagePanel")
     };
 
     const placeholders = {
       repo: "例如：mc-hk-hase-ingress-api",
       "use-case": "例如：cancel-card",
       topic: "例如：orders.topic"
+    };
+    const outagePlaceholders = {
+      channel: "例如：sms",
+      vendor: "例如：sinch",
+      repo: "例如：mc-x-svc-bat-sinch-sms-deli-job"
     };
 
     const channelLabelMap = {
@@ -593,10 +619,16 @@
       browseStatus.textContent = message || "";
     }
 
+    function setOutageStatus(message) {
+      outageStatus.textContent = message || "";
+    }
+
     function setLoading(button, loading) {
       button.disabled = loading;
       if (button === analyzeButton) {
         button.textContent = loading ? "分析中..." : "分析影响";
+      } else if (button === outageButton) {
+        button.textContent = loading ? "分析中..." : "分析故障影响";
       } else {
         button.textContent = loading ? "筛选中..." : "筛选仓库";
       }
@@ -795,6 +827,26 @@
         "</section>";
     }
 
+    function renderOutageResult(report) {
+      const target = report.target || {};
+      const useCases = (report.affected_use_cases || {}).items || [];
+      const repos = (report.affected_repos || {}).items || [];
+      const topics = report.affected_topics || [];
+      outageResult.innerHTML =
+        '<section class="panel">' +
+          '<div class="section-title"><div><div class="meta-line"><span class="kind-pill topic">故障影响</span><span class="chip">' + escapeHtml(target.input || "") + '</span></div><h2 style="margin-top:12px;">受影响用例：' + escapeHtml((report.affected_use_cases || {}).count || 0) + ' 个</h2></div><div class="target-meta">' + renderBadges(target.channels || []) + '</div></div>' +
+          '<article class="banner ' + (report.confidence === "high" ? "honesty" : "hub") + '"><strong>置信度 / Confidence</strong><div class="small-list"><div>' + escapeHtml(report.confidence_banner || "") + '</div></div>' + renderDetails("出处", report.confidence_citations) + '</article>' +
+        '</section>' +
+        '<section class="panel"><div class="section-title"><h2>受影响用例</h2><span class="muted">来自路由快照，逐行可追溯</span></div>' +
+          (useCases.length ? '<div class="list">' + useCases.map((item) => '<article class="row-card"><div class="repo-name">' + escapeHtml(item.use_case) + '</div><div class="path-text">主题：' + escapeHtml((item.topics || []).join(", ")) + '</div>' + renderDetails("出处", item.citations) + '</article>').join("") + '</div>' : '<div class="empty">未匹配到受影响用例。</div>') +
+        '</section>' +
+        '<section class="panel"><div class="section-title"><h2>主题与判定来源</h2><span class="muted">message-map 优先，其次渠道 token / 名称启发式</span></div>' +
+          (topics.length ? '<div class="list">' + topics.map((item) => '<article class="row-card"><div class="repo-name">' + escapeHtml(item.topic) + '</div><div class="path-text">来源：' + escapeHtml(item.source) + ' · ' + escapeHtml(item.confidence) + '</div>' + renderDetails("出处", item.citations) + '</article>').join("") + '</div>' : '<div class="empty">未匹配到主题；请确认已生成拓扑并导出路由快照。</div>') +
+        '</section>' +
+        '<section class="panel"><div class="section-title"><h2>受影响仓库 / 组件</h2><span class="muted">投递任务、供应商 API 与依赖闭包</span></div>' + renderRepoItems(repos, "暂无已知仓库组件") + '</section>' +
+        '<section class="panel"><div class="section-title"><h2>出处汇总</h2></div>' + renderCitations(report.citations || []) + '</section>';
+    }
+
     async function fetchJson(url) {
       const response = await fetch(url, { headers: { Accept: "application/json" } });
       const text = await response.text();
@@ -849,6 +901,26 @@
       }
     }
 
+    async function analyzeOutage() {
+      const value = outageInput.value.trim();
+      if (!value) {
+        outageResult.innerHTML = '<section class="panel"><div class="error-box">请输入渠道、供应商或投递任务仓库。</div></section>';
+        return;
+      }
+      try {
+        setLoading(outageButton, true);
+        setOutageStatus("正在反查受影响用例、投递组件与出处...");
+        const payload = await fetchJson("/outage-impact?" + encodeURIComponent(outageKind.value) + "=" + encodeURIComponent(value));
+        renderOutageResult(payload);
+        setOutageStatus("分析完成。渠道级结论可靠；供应商级会明确标注启发式限制。");
+      } catch (error) {
+        outageResult.innerHTML = '<section class="panel"><div class="error-box">' + escapeHtml(error.message || "故障影响分析失败。") + '</div></section>';
+        setOutageStatus("分析失败，请检查输入与 delivery_topology 索引。");
+      } finally {
+        setLoading(outageButton, false);
+      }
+    }
+
     function activateTab(name) {
       tabs.forEach((tab) => {
         const active = tab.dataset.tab === name;
@@ -859,6 +931,7 @@
       });
       analyzeResult.style.display = name === "analyze" ? "" : "none";
       browseResult.style.display = name === "browse" ? "" : "none";
+      outageResult.style.display = name === "outage" ? "" : "none";
     }
 
     targetKind.addEventListener("change", () => {
@@ -867,11 +940,21 @@
 
     analyzeButton.addEventListener("click", analyze);
     browseButton.addEventListener("click", browse);
+    outageButton.addEventListener("click", analyzeOutage);
     targetInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
         analyze();
       }
+    });
+    outageInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        analyzeOutage();
+      }
+    });
+    outageKind.addEventListener("change", () => {
+      outageInput.placeholder = outagePlaceholders[outageKind.value];
     });
 
     tabs.forEach((tab) => {
@@ -882,6 +965,8 @@
     targetInput.placeholder = placeholders[targetKind.value];
     analyzeResult.innerHTML = '<section class="panel"><div class="empty">先输入一个仓库、用例或主题，再点击“分析影响”。页面会展示上游依赖、下游受影响服务、异步链路与出处。</div></section>';
     browseResult.innerHTML = '<section class="panel"><div class="empty">切换到“按标签浏览”后，可以用渠道 / 模式 / 系统过滤仓库列表。</div></section>';
+    outageInput.placeholder = outagePlaceholders[outageKind.value];
+    outageResult.innerHTML = '<section class="panel"><div class="empty">切换到“故障影响”后，输入渠道、供应商或投递任务仓库，快速查看受影响用例、组件与结论置信度。</div></section>';
   </script>
 </body>
 </html>

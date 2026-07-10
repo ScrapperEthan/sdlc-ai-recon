@@ -4,11 +4,11 @@ import collections
 from . import config
 
 
-def _load():
+def _load(edges_path=None):
     fwd = collections.defaultdict(set)   # repo -> repos it depends on
     rev = collections.defaultdict(set)   # repo -> repos that depend on it
     try:
-        with open(config.EDGES_CSV, newline='', encoding='utf-8-sig') as f:
+        with open(edges_path or config.EDGES_CSV, newline='', encoding='utf-8-sig') as f:
             for r in csv.DictReader(f):
                 a = (r.get('from_repo') or '').strip()
                 b = (r.get('to_repo') or '').strip()
@@ -18,6 +18,11 @@ def _load():
     except FileNotFoundError:
         pass
     return fwd, rev
+
+
+def load_dependency_graph(edges_path=None):
+    """Load dependency adjacency once for callers that perform many impact queries."""
+    return _load(edges_path)
 
 
 def _bfs(g, start):
@@ -31,9 +36,9 @@ def _bfs(g, start):
     return seen
 
 
-def impact(repo, transitive=False):
+def impact(repo, transitive=False, edges_path=None, graph_data=None):
     """Who is affected if `repo` changes (depended_on_by) and what it needs (depends_on)."""
-    fwd, rev = _load()
+    fwd, rev = graph_data if graph_data is not None else _load(edges_path)
     if transitive:
         up, down = _bfs(rev, repo), _bfs(fwd, repo)
     else:

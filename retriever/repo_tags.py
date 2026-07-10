@@ -12,13 +12,24 @@ def _resolve(path):
 
 def _coerce_entry(entry):
     if not isinstance(entry, dict):
-        return {"system": "", "channel": [], "mode": "", "tokens": [], "bundle": ""}
+        entry = {}
     return {
         "system": (entry.get("system") or "").strip(),
         "channel": [str(item).strip() for item in (entry.get("channel") or []) if str(item).strip()],
         "mode": (entry.get("mode") or "").strip(),
         "tokens": [str(item).strip() for item in (entry.get("tokens") or []) if str(item).strip()],
         "bundle": (entry.get("bundle") or "").strip(),
+        "serves_channels": [
+            str(item).strip() for item in (entry.get("serves_channels") or []) if str(item).strip()
+        ],
+        "mdc_common": bool(entry.get("mdc_common")),
+        "marketing_servicing": (entry.get("marketing_servicing") or "").strip(),
+        "time_critical": bool(entry.get("time_critical")),
+        "business_line": (entry.get("business_line") or "").strip(),
+        "channel_declared": [
+            str(item).strip() for item in (entry.get("channel_declared") or []) if str(item).strip()
+        ],
+        "mode_declared": (entry.get("mode_declared") or "").strip(),
     }
 
 

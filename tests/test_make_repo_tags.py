@@ -5,9 +5,12 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
 from contextlib import ExitStack
 from unittest import mock
+from xml.sax.saxutils import escape
 
+import enrich_repo_tags
 import make_repo_tags
 import retrieval_service
 from retriever import config as rconfig
@@ -39,6 +42,59 @@ ROUTE_TAGS = {
         "bundle": "email-batch",
     },
 }
+
+
+MDC_HEADERS = [
+    "Repository", "MDC Common", "SMS", "EMAIL", "PUSH", "WhatsAPP", "Letter", "Wechat",
+    "Others", "Remark", "Batch/Realtime(B/R)", "Maraketing/Servicing(M/S)",
+    "TimeCritcal(Y/N)", "CMB/WPB",
+]
+
+
+def write_fixture_xlsx(path):
+    """Build a minimal stdlib-only XLSX fixture with sparse rows and shared strings."""
+    rows = [
+        MDC_HEADERS,
+        ["mc-hk-hase-sms-job", "Y", "", "", "", "", "", "", "Y", "", "R", "S", "Y", "CMB"],
+        ["lib", "Y", "", "", "", "", "", "", "Y", "", "", "", "", ""],
+    ]
+    strings = []
+    for row in rows:
+        for value in row:
+            if value and value not in strings:
+                strings.append(value)
+
+    def cells(row_number, values):
+        values_xml = []
+        for index, value in enumerate(values):
+            if not value:  # XLSX omits blank cells; parser must retain column identity.
+                continue
+            column = chr(ord("A") + index)
+            values_xml.append(
+                f'<c r="{column}{row_number}" t="s"><v>{strings.index(value)}</v></c>'
+            )
+        return f'<row r="{row_number}">{"".join(values_xml)}</row>'
+
+    shared = "".join(f"<si><t>{escape(value)}</t></si>" for value in strings)
+    sheet = (
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{cells(1, rows[0])}{cells(2, rows[1])}{cells(3, rows[2])}</sheetData></worksheet>'
+    )
+    workbook = (
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="full Repository List" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    rels = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/></Relationships>'
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", f'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{shared}</sst>')
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", rels)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
 
 
 class MakeRepoTagsTests(unittest.TestCase):
@@ -107,6 +163,56 @@ class MakeRepoTagsTests(unittest.TestCase):
             self.assertEqual(entry["channel"], ["wechat"])
             self.assertEqual(entry["mode"], "batch")
             self.assertEqual(entry["bundle"], "manual-ingress")
+
+    def test_mdc_xlsx_enrichment_serves_channels_and_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet = os.path.join(tmp, "MDC_Repo_List_Analysis.xlsx")
+            write_fixture_xlsx(sheet)
+            mdc, source_rows = enrich_repo_tags.parse_sheet(sheet)
+            self.assertEqual(mdc["mc-hk-hase-sms-job"]["channel_declared"], ["other"])
+            self.assertEqual(mdc["mc-hk-hase-sms-job"]["marketing_servicing"], "servicing")
+            self.assertTrue(mdc["mc-hk-hase-sms-job"]["time_critical"])
+            self.assertEqual(mdc["mc-hk-hase-sms-job"]["business_line"], "cmb")
+            self.assertEqual(source_rows["lib"], 3)
+
+            edges = os.path.join(tmp, "internal_edges.csv")
+            mdc_path = os.path.join(tmp, "repo_tags.mdc.json")
+            override = os.path.join(tmp, "override.json")
+            with open(edges, "w", encoding="utf-8", newline="") as handle:
+                handle.write("from_repo,to_repo\nmc-hk-hase-sms-job,lib\n")
+            with open(mdc_path, "w", encoding="utf-8") as handle:
+                json.dump(mdc, handle)
+            with open(override, "w", encoding="utf-8") as handle:
+                json.dump({}, handle)
+
+            args = make_repo_tags.parse_args([
+                "--edges", edges, "--bundles", os.path.join(tmp, "missing-bundles.json"),
+                "--override", override, "--mdc", mdc_path, "--out", os.path.join(tmp, "repo_tags.json"),
+            ])
+            payload = make_repo_tags.build_repo_tags(args)
+            self.assertEqual(payload["mc-hk-hase-sms-job"]["channel"], ["sms"])
+            self.assertEqual(payload["mc-hk-hase-sms-job"]["channel_declared"], ["other"])
+            self.assertEqual(payload["lib"]["serves_channels"], ["sms"])
+            metrics = dict(make_repo_tags.coverage_rows(payload))
+            self.assertEqual(metrics["serves_channel_set"], 2)
+            self.assertEqual(metrics["channel_explained"], 1)
+
+            report = enrich_repo_tags.reconcile(mdc, source_rows, payload)
+            self.assertEqual(report["summary"]["mismatches"], 1)
+            self.assertEqual(report["mismatches"][0]["repo"], "mc-hk-hase-sms-job")
+            rendered = enrich_repo_tags.markdown_report(report)
+            self.assertIn("MDC_Repo_List_Analysis.xlsx:full Repository List row 2", rendered)
+
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            report_md = os.path.join(tmp, "reports", "TAG_RECONCILE.md")
+            report_json = os.path.join(tmp, "reports", "TAG_RECONCILE.json")
+            make_repo_tags.write_payload(payload, tags_path)
+            self.assertEqual(enrich_repo_tags.main([
+                "--sheet", sheet, "--out", mdc_path, "--report", "--tags", tags_path,
+                "--report-md", report_md, "--report-json", report_json,
+            ]), 0)
+            self.assertTrue(os.path.exists(report_md))
+            self.assertTrue(os.path.exists(report_json))
 
     def test_repos_route_filters_and_missing_file_404(self):
         with tempfile.TemporaryDirectory() as tmp:

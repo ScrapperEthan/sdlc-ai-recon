@@ -21,6 +21,10 @@ BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 GLOSSARY_JSON = _p("SDLC_GLOSSARY", "index", "glossary.json")
 REPO_TAGS_JSON = _p("SDLC_REPO_TAGS", "index", "repo_tags.json")
 REPO_TAGS_OVERRIDE_JSON = _p("SDLC_REPO_TAGS_OVERRIDE", "index", "repo_tags.override.json")
+MDC_SHEET_XLSX = _p("SDLC_MDC_SHEET", "MDC_Repo_List_Analysis.xlsx")
+REPO_TAGS_MDC_JSON = _p("SDLC_REPO_TAGS_MDC", "index", "repo_tags.mdc.json")
+TAG_RECONCILE_MD = _p("SDLC_TAG_RECONCILE_MD", "index", "reports", "TAG_RECONCILE.md")
+TAG_RECONCILE_JSON = _p("SDLC_TAG_RECONCILE_JSON", "index", "reports", "TAG_RECONCILE.json")
 DELIVERY_TOPOLOGY_JSON = _p("SDLC_DELIVERY_TOPOLOGY", "index", "delivery_topology.json")
 DELIVERY_TOPOLOGY_OVERRIDE_JSON = _p(
     "SDLC_DELIVERY_TOPOLOGY_OVERRIDE", "index", "delivery_topology.override.json"

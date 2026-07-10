@@ -7,6 +7,7 @@ import os
 from collections import defaultdict
 
 from retriever import config
+from retriever import graph
 
 SYSTEM_PREFIXES = (
     ("mc-hk-hase-", "hase"),
@@ -148,16 +149,47 @@ def merge_override(derived, override):
     return out
 
 
+def merge_mdc(derived, mdc):
+    """Add sheet metadata without ever replacing structural name-derived tags."""
+    out = dict(derived)
+    if not isinstance(mdc, dict):
+        return out
+    for field in (
+        "mdc_common", "marketing_servicing", "time_critical", "business_line",
+        "channel_declared", "mode_declared",
+    ):
+        if field in mdc:
+            out[field] = mdc[field]
+    return out
+
+
+def serves_channels(repo, tags, edges_path, graph_data=None):
+    affected = graph.impact(
+        repo, transitive=True, edges_path=edges_path, graph_data=graph_data
+    )["depended_on_by"]
+    affected.append(repo)
+    return sorted({channel for name in affected for channel in tags.get(name, {}).get("channel", []) if channel})
+
+
 def build_repo_tags(args):
     universe = load_repo_universe(args.edges)
     pom_only = load_pom_only_repos(args.pom_only_file, args.pom_only_repo)
     bundle_map = load_bundle_map(args.bundles)
+    mdc = load_json(args.mdc)
     overrides = load_json(args.override)
     repos = sorted(universe | pom_only)
 
-    payload = {}
+    payload = {
+        repo: merge_mdc(derive_repo_tags(repo, bundle_map), mdc.get(repo.lower()))
+        for repo in repos
+    }
     for repo in repos:
-        payload[repo] = merge_override(derive_repo_tags(repo, bundle_map), overrides.get(repo))
+        payload[repo] = merge_override(payload[repo], overrides.get(repo))
+    dependency_graph = graph.load_dependency_graph(args.edges)
+    for repo in repos:
+        payload[repo]["serves_channels"] = serves_channels(
+            repo, payload, args.edges, dependency_graph
+        )
     return payload
 
 
@@ -169,6 +201,17 @@ def coverage_rows(payload):
     system_other = sum(1 for meta in payload.values() if meta.get("system") == "other")
     channel_unknown = total - channel_set
     mode_unknown = total - mode_set
+    serves_channel_set = sum(1 for meta in payload.values() if meta.get("serves_channels"))
+    marketing_servicing_set = sum(1 for meta in payload.values() if meta.get("marketing_servicing"))
+    time_critical_set = sum(1 for meta in payload.values() if meta.get("time_critical"))
+    mdc_common_set = sum(1 for meta in payload.values() if meta.get("mdc_common"))
+    channel_explained = sum(
+        1
+        for meta in payload.values()
+        if not meta.get("channel")
+        and (meta.get("mdc_common") or "other" in meta.get("channel_declared", []) or meta.get("serves_channels"))
+    )
+    channel_true_dark = channel_unknown - channel_explained
     return [
         ("repos_total", total),
         ("system_set", system_set),
@@ -177,6 +220,12 @@ def coverage_rows(payload):
         ("system_other", system_other),
         ("channel_unknown", channel_unknown),
         ("mode_unknown", mode_unknown),
+        ("serves_channel_set", serves_channel_set),
+        ("marketing_servicing_set", marketing_servicing_set),
+        ("time_critical_set", time_critical_set),
+        ("mdc_common_set", mdc_common_set),
+        ("channel_explained", channel_explained),
+        ("channel_true_dark", channel_true_dark),
     ]
 
 
@@ -205,6 +254,7 @@ def parse_args(argv=None):
     parser.add_argument("--edges", default=config.EDGES_CSV)
     parser.add_argument("--bundles", default=config.BUNDLES_JSON)
     parser.add_argument("--override", default=config.REPO_TAGS_OVERRIDE_JSON)
+    parser.add_argument("--mdc", default=config.REPO_TAGS_MDC_JSON)
     parser.add_argument("--out", default=config.REPO_TAGS_JSON)
     parser.add_argument("--pom-only-file", help="newline-delimited repo names to add to the universe")
     parser.add_argument(

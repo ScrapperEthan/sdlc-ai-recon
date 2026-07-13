@@ -6,23 +6,35 @@
 > (the builder copies out, never writes in); writes only `index/codegraph/**` + the manifest. Don't
 > push — relay results. Background: RUNBOOK-16 results.
 
-## Prereq — mirror coverage (the gate for "all bundles")
-RUNBOOK-16 showed `mirror/` has ~16 repos, so most bundles are partial. **To build all 31 bundles the
-full mirror (~390 repos) must be cloned first** (on the approved machine). This runbook builds whatever
-is present now and reports the rest — full coverage follows the clone.
+## Prereq — a full source tree (the gate for "all bundles")
+Build needs every bundle's repos on disk. **Two ways to get there:**
+- **A local full extract (fastest — no network clone).** If you have a complete extract (e.g. the
+  `HASE_MDC` download), point `--mirror` at it. Confirmed 2026-07-13: `build_codegraph.py --mirror
+  "<HASE_MDC path>" --dry-run` → **all 31 bundles 100% present**. When this works, **RUNBOOK-18 (network
+  clone) is unnecessary.**
+- Or clone into `mirror/` via RUNBOOK-18 (`clone_mirror.py`).
 
-## Task A — dry run, then build
+Pass the same `--mirror <path>` on every `build_codegraph.py` call below. (Freshness note: an extract is a
+snapshot — fine for structural call graphs now; refresh later via clone/refresh.)
+
+## Task A — dry run, validate two bundles, then build all (in the elevated CodeGraph shell)
+Let `M` = your full source path (the `HASE_MDC` extract or `mirror/`). Dry run first:
 ```
-python build_codegraph.py --dry-run
+python build_codegraph.py --mirror "M" --dry-run
 ```
-Relay the present/total plan (which bundles are buildable now). Then build (elevated):
+**Validate the new source on two bundles before the long run** (elevated):
 ```
-python build_codegraph.py
+python build_codegraph.py --mirror "M" --only platform-core
+python build_codegraph.py --mirror "M" --only tracking
+```
+If both build clean, do the **full run** (long — it stages+indexes every bundle; can take hours):
+```
+python build_codegraph.py --mirror "M"
 ```
 **Relay the manifest summary** (`index/codegraph_build.json`): per bundle — staged_count, returncode,
-seconds, db_mib; and which bundles were skipped (0 repos present). Confirm `platform-core` now builds
-(the RUNBOOK-16 permission block should be gone in elevated mode). Sanity: the built numbers should be
-in the RUNBOOK-16 ballpark (ingress-ish ~125 MiB / ~380 s, tracking ~137 MiB / ~465 s).
+seconds, db_mib; and any failures. Sanity: numbers should be in the RUNBOOK-16 ballpark (ingress-ish
+~125 MiB / ~380 s, tracking ~137 MiB / ~465 s). Before the full run, **check free disk** — staging copies
++ per-bundle DBs across 31 bundles can total tens of GB.
 
 ## Task B — routing via the CLI (the gap RUNBOOK-16 hit is fixed)
 ```

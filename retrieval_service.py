@@ -13,6 +13,8 @@ RETRIEVAL_HOST = os.environ.get("RETRIEVAL_HOST", "127.0.0.1")
 RETRIEVAL_PORT = int(os.environ.get("RETRIEVAL_PORT", "8848"))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 IMPACT_HTML_PATH = os.path.join(STATIC_DIR, "impact.html")
+ARCH_HTML_PATH = os.path.join(STATIC_DIR, "arch.html")
+ARCH_NODES_PATH = os.path.join(STATIC_DIR, "arch_nodes.json")
 
 
 def _int(qs, key, default):
@@ -94,6 +96,25 @@ def _impact_page_body():
         return handle.read()
 
 
+def _static_file(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _arch_map_payload():
+    """Return the generated node->repo map, or an empty map plus a clear note if absent."""
+    try:
+        with open(rconfig.ARCH_MAP_JSON, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, OSError):
+        return {"nodes": {}, "note": "arch_map.json not generated yet; run make_arch_map.py (or python refresh.py)."}
+    except json.JSONDecodeError:
+        return {"nodes": {}, "note": "arch_map.json is invalid JSON; re-run make_arch_map.py."}
+    if not isinstance(data, dict):
+        return {"nodes": {}, "note": "arch_map.json is not an object; re-run make_arch_map.py."}
+    return data
+
+
 ROUTES = {
     "/impact": lambda qs: graph.impact(_required_repo(qs), _str(qs, "transitive").lower() in {"1", "true"}),
     "/hubs": lambda qs: graph.hubs(_int(qs, "top", 20)),
@@ -143,8 +164,17 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
         try:
-            if path in {"/", "/static", "/static/", "/static/impact.html"}:
+            if path in {"/", "/static", "/static/", "/static/impact.html", "/impact.html"}:
                 self._send(200, _impact_page_body(), "text/html; charset=utf-8")
+                return
+            if path in {"/arch.html", "/static/arch.html"}:
+                self._send(200, _static_file(ARCH_HTML_PATH), "text/html; charset=utf-8")
+                return
+            if path in {"/arch_nodes.json", "/static/arch_nodes.json"}:
+                self._send(200, _static_file(ARCH_NODES_PATH), "application/json; charset=utf-8")
+                return
+            if path == "/arch-map":
+                self._send_json(200, _arch_map_payload())
                 return
             if path == "/health":
                 self._send_json(200, _health_payload())

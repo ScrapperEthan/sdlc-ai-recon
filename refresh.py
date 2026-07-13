@@ -111,6 +111,17 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
             {"cmd": ["message_map_enrich.py"], "returncode": 0, "skipped": "missing message_edges.csv or mirror"}
         )
 
+    # Re-bind the architecture map from the latest delivery_topology.json + repo_tags.json so the
+    # clickable pipeline diagram never goes stale. The catalog is committed, so this always runs;
+    # missing topology/tags simply yield honestly-empty nodes rather than a failure.
+    arch_nodes = os.path.join(root, "static", "arch_nodes.json")
+    if os.path.exists(arch_nodes):
+        report["steps"].append(_run([py, "make_arch_map.py", "--catalog", arch_nodes], root))
+    else:
+        report["steps"].append(
+            {"cmd": ["make_arch_map.py"], "returncode": 0, "skipped": "missing static/arch_nodes.json"}
+        )
+
     status_path = os.path.join(index_dir, "last_indexed.json")
     with open(status_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)

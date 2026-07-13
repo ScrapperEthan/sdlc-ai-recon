@@ -1,0 +1,110 @@
+{
+  "columns": [
+    "来源 Sources",
+    "接入 Ingress",
+    "决策 Decision",
+    "渠道主题 Topics",
+    "投递任务 Delivery Jobs",
+    "出站 API Outbound",
+    "供应商 / 客户 Vendors"
+  ],
+  "nodes": [
+    {"id": "src-dsp", "label": "DSP 接入", "sub": "IB2B / EB2B · Kong", "column": 0, "slot": 2.6, "role": "external", "kind": "source"},
+    {"id": "src-file", "label": "文件适配器", "sub": "File Adapter · S3/Juniper", "column": 0, "slot": 3.2, "role": "external", "kind": "source"},
+    {"id": "src-mq", "label": "MQ 适配器", "sub": "MQ Adapter", "column": 0, "slot": 3.8, "role": "external", "kind": "source"},
+    {"id": "src-kafka", "label": "Kafka 适配器", "sub": "Kafka Adapter · MDC SDK", "column": 0, "slot": 4.4, "role": "external", "kind": "source"},
+
+    {"id": "ingress-api", "label": "接入 API", "sub": "Ingress API", "column": 1, "slot": 3.5, "role": "ingress"},
+
+    {"id": "decision-topics", "label": "决策主题", "sub": "Decision Topics", "column": 2, "slot": 3.1, "role": "decision"},
+    {"id": "decision-job", "label": "决策任务", "sub": "Decision Job · 按用例路由", "column": 2, "slot": 3.9, "role": "decision"},
+    {"id": "store-redis", "label": "Redis", "sub": "用例 / 模板", "column": 2, "slot": 5.4, "role": "external", "kind": "infra"},
+    {"id": "store-postgres", "label": "PostgreSQL", "sub": "客户信息", "column": 2, "slot": 6.1, "role": "external", "kind": "infra"},
+    {"id": "store-opensearch", "label": "OpenSearch", "sub": "投递记录", "column": 2, "slot": 6.8, "role": "external", "kind": "infra"},
+
+    {"id": "push-topics", "label": "Push 主题", "sub": "Push Topics", "column": 3, "slot": 0.0, "role": "topic", "channel": "push"},
+    {"id": "sms-topics", "label": "SMS 主题", "sub": "SMS Topics", "column": 3, "slot": 1.5, "role": "topic", "channel": "sms"},
+    {"id": "mms-topics", "label": "MMS 主题", "sub": "MMS Topics", "column": 3, "slot": 3.0, "role": "topic", "channel": "mms"},
+    {"id": "email-topics", "label": "Email 主题", "sub": "Email Topics", "column": 3, "slot": 4.0, "role": "topic", "channel": "email"},
+    {"id": "letter-topics", "label": "Letter 主题", "sub": "Letter Topics", "column": 3, "slot": 5.0, "role": "topic", "channel": "letter"},
+    {"id": "whatsapp-topics", "label": "WhatsApp 主题", "sub": "WhatsApp Topics", "column": 3, "slot": 6.0, "role": "topic", "channel": "whatsapp"},
+    {"id": "wechat-topics", "label": "WeChat 主题", "sub": "WeChat Topics", "column": 3, "slot": 7.0, "role": "topic", "channel": "wechat"},
+
+    {"id": "push-deli", "label": "Push 投递任务", "sub": "Push Delivery Job", "column": 4, "slot": 0.0, "role": "delivery-job", "channel": "push"},
+    {"id": "sms-deli", "label": "SMS 投递任务", "sub": "SMS Delivery Job", "column": 4, "slot": 1.5, "role": "delivery-job", "channel": "sms"},
+    {"id": "mms-deli", "label": "MMS 投递任务", "sub": "MMS Delivery Job", "column": 4, "slot": 3.0, "role": "delivery-job", "channel": "mms"},
+    {"id": "email-deli", "label": "Email 投递任务", "sub": "Email Delivery Job", "column": 4, "slot": 4.0, "role": "delivery-job", "channel": "email"},
+    {"id": "letter-deli", "label": "Letter 投递任务", "sub": "Letter Delivery Job", "column": 4, "slot": 5.0, "role": "delivery-job", "channel": "letter"},
+    {"id": "whatsapp-deli", "label": "WhatsApp 投递任务", "sub": "WhatsApp Delivery Job", "column": 4, "slot": 6.0, "role": "delivery-job", "channel": "whatsapp"},
+    {"id": "wechat-deli", "label": "WeChat 投递任务", "sub": "WeChat Delivery Job", "column": 4, "slot": 7.0, "role": "delivery-job", "channel": "wechat"},
+
+    {"id": "push-sns", "label": "AWS SNS", "sub": "Outbound", "column": 5, "slot": 0.0, "role": "outbound-api", "channel": "push", "vendor": "sns"},
+    {"id": "sms-csl", "label": "CSL", "sub": "Outbound API", "column": 5, "slot": 1.0, "role": "outbound-api", "channel": "sms", "vendor": "csl"},
+    {"id": "sms-3hk", "label": "3HK", "sub": "Outbound API", "column": 5, "slot": 1.5, "role": "outbound-api", "channel": "sms", "vendor": "3hk"},
+    {"id": "sms-sinch", "label": "Sinch", "sub": "Outbound API", "column": 5, "slot": 2.0, "role": "outbound-api", "channel": "sms", "vendor": "sinch"},
+    {"id": "mms-3hk", "label": "3HK MMS", "sub": "Outbound API · HTTPS→Gateway", "column": 5, "slot": 3.0, "role": "outbound-api", "channel": "mms", "vendor": "3hk"},
+    {"id": "email-pfp", "label": "PFP", "sub": "Outbound API", "column": 5, "slot": 4.0, "role": "outbound-api", "channel": "email", "vendor": "pfp"},
+    {"id": "letter-iccm", "label": "HSBC ICCM / OTX", "sub": "Letter Outbound", "column": 5, "slot": 5.0, "role": "outbound-api", "channel": "letter", "vendor": "iccm"},
+    {"id": "whatsapp-haro", "label": "HASE HARO", "sub": "WhatsApp 网关", "column": 5, "slot": 6.0, "role": "outbound-api", "channel": "whatsapp", "vendor": "haro", "note": "⚠ HARO 属 WhatsApp 通道，名称不含 whatsapp——需人工 override 绑定。"},
+    {"id": "wechat-gw", "label": "CN Gateway", "sub": "Nginx → 专线 Lease line", "column": 5, "slot": 7.0, "role": "outbound-api", "channel": "wechat", "vendor": "cn-gateway", "note": "⚠ WeChat 走 CN Gateway/专线，不经 HARO——纯基础设施，需人工 override。"},
+
+    {"id": "ext-apns-fcm", "label": "APNs / FCM", "sub": "推送终端", "column": 6, "slot": 0.0, "role": "external", "kind": "vendor", "channel": "push"},
+    {"id": "ext-csl-smsc", "label": "CSL SMSC", "sub": "短信中心", "column": 6, "slot": 1.0, "role": "external", "kind": "vendor", "channel": "sms"},
+    {"id": "ext-3hk-smsc", "label": "3HK SMSC", "sub": "短信中心", "column": 6, "slot": 1.5, "role": "external", "kind": "vendor", "channel": "sms"},
+    {"id": "ext-sinch", "label": "Sinch", "sub": "供应商", "column": 6, "slot": 2.0, "role": "external", "kind": "vendor", "channel": "sms"},
+    {"id": "ext-3hk-mmsc", "label": "3HK MMSC", "sub": "彩信中心", "column": 6, "slot": 3.0, "role": "external", "kind": "vendor", "channel": "mms"},
+    {"id": "ext-proofpoint", "label": "ProofPoint", "sub": "邮件网关", "column": 6, "slot": 4.0, "role": "external", "kind": "vendor", "channel": "email"},
+    {"id": "ext-iccm-otx", "label": "打印 / 邮寄", "sub": "ICCM / OTX 终端", "column": 6, "slot": 5.0, "role": "external", "kind": "vendor", "channel": "letter"},
+    {"id": "ext-whatsapp", "label": "WhatsApp", "sub": "客户", "column": 6, "slot": 6.0, "role": "external", "kind": "vendor", "channel": "whatsapp"},
+    {"id": "ext-wechat", "label": "WeChat", "sub": "客户", "column": 6, "slot": 7.0, "role": "external", "kind": "vendor", "channel": "wechat"}
+  ],
+  "edges": [
+    ["src-dsp", "ingress-api"],
+    ["src-file", "ingress-api"],
+    ["src-mq", "ingress-api"],
+    ["src-kafka", "ingress-api"],
+
+    ["ingress-api", "decision-topics"],
+    ["decision-topics", "decision-job"],
+
+    ["decision-job", "store-redis", "uses"],
+    ["decision-job", "store-postgres", "uses"],
+    ["decision-job", "store-opensearch", "uses"],
+
+    ["decision-job", "push-topics"],
+    ["decision-job", "sms-topics"],
+    ["decision-job", "mms-topics"],
+    ["decision-job", "email-topics"],
+    ["decision-job", "letter-topics"],
+    ["decision-job", "whatsapp-topics"],
+    ["decision-job", "wechat-topics"],
+
+    ["push-topics", "push-deli"],
+    ["sms-topics", "sms-deli"],
+    ["mms-topics", "mms-deli"],
+    ["email-topics", "email-deli"],
+    ["letter-topics", "letter-deli"],
+    ["whatsapp-topics", "whatsapp-deli"],
+    ["wechat-topics", "wechat-deli"],
+
+    ["push-deli", "push-sns"],
+    ["sms-deli", "sms-csl"],
+    ["sms-deli", "sms-3hk"],
+    ["sms-deli", "sms-sinch"],
+    ["mms-deli", "mms-3hk"],
+    ["email-deli", "email-pfp"],
+    ["letter-deli", "letter-iccm"],
+    ["whatsapp-deli", "whatsapp-haro"],
+    ["wechat-deli", "wechat-gw"],
+
+    ["push-sns", "ext-apns-fcm"],
+    ["sms-csl", "ext-csl-smsc"],
+    ["sms-3hk", "ext-3hk-smsc"],
+    ["sms-sinch", "ext-sinch"],
+    ["mms-3hk", "ext-3hk-mmsc"],
+    ["email-pfp", "ext-proofpoint"],
+    ["letter-iccm", "ext-iccm-otx"],
+    ["whatsapp-haro", "ext-whatsapp"],
+    ["wechat-gw", "ext-wechat"]
+  ]
+}

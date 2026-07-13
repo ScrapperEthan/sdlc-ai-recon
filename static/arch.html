@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>架构地图 · MDC 通知管线</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230057d9'/%3E%3Cpath d='M20 44V20h8v16h16v8H20Z' fill='white'/%3E%3Ccircle cx='44' cy='20' r='8' fill='%23ffd166'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fb;
+      --panel: #ffffff;
+      --panel-alt: #eef3f9;
+      --line: #d7dfeb;
+      --text: #152033;
+      --muted: #5a6a82;
+      --accent: #0057d9;
+      --accent-soft: #dfeaff;
+      --success: #177245;
+      --success-bg: #e7f6ec;
+      --warning: #8f5a00;
+      --warning-bg: #fff6db;
+      --danger: #9a2f2f;
+      --danger-bg: #ffe7e7;
+      --shadow: 0 20px 50px rgba(21, 32, 51, 0.08);
+      --sms: #0057d9;
+      --push: #7d4df5;
+      --email: #107c41;
+      --whatsapp: #0d8f5b;
+      --wechat: #007a3d;
+      --letter: #8f5a00;
+      --mms: #0f766e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(0, 87, 217, 0.15), transparent 28rem),
+        linear-gradient(180deg, #fbfdff 0%, var(--bg) 45%, #eef2f8 100%);
+    }
+
+    .shell {
+      width: min(1360px, calc(100vw - 32px));
+      margin: 24px auto 40px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero, .panel {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(215, 223, 235, 0.9);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .hero { padding: 26px 28px; display: grid; gap: 16px; }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      width: fit-content;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .nav { display: inline-flex; gap: 8px; }
+
+    .nav a {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 8px 16px;
+      font-weight: 700;
+      font-size: 14px;
+      text-decoration: none;
+      transition: 160ms ease;
+    }
+
+    .nav a.active { border-color: transparent; background: var(--text); color: #fff; }
+    .nav a:hover { transform: translateY(-1px); }
+
+    h1, h2, h3 { margin: 0; }
+    h1 { font-size: clamp(26px, 3.4vw, 40px); line-height: 1.1; }
+    .hero p, .muted { margin: 0; color: var(--muted); line-height: 1.6; }
+
+    .coverage {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 0 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      background: var(--panel-alt);
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+    .pill.solid { background: var(--accent-soft); color: var(--accent); border-color: rgba(0,87,217,0.2); }
+
+    .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }
+    .swatch.empty { background: #eef1f6; border: 1px dashed #b8c2d4; }
+
+    .board { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; }
+
+    .diagram-wrap {
+      padding: 14px;
+      overflow-x: auto;
+    }
+
+    svg#diagram { width: 100%; min-width: 1080px; height: auto; display: block; }
+
+    .node { cursor: pointer; }
+    .node rect.box { transition: 140ms ease; }
+    .node:hover rect.box { filter: drop-shadow(0 6px 14px rgba(21,32,51,0.16)); }
+    .node.selected rect.box { stroke-width: 3; }
+    .node.empty { opacity: 0.72; }
+
+    .note-banner {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--warning-bg);
+      color: var(--warning);
+      border: 1px solid rgba(143,90,0,0.18);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .side { position: sticky; top: 18px; min-height: 320px; padding: 20px; }
+    .side .hint { color: var(--muted); line-height: 1.7; }
+
+    .side-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .side-head h2 { font-size: 20px; }
+    .side-head .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .close-btn {
+      border: none; background: var(--panel-alt); color: var(--muted);
+      width: 32px; height: 32px; border-radius: 10px; cursor: pointer; font-size: 18px; line-height: 1;
+    }
+
+    .meta-line { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      min-height: 28px; padding: 0 11px; border-radius: 999px;
+      font-size: 12.5px; font-weight: 700; white-space: nowrap;
+      background: var(--panel-alt); color: var(--muted); border: 1px solid var(--line);
+    }
+    .chip.badge { color: #fff; border: none; }
+    .chip.badge.sms { background: var(--sms); }
+    .chip.badge.push { background: var(--push); }
+    .chip.badge.email { background: var(--email); }
+    .chip.badge.whatsapp { background: var(--whatsapp); }
+    .chip.badge.wechat { background: var(--wechat); }
+    .chip.badge.letter { background: var(--letter); }
+    .chip.badge.mms { background: var(--mms); }
+    .chip.count { background: var(--accent-soft); color: var(--accent); border: none; }
+
+    .side h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 18px 0 8px; }
+
+    .repo-list { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+    .repo-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+      background: linear-gradient(180deg, #fff, #f9fbff);
+    }
+    .repo-item .name { font-size: 13.5px; font-weight: 600; word-break: break-all; }
+    .repo-item a.analyze {
+      flex: none; text-decoration: none; font-weight: 700; font-size: 12.5px;
+      color: var(--accent); border: 1px solid rgba(0,87,217,0.25); border-radius: 999px; padding: 4px 10px;
+    }
+    .repo-item a.analyze:hover { background: var(--accent-soft); }
+
+    .empty-box {
+      padding: 14px; border-radius: 12px; text-align: center; color: var(--muted);
+      background: var(--panel-alt); border: 1px dashed var(--line); line-height: 1.6; font-size: 13px;
+    }
+
+    button.outage {
+      width: 100%; min-height: 44px; border: none; border-radius: 12px; cursor: pointer;
+      font: inherit; font-weight: 700; color: #fff;
+      background: linear-gradient(135deg, #0057d9 0%, #2f7dff 100%);
+      box-shadow: 0 12px 26px rgba(0,87,217,0.22);
+      transition: transform 140ms ease;
+    }
+    button.outage.heuristic { background: linear-gradient(135deg, #8f5a00 0%, #c98a1e 100%); box-shadow: 0 12px 26px rgba(143,90,0,0.2); }
+    button.outage:hover { transform: translateY(-1px); }
+    button.outage:disabled { opacity: 0.7; cursor: wait; transform: none; }
+
+    .outage-result { margin-top: 12px; display: grid; gap: 10px; }
+    .banner { padding: 13px 15px; border-radius: 14px; border: 1px solid transparent; font-size: 13px; line-height: 1.55; }
+    .banner.high { background: var(--success-bg); color: var(--success); border-color: rgba(23,114,69,0.2); }
+    .banner.heuristic { background: var(--warning-bg); color: var(--warning); border-color: rgba(143,90,0,0.18); }
+    .banner.error { background: var(--danger-bg); color: var(--danger); border-color: rgba(154,47,47,0.15); }
+    .uc-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+
+    @media (max-width: 940px) {
+      .board { grid-template-columns: 1fr; }
+      .side { position: static; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="topbar">
+        <span class="eyebrow">Architecture Map · MDC Pipeline</span>
+        <nav class="nav">
+          <a href="/impact.html">分析</a>
+          <a href="/arch.html" class="active">架构图</a>
+        </nav>
+      </div>
+      <h1>MDC 通知管线，<br>每个节点都指向真实仓库。</h1>
+      <p>面向领导层演示、新人上手与投屏救火：从来源到供应商的完整通知链路。点击任意节点，查看它背后的真实仓库、覆盖渠道，并一键跳转到影响分析或故障影响反查。</p>
+      <div id="coverage" class="coverage"></div>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--sms)"></span>SMS</span>
+        <span><span class="swatch" style="background:var(--push)"></span>Push</span>
+        <span><span class="swatch" style="background:var(--email)"></span>Email</span>
+        <span><span class="swatch" style="background:var(--mms)"></span>MMS</span>
+        <span><span class="swatch" style="background:var(--whatsapp)"></span>WhatsApp</span>
+        <span><span class="swatch" style="background:var(--wechat)"></span>WeChat</span>
+        <span><span class="swatch" style="background:var(--letter)"></span>Letter</span>
+        <span><span class="swatch empty"></span>无绑定仓库（诚实留白）</span>
+      </div>
+    </section>
+
+    <section class="board">
+      <div class="panel diagram-wrap">
+        <svg id="diagram" role="img" aria-label="MDC 通知管线架构图"></svg>
+      </div>
+      <aside id="side" class="panel side">
+        <p class="hint">点击左侧任意节点，查看它绑定的真实仓库、覆盖渠道，以及故障影响反查入口。</p>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const COL_W = 200, ROW_H = 60, NODE_W = 158, NODE_H = 48;
+    const PAD_X = 28, PAD_TOP = 100, PAD_BOTTOM = 34;
+
+    const CHANNEL_COLORS = {
+      sms: "#0057d9", push: "#7d4df5", email: "#107c41",
+      whatsapp: "#0d8f5b", wechat: "#007a3d", letter: "#8f5a00", mms: "#0f766e"
+    };
+    const ROLE_COLORS = { ingress: "#2f7dff", decision: "#ad5a00" };
+    const KIND_COLORS = { source: "#5a6a82", infra: "#6b7280", vendor: "#425168" };
+    const CHANNEL_LABELS = {
+      sms: "SMS", push: "Push", email: "Email", whatsapp: "WhatsApp",
+      wechat: "WeChat", letter: "Letter", mms: "MMS"
+    };
+
+    const state = { catalog: null, archMap: { nodes: {} }, nodeById: {}, selected: null };
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    function hexToRgba(hex, alpha) {
+      const clean = hex.replace("#", "");
+      const r = parseInt(clean.substring(0, 2), 16);
+      const g = parseInt(clean.substring(2, 4), 16);
+      const b = parseInt(clean.substring(4, 6), 16);
+      return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+    }
+
+    function nodeColor(node) {
+      if (node.channel && CHANNEL_COLORS[node.channel]) return CHANNEL_COLORS[node.channel];
+      if (node.role && ROLE_COLORS[node.role]) return ROLE_COLORS[node.role];
+      if (node.kind && KIND_COLORS[node.kind]) return KIND_COLORS[node.kind];
+      return "#5a6a82";
+    }
+
+    function binding(id) {
+      return (state.archMap.nodes && state.archMap.nodes[id]) || { repos: [], repo_count: 0, serves_channels: [] };
+    }
+
+    function el(tag, attrs, text) {
+      const node = document.createElementNS(SVGNS, tag);
+      for (const key in attrs) node.setAttribute(key, attrs[key]);
+      if (text != null) node.textContent = text;
+      return node;
+    }
+
+    function xOf(node) { return PAD_X + node.column * COL_W; }
+    function yOf(node) { return PAD_TOP + node.slot * ROW_H; }
+
+    async function fetchJson(url) {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const raw = await response.text();
+      let payload;
+      try { payload = raw ? JSON.parse(raw) : {}; }
+      catch (error) { throw new Error("服务返回了非 JSON 响应。"); }
+      if (!response.ok) throw new Error(payload.error || "请求失败。");
+      return payload;
+    }
+
+    function renderCoverage() {
+      const nodes = state.catalog.nodes || [];
+      const total = nodes.length;
+      const bound = nodes.filter((n) => binding(n.id).repo_count > 0).length;
+      const box = document.getElementById("coverage");
+      let html = '<span class="pill solid">节点绑定 ' + bound + " / " + total + "</span>";
+      const generated = state.archMap.generated_at;
+      if (generated) html += '<span class="pill">数据生成于 ' + escapeHtml(generated) + "</span>";
+      if (state.archMap.note) {
+        html += '<span class="pill">' + escapeHtml(state.archMap.note) + "</span>";
+      }
+      box.innerHTML = html;
+    }
+
+    function renderDiagram() {
+      const svg = document.getElementById("diagram");
+      const nodes = state.catalog.nodes || [];
+      const edges = state.catalog.edges || [];
+      const columns = state.catalog.columns || [];
+      const maxCol = nodes.reduce((m, n) => Math.max(m, n.column), 0);
+      const maxSlot = nodes.reduce((m, n) => Math.max(m, n.slot), 0);
+      const width = PAD_X + maxCol * COL_W + NODE_W + PAD_X;
+      const height = PAD_TOP + maxSlot * ROW_H + NODE_H + PAD_BOTTOM;
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      // Column headers.
+      columns.forEach((label, index) => {
+        const cx = PAD_X + index * COL_W + NODE_W / 2;
+        svg.appendChild(el("text", {
+          x: cx, y: 34, "text-anchor": "middle",
+          "font-size": 13, "font-weight": 700, fill: "#152033"
+        }, label));
+        svg.appendChild(el("line", {
+          x1: cx, y1: 46, x2: cx, y2: 58, stroke: "#c3cede", "stroke-width": 1
+        }));
+      });
+
+      // Edges (drawn first, behind nodes).
+      edges.forEach((edge) => {
+        const from = state.nodeById[edge[0]];
+        const to = state.nodeById[edge[1]];
+        if (!from || !to) return;
+        const dashed = edge[2] === "uses";
+        const x1 = xOf(from) + NODE_W, y1 = yOf(from) + NODE_H / 2;
+        const x2 = xOf(to), y2 = yOf(to) + NODE_H / 2;
+        const mid = (x1 + x2) / 2;
+        svg.appendChild(el("path", {
+          d: "M " + x1 + " " + y1 + " C " + mid + " " + y1 + ", " + mid + " " + y2 + ", " + x2 + " " + y2,
+          fill: "none",
+          stroke: dashed ? "#b8c2d4" : "#9fb0c9",
+          "stroke-width": dashed ? 1.4 : 1.8,
+          "stroke-dasharray": dashed ? "5 5" : "none",
+          opacity: 0.85
+        }));
+      });
+
+      // Nodes.
+      nodes.forEach((node) => {
+        const bind = binding(node.id);
+        const empty = bind.repo_count === 0;
+        const color = nodeColor(node);
+        const x = xOf(node), y = yOf(node);
+        const g = el("g", { "data-node-id": node.id, class: "node" + (empty ? " empty" : "") });
+
+        g.appendChild(el("rect", {
+          class: "box", x: x, y: y, width: NODE_W, height: NODE_H, rx: 12,
+          fill: empty ? "#eef1f6" : hexToRgba(color, 0.12),
+          stroke: empty ? "#b8c2d4" : color,
+          "stroke-width": 1.6,
+          "stroke-dasharray": empty ? "5 4" : "none"
+        }));
+        g.appendChild(el("text", {
+          x: x + 14, y: y + 20, "font-size": 12.5, "font-weight": 700,
+          fill: empty ? "#5a6a82" : "#152033"
+        }, node.label));
+        if (node.sub) {
+          g.appendChild(el("text", {
+            x: x + 14, y: y + 36, "font-size": 10.5, fill: "#6b7a92"
+          }, node.sub));
+        }
+        if (node.note) {
+          g.appendChild(el("text", {
+            x: x + NODE_W - 12, y: y + 20, "text-anchor": "end", "font-size": 13
+          }, "⚠"));
+        }
+        if (!empty) {
+          const bx = x + NODE_W - 15, by = y + 14;
+          g.appendChild(el("circle", { cx: bx, cy: by, r: 11, fill: color }));
+          const shown = bind.repo_count > 99 ? "99+" : String(bind.repo_count);
+          g.appendChild(el("text", {
+            x: bx, y: by + 4, "text-anchor": "middle", "font-size": 11, "font-weight": 700, fill: "#fff"
+          }, shown));
+        }
+        g.addEventListener("click", () => selectNode(node.id));
+        svg.appendChild(g);
+      });
+    }
+
+    function badgeChip(channel) {
+      const key = String(channel || "").toLowerCase();
+      const label = CHANNEL_LABELS[key] || String(channel || "").toUpperCase();
+      const cls = CHANNEL_COLORS[key] ? " " + key : "";
+      return '<span class="chip badge' + cls + '">' + escapeHtml(label) + "</span>";
+    }
+
+    function selectNode(id) {
+      state.selected = id;
+      Array.from(document.querySelectorAll(".node")).forEach((g) => {
+        g.classList.toggle("selected", g.getAttribute("data-node-id") === id);
+      });
+      renderSide(id);
+    }
+
+    function outageDescriptor(node) {
+      if (node.vendor) {
+        return { kind: "vendor", value: node.vendor, heuristic: true,
+                 label: "查故障影响（供应商级 · 启发式）" };
+      }
+      if (node.channel && (node.role === "topic" || node.role === "delivery-job")) {
+        return { kind: "channel", value: node.channel, heuristic: false,
+                 label: "查故障影响（渠道级）" };
+      }
+      return null;
+    }
+
+    function renderSide(id) {
+      const node = state.nodeById[id];
+      const bind = binding(id);
+      const side = document.getElementById("side");
+
+      const meta = [];
+      if (node.role) meta.push('<span class="chip">' + escapeHtml(node.role) + "</span>");
+      if (node.channel) meta.push(badgeChip(node.channel));
+      if (node.vendor) meta.push('<span class="chip">vendor · ' + escapeHtml(node.vendor) + "</span>");
+      meta.push('<span class="chip count">仓库 ' + bind.repo_count + " 个</span>");
+
+      const serves = (bind.serves_channels || []);
+      const servesHtml = serves.length
+        ? '<div class="meta-line">' + serves.map(badgeChip).join("") + "</div>"
+        : '<div class="empty-box">暂无 serves_channels 汇总（该节点未绑定带渠道的仓库）。</div>';
+
+      const repos = bind.repos || [];
+      const reposHtml = repos.length
+        ? '<div class="repo-list">' + repos.map((repo) =>
+            '<div class="repo-item"><span class="name">' + escapeHtml(repo) + "</span>" +
+            '<a class="analyze" href="/impact.html?target=' + encodeURIComponent(repo) + '">分析 →</a></div>'
+          ).join("") + "</div>"
+        : '<div class="empty-box">该节点暂无绑定仓库。可能是纯基础设施、供应商终端，或名称不显性需要人工 override —— 我们如实留白，而非编造。</div>';
+
+      const noteHtml = node.note
+        ? '<div class="note-banner">' + escapeHtml(node.note) + "</div>"
+        : "";
+
+      const outage = outageDescriptor(node);
+      const outageHtml = outage
+        ? '<h3>故障影响反查</h3>' +
+          '<button class="outage' + (outage.heuristic ? " heuristic" : "") + '" type="button" ' +
+          'data-kind="' + outage.kind + '" data-value="' + escapeHtml(outage.value) + '">' +
+          escapeHtml(outage.label) + "</button>" +
+          '<div class="outage-result" id="outageResult"></div>'
+        : "";
+
+      side.innerHTML =
+        '<div class="side-head">' +
+          "<div><h2>" + escapeHtml(node.label) + "</h2>" +
+          (node.sub ? '<div class="sub">' + escapeHtml(node.sub) + "</div>" : "") + "</div>" +
+          '<button class="close-btn" type="button" id="closeSide" aria-label="关闭">×</button>' +
+        "</div>" +
+        '<div class="meta-line">' + meta.join("") + "</div>" +
+        noteHtml +
+        "<h3>覆盖渠道 serves_channels</h3>" + servesHtml +
+        "<h3>绑定的真实仓库</h3>" + reposHtml +
+        outageHtml;
+
+      document.getElementById("closeSide").addEventListener("click", clearSide);
+      const button = side.querySelector("button.outage");
+      if (button) button.addEventListener("click", () => runOutage(button));
+    }
+
+    function clearSide() {
+      state.selected = null;
+      Array.from(document.querySelectorAll(".node.selected")).forEach((g) => g.classList.remove("selected"));
+      document.getElementById("side").innerHTML =
+        '<p class="hint">点击左侧任意节点，查看它绑定的真实仓库、覆盖渠道，以及故障影响反查入口。</p>';
+    }
+
+    async function runOutage(button) {
+      const kind = button.getAttribute("data-kind");
+      const value = button.getAttribute("data-value");
+      const result = document.getElementById("outageResult");
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "反查中...";
+      try {
+        const payload = await fetchJson("/outage-impact?" + encodeURIComponent(kind) + "=" + encodeURIComponent(value));
+        const count = (payload.affected_use_cases || {}).count || 0;
+        const items = (payload.affected_use_cases || {}).items || [];
+        const level = payload.confidence === "high" ? "high" : "heuristic";
+        const chips = items.slice(0, 8).map((item) =>
+          '<span class="chip">' + escapeHtml(item.use_case) + "</span>").join("");
+        const more = items.length > 8 ? '<span class="chip">+' + (items.length - 8) + "</span>" : "";
+        result.innerHTML =
+          '<div class="banner ' + level + '"><strong>受影响用例：' + count + " 个</strong><br>" +
+          escapeHtml(payload.confidence_banner || "") + "</div>" +
+          (chips ? '<div class="uc-chips">' + chips + more + "</div>" : "");
+      } catch (error) {
+        result.innerHTML = '<div class="banner error">' + escapeHtml(error.message || "反查失败。") + "</div>";
+      } finally {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+
+    async function boot() {
+      try {
+        const catalog = await fetchJson("/static/arch_nodes.json");
+        let archMap;
+        try { archMap = await fetchJson("/arch-map"); }
+        catch (error) { archMap = { nodes: {}, note: "无法加载 /arch-map：" + (error.message || "") }; }
+        state.catalog = catalog;
+        state.archMap = archMap && archMap.nodes ? archMap : { nodes: {} };
+        state.nodeById = {};
+        (catalog.nodes || []).forEach((node) => { state.nodeById[node.id] = node; });
+        renderCoverage();
+        renderDiagram();
+      } catch (error) {
+        document.getElementById("side").innerHTML =
+          '<div class="empty-box">加载架构目录失败：' + escapeHtml(error.message || "") +
+          "<br>请确认通过 retrieval_service 访问本页（而非直接打开文件）。</div>";
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

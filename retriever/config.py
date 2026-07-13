@@ -29,3 +29,8 @@ DELIVERY_TOPOLOGY_JSON = _p("SDLC_DELIVERY_TOPOLOGY", "index", "delivery_topolog
 DELIVERY_TOPOLOGY_OVERRIDE_JSON = _p(
     "SDLC_DELIVERY_TOPOLOGY_OVERRIDE", "index", "delivery_topology.override.json"
 )
+# Architecture map: static node catalog (committed drawing skeleton, no repo names) plus
+# the generated node->repo binding and an optional hand override for non-name-revealing nodes.
+ARCH_NODES_JSON = _p("SDLC_ARCH_NODES", "static", "arch_nodes.json")
+ARCH_MAP_JSON = _p("SDLC_ARCH_MAP", "index", "arch_map.json")
+ARCH_MAP_OVERRIDE_JSON = _p("SDLC_ARCH_MAP_OVERRIDE", "index", "arch_map.override.json")

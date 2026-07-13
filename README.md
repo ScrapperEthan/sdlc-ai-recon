@@ -38,6 +38,8 @@ reports) live in separate folders (`recon_out/`, `index/`), never inside a repo.
 | `impact.py` | Query the dependency graph: blast radius of changing a repo |
 | `impact_report.py` | Compose dependency, async-route, channel, and hub data into a cited impact report |
 | `static/impact.html` | Self-contained demo UI for presenting impact reports and repo-tag browsing over the retrieval service |
+| `make_arch_map.py` | Bind the static MDC-pipeline node catalog (`static/arch_nodes.json`) to real repos from `delivery_topology.json` + `repo_tags.json`, emitting `index/arch_map.json` |
+| `static/arch.html` | Self-contained clickable architecture map: every pipeline node links to its real repos, impact analysis, and channel/vendor outage reports (`/arch.html`, `/arch-map`) |
 | `RUNBOOK-3-message-map.md` | **Step 3 — message map.** Extract who-publishes/consumes which queue/topic (the async wiring) |
 | `group.py` | Auto-derive a business-flow bundle of repos to index together (no tribal knowledge needed) |
 | `RETRIEVER.md` + `retriever/` + `cli.py` | **Step 4 — the retrieval/index layer.** One read-only toolset (impact, message routing, use-case routing, code search) the assistant queries |

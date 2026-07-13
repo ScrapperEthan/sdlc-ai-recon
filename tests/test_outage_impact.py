@@ -49,10 +49,13 @@ class OutageImpactTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(index_dir, "tbl_event_router_usecase_topic.snapshot.csv")))
         stack.enter_context(mock.patch.object(rconfig, "DELIVERY_TOPOLOGY_JSON", os.path.join(index_dir, "delivery_topology.json")))
         stack.enter_context(mock.patch.object(rconfig, "DELIVERY_TOPOLOGY_OVERRIDE_JSON", os.path.join(index_dir, "delivery_topology.override.json")))
+        # Isolate from the box's real repo_tags.json — build_topology merges its repos into
+        # the universe, so without this the fixture leaks real *-deli-job repos.
+        stack.enter_context(mock.patch.object(rconfig, "REPO_TAGS_JSON", os.path.join(index_dir, "repo_tags.json")))
 
     def _build_topology(self):
         payload, missing_jobs, missing_apis = make_delivery_topology.build_topology(
-            rconfig.EDGES_CSV, rconfig.DELIVERY_TOPOLOGY_OVERRIDE_JSON
+            rconfig.EDGES_CSV, rconfig.DELIVERY_TOPOLOGY_OVERRIDE_JSON, rconfig.REPO_TAGS_JSON
         )
         make_delivery_topology.write_payload(payload, rconfig.DELIVERY_TOPOLOGY_JSON)
         return payload, missing_jobs, missing_apis

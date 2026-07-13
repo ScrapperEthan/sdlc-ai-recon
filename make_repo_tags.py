@@ -18,6 +18,9 @@ SYSTEM_PREFIXES = (
     ("doris-", "data"),
 )
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
+# "other"/"others" is a sheet bucket, NOT a delivery channel — it must never enter the
+# authoritative `channel` field or `serves_channels` (it lives only in `channel_declared`).
+NON_CHANNELS = frozenset({"other", "others", "unknown", "n/a", ""})
 MODE_ALIASES = {"rt": "realtime", "bat": "batch", "batch": "batch"}
 ROLE_SUFFIXES = ("job", "api", "core", "lib")
 
@@ -142,10 +145,19 @@ def merge_override(derived, override):
     for field in ("system", "mode", "bundle"):
         if field in override:
             out[field] = str(override.get(field) or "").strip()
-    for field in ("channel", "tokens"):
-        if field in override:
-            values = override.get(field) or []
-            out[field] = [str(value).strip() for value in values if str(value).strip()]
+    if "tokens" in override:
+        values = override.get("tokens") or []
+        out["tokens"] = [str(value).strip() for value in values if str(value).strip()]
+    if "channel" in override:
+        # Keep only real delivery channels; a ["others"]/empty override must NOT clobber a
+        # name-derived channel (guards against the stale bulk-"others" override file).
+        real = [
+            str(value).strip().lower()
+            for value in (override.get("channel") or [])
+            if str(value).strip().lower() not in NON_CHANNELS
+        ]
+        if real:
+            out["channel"] = real
     return out
 
 
@@ -168,7 +180,12 @@ def serves_channels(repo, tags, edges_path, graph_data=None):
         repo, transitive=True, edges_path=edges_path, graph_data=graph_data
     )["depended_on_by"]
     affected.append(repo)
-    return sorted({channel for name in affected for channel in tags.get(name, {}).get("channel", []) if channel})
+    return sorted({
+        channel
+        for name in affected
+        for channel in tags.get(name, {}).get("channel", [])
+        if channel and channel.lower() not in NON_CHANNELS
+    })
 
 
 def build_repo_tags(args):

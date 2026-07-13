@@ -164,6 +164,30 @@ class MakeRepoTagsTests(unittest.TestCase):
             self.assertEqual(entry["mode"], "batch")
             self.assertEqual(entry["bundle"], "manual-ingress")
 
+    def test_others_override_neither_clobbers_channel_nor_pollutes_serves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            override = os.path.join(tmp, "override.json")
+            with open(edges, "w", encoding="utf-8", newline="") as handle:
+                handle.write("from_repo,to_repo\nmc-hk-hase-sms-job,lib\n")
+            with open(override, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"mc-hk-hase-sms-job": {"channel": ["others"]}, "lib": {"channel": ["others"]}},
+                    handle,
+                )
+            args = make_repo_tags.parse_args([
+                "--edges", edges, "--bundles", os.path.join(tmp, "missing.json"),
+                "--override", override, "--mdc", os.path.join(tmp, "missing-mdc.json"),
+                "--out", os.path.join(tmp, "out.json"),
+            ])
+            payload = make_repo_tags.build_repo_tags(args)
+            # A ["others"] override must NOT clobber the name-derived channel or add a channel.
+            self.assertEqual(payload["mc-hk-hase-sms-job"]["channel"], ["sms"])
+            self.assertEqual(payload["lib"]["channel"], [])
+            # "others" must never appear in serves_channels.
+            self.assertEqual(payload["lib"]["serves_channels"], ["sms"])
+            self.assertNotIn("others", payload["mc-hk-hase-sms-job"]["serves_channels"])
+
     def test_mdc_xlsx_enrichment_serves_channels_and_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
             sheet = os.path.join(tmp, "MDC_Repo_List_Analysis.xlsx")

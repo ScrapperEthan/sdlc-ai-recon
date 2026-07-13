@@ -1,0 +1,78 @@
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from retriever import config, repo_tags, unified_impact
+
+
+def _write_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
+class BundleRootForTests(unittest.TestCase):
+    def _fixture(self, tmp):
+        """A manifest with one clean build (ingress) and one failed build (tracking)."""
+        ingress_root = os.path.join(tmp, "codegraph", "ingress")
+        os.makedirs(os.path.join(ingress_root, "mc-hk-hase-ingress-api"))  # a staged repo dir
+        manifest = os.path.join(tmp, "codegraph_build.json")
+        _write_json(
+            manifest,
+            {
+                "generated_at": "2026-07-13T00:00:00Z",
+                "bundles": [
+                    {"bundle": "ingress", "root": ingress_root, "returncode": 0},
+                    {"bundle": "tracking", "root": os.path.join(tmp, "x"), "returncode": 1},
+                    {"bundle": "empty", "skipped": "no repos in mirror", "missing_count": 3},
+                ],
+            },
+        )
+        tags = os.path.join(tmp, "repo_tags.json")
+        _write_json(tags, {"mc-hk-hase-ingress-api": {"bundle": "ingress"}})
+        return manifest, tags, ingress_root
+
+    def test_resolves_explicit_bundle_then_repo_tag_then_dir_then_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, tags, ingress_root = self._fixture(tmp)
+            with mock.patch.object(config, "CODEGRAPH_BUILD_JSON", manifest), mock.patch.object(
+                config, "REPO_TAGS_JSON", tags
+            ):
+                # (1) explicit bundle arg that is built
+                self.assertEqual(
+                    unified_impact.bundle_root_for("AnySymbol", bundle="ingress"), ingress_root
+                )
+                # (2) seed is a repo -> routes by its repo_tags bundle
+                self.assertEqual(
+                    unified_impact.bundle_root_for("mc-hk-hase-ingress-api"), ingress_root
+                )
+                # (3) symbol seed matched to the built staging dir that contains the repo name
+                self.assertEqual(
+                    unified_impact.bundle_root_for("mc-hk-hase-ingress-api", bundle="unbuilt"),
+                    ingress_root,
+                )
+                # explicit bundle that only failed to build -> not a root; falls through to None
+                self.assertIsNone(unified_impact.bundle_root_for("nope", bundle="tracking"))
+                # unroutable seed -> None (caller falls back to process cwd)
+                self.assertIsNone(unified_impact.bundle_root_for("TotallyUnknownSymbol"))
+
+    def test_no_manifest_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "codegraph_build.json")
+            with mock.patch.object(config, "CODEGRAPH_BUILD_JSON", missing):
+                self.assertIsNone(unified_impact.bundle_root_for("x", bundle="ingress"))
+
+    def test_call_graph_falls_back_cleanly_without_codegraph(self):
+        with mock.patch.object(unified_impact.shutil, "which", return_value=None), mock.patch.object(
+            unified_impact.code, "search_code", return_value=["hit-1"]
+        ):
+            result = unified_impact._call_graph("Seed", cwd="/some/root")
+            self.assertFalse(result["available"])
+            self.assertEqual(result["bundle_root"], "/some/root")
+            self.assertEqual(result["fallback_hits"], ["hit-1"])
+
+
+if __name__ == "__main__":
+    unittest.main()

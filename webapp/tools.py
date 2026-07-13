@@ -33,7 +33,8 @@ TOOLS = [
     _schema("trace", "Stitch use-case/destination across the async message wiring.",
             {"use_case_id": {"type": "string"}, "destination": {"type": "string"}}),
     _schema("unified_impact", "Blast radius across deps, async message peers, and callers/source hits.",
-            {"seed": {"type": "string"}, "transitive": {"type": "boolean"}}, ["seed"]),
+            {"seed": {"type": "string"}, "transitive": {"type": "boolean"},
+             "bundle": {"type": "string"}}, ["seed"]),
     _schema("call_graph", "Synchronous who-calls-whom via the CodeGraph CLI (if installed).",
             {"query": {"type": "string"}}, ["query"]),
 ]
@@ -60,7 +61,7 @@ def dispatch(name, a):
     if name == "trace":
         return flow.trace(a.get("use_case_id") or None, a.get("destination") or None)
     if name == "unified_impact":
-        return unified_impact.query(a["seed"], a.get("transitive", False))
+        return unified_impact.query(a["seed"], a.get("transitive", False), a.get("bundle"))
     if name == "call_graph":
         return _call_graph(a["query"])
     return {"error": f"unknown tool: {name}"}

@@ -1,8 +1,16 @@
-"""Unified blast-radius view across deps, async messages, and code evidence."""
+"""Unified blast-radius view across deps, async messages, and code evidence.
+
+Once CodeGraph indexes are built per bundle (see ``build_codegraph.py``), ``codegraph explore``
+must run in the *right* bundle's staging root — not the process cwd. ``bundle_root_for`` resolves
+that root from the build manifest; when nothing is built (or the seed can't be routed) it returns
+``None`` and we fall back to the pre-build cwd behaviour, so nothing regresses.
+"""
+import json
+import os
 import shutil
 import subprocess
 
-from . import code, config, graph, messages
+from . import code, config, graph, messages, repo_tags
 
 
 def _message_peers(seed):
@@ -31,43 +39,93 @@ def _message_peers(seed):
     return peers
 
 
-def _call_graph(seed):
+def _built_roots():
+    """{bundle: staging_root} for manifest entries that built cleanly (returncode == 0)."""
+    try:
+        with open(config.CODEGRAPH_BUILD_JSON, encoding="utf-8-sig") as handle:
+            manifest = json.load(handle)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    roots = {}
+    for entry in (manifest or {}).get("bundles") or []:
+        if isinstance(entry, dict) and entry.get("returncode") == 0 and entry.get("root"):
+            roots[entry.get("bundle")] = entry["root"]
+    return roots
+
+
+def bundle_root_for(seed, bundle=None):
+    """Resolve the staging root to run ``codegraph explore`` in for this seed.
+
+    (1) explicit ``bundle`` arg if built; else (2) if ``seed`` is a repo in repo_tags.json, its
+    ``bundle`` field's root; else (3) a built bundle whose staging dir contains a ``<seed>`` repo
+    dir; else ``None`` (caller falls back to the process cwd — back-compatible pre-build).
+    """
+    roots = _built_roots()
+    if not roots:
+        return None
+    if bundle and bundle in roots:
+        return roots[bundle]
+    tagged = (repo_tags.for_repo(seed).get("bundle") or "").strip()
+    if tagged and tagged in roots:
+        return roots[tagged]
+    for root in roots.values():
+        if os.path.isdir(os.path.join(root, seed)):
+            return root
+    return None
+
+
+def _call_graph(seed, cwd=None):
     cg = shutil.which("codegraph")
     if not cg:
         return {
             "available": False,
+            "bundle_root": cwd,
             "note": "codegraph CLI not on PATH; lexical source hits are included instead",
-            "hits": code.search_code(seed, "*.java", 20),
+            "fallback_hits": code.search_code(seed, "*.java", 20),
         }
     try:
         result = subprocess.run(
             [cg, "explore", seed],
+            cwd=cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=60,
         )
+        ok = result.returncode == 0
         return {
-            "available": result.returncode == 0,
+            "available": ok,
             "returncode": result.returncode,
+            "bundle_root": cwd,
             "output": result.stdout[:8000],
             "error": result.stderr[:2000],
-            "hits": [] if result.returncode == 0 else code.search_code(seed, "*.java", 20),
+            "fallback_hits": [] if ok else code.search_code(seed, "*.java", 20),
         }
     except Exception as error:  # noqa: BLE001
-        return {"available": False, "error": str(error), "hits": code.search_code(seed, "*.java", 20)}
+        return {
+            "available": False,
+            "bundle_root": cwd,
+            "error": str(error),
+            "fallback_hits": code.search_code(seed, "*.java", 20),
+        }
 
 
-def query(seed, transitive=False):
-    """Return deps + async peers + callers/source hits for a repo or symbol."""
+def query(seed, transitive=False, bundle=None):
+    """Return deps + async peers + callers/source hits for a repo or symbol.
+
+    ``bundle`` is an optional routing hint; without it the seed routes by its repo tag (if it is a
+    repo) or by which built staging dir contains it. An unroutable seed uses the process cwd.
+    """
     seed = (seed or "").strip()
     if not seed:
         return {"error": "seed is required"}
 
     dep = graph.impact(seed, transitive=transitive)
+    root = bundle_root_for(seed, bundle=bundle)
     return {
         "seed": seed,
+        "bundle_root": root,
         "dependency_edges": {
             "source": config.EDGES_CSV,
             "mode": dep["mode"],
@@ -78,5 +136,5 @@ def query(seed, transitive=False):
             "source": config.MESSAGE_EDGES_CSV,
             "peers": _message_peers(seed),
         },
-        "callers": _call_graph(seed),
+        "callers": _call_graph(seed, cwd=root),
     }

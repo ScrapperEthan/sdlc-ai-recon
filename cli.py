@@ -14,12 +14,14 @@ Examples:
   python cli.py read mc-hk-hase-ingress-api/src/main/java/.../IngressResource.java --start 60 --end 95
   python cli.py trace --use-case-id UC123
   python cli.py trace --destination otx_bat_letter
+  python cli.py unified-impact IngressService --bundle ingress
+  python cli.py unified-impact mc-hk-hase-ingress-api --transitive
 """
 import argparse
 import json
 import sys
 
-from retriever import graph, messages, code, flow
+from retriever import graph, messages, code, flow, unified_impact
 
 
 def _emit(obj):
@@ -65,6 +67,13 @@ def main():
     p.add_argument("--use-case-id")
     p.add_argument("--destination")
 
+    p = sub.add_parser(
+        "unified-impact", help="deps + async peers + callers, routed to a bundle's CodeGraph index"
+    )
+    p.add_argument("seed")
+    p.add_argument("--bundle", help="routing hint; else routes by repo tag / staging dir")
+    p.add_argument("--transitive", action="store_true")
+
     args = ap.parse_args()
 
     if args.cmd == "impact":
@@ -86,6 +95,8 @@ def main():
         sys.stdout.write(code.read_file(args.path, args.start, args.end))
     elif args.cmd == "trace":
         _emit(flow.trace(args.use_case_id, args.destination))
+    elif args.cmd == "unified-impact":
+        _emit(unified_impact.query(args.seed, args.transitive, args.bundle))
 
 
 if __name__ == "__main__":

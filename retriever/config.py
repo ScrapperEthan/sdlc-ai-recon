@@ -18,6 +18,10 @@ USECASE_SNAPSHOT_CSV = _p(
     "SDLC_USECASE_SNAPSHOT", "index", "tbl_event_router_usecase_topic.snapshot.csv"
 )
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
+# Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
+# build manifest records what got indexed (see build_codegraph.py).
+CODEGRAPH_ROOT = _p("SDLC_CODEGRAPH_ROOT", "index", "codegraph")
+CODEGRAPH_BUILD_JSON = _p("SDLC_CODEGRAPH_BUILD", "index", "codegraph_build.json")
 GLOSSARY_JSON = _p("SDLC_GLOSSARY", "index", "glossary.json")
 REPO_TAGS_JSON = _p("SDLC_REPO_TAGS", "index", "repo_tags.json")
 REPO_TAGS_OVERRIDE_JSON = _p("SDLC_REPO_TAGS_OVERRIDE", "index", "repo_tags.override.json")

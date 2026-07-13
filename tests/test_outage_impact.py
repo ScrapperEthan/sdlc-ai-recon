@@ -94,6 +94,46 @@ class OutageImpactTests(unittest.TestCase):
                 self.assertEqual(vendor["affected_topics"][0]["source"], "token-heuristic")
                 self.assertIn("index/tbl_event_router_usecase_topic.snapshot.csv:2", vendor["citations"])
 
+    def _write_repo_tags(self, root, payload):
+        with open(os.path.join(root, "index", "repo_tags.json"), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+    def test_serves_channels_fold_into_affected_repos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_fixture_root(tmp)
+            self._write_repo_tags(tmp, {
+                # a serving library that owns no channel -> serves-channel (blast-radius)
+                "lib": {"serves_channels": ["sms"]},
+                # a repo that owns the channel but is not in the delivery topology -> channel-owner
+                "sms-owner": {"channel": ["sms"]},
+                # a delivery-job repo that also owns/serves the channel must keep its topology label
+                "mc-x-svc-bat-sinch-sms-deli-job": {"channel": ["sms"], "serves_channels": ["sms"]},
+                # "others" is a sheet bucket, never a channel -> must never be folded in
+                "others-lib": {"serves_channels": ["others"]},
+                # a library serving a different channel must not appear for channel:sms
+                "email-lib": {"serves_channels": ["email"]},
+            })
+            with ExitStack() as stack:
+                self._patch_config(stack, tmp)
+                self._build_topology()
+                report = outage_report.build_report("channel:sms")
+                affected = report["affected_repos"]
+                rows = {item["repo"]: item for item in affected["items"]}
+
+                self.assertEqual(rows["lib"]["relation"], "serves-channel")
+                self.assertEqual(rows["lib"]["citations"], ["index/repo_tags.json"])
+                self.assertEqual(rows["sms-owner"]["relation"], "channel-owner")
+                # topology wins the label — the deli-job repo stays delivery-job, not channel-owner
+                self.assertEqual(rows["mc-x-svc-bat-sinch-sms-deli-job"]["relation"], "delivery-job")
+                self.assertNotIn("others-lib", rows)
+                self.assertNotIn("email-lib", rows)
+
+                by_relation = affected["by_relation"]
+                self.assertEqual(by_relation.get("serves-channel"), 1)
+                self.assertEqual(by_relation.get("channel-owner"), 1)
+                self.assertNotIn("others", by_relation)
+                self.assertEqual(sum(by_relation.values()), affected["count"])
+
     def test_http_matches_cli_shape_and_unknown_target_is_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._write_fixture_root(tmp)

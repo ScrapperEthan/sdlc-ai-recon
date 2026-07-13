@@ -726,6 +726,27 @@
       }).join("") + "</div>";
     }
 
+    const relationLabelMap = {
+      "channel-owner": "拥有渠道",
+      "serves-channel": "波及(库级)",
+      "delivery-job": "投递任务",
+      "outbound-api": "供应商 API",
+      "dependency-upstream": "上游依赖",
+      "dependency-downstream": "下游依赖",
+    };
+
+    function renderByRelation(byRelation) {
+      const entries = Object.entries(byRelation || {});
+      if (!entries.length) {
+        return "";
+      }
+      const chips = entries.map(([relation, count]) =>
+        '<span class="chip ' + escapeHtml(relation) + '">' +
+        escapeHtml(relationLabelMap[relation] || relation) + " · " + escapeHtml(count) +
+        "</span>").join("");
+      return '<div class="meta-line" style="margin-bottom: 10px;">' + chips + "</div>";
+    }
+
     function renderRoutes(routes) {
       if (!routes || !routes.length) {
         return '<div class="empty">暂无已知异步链路</div>';
@@ -884,7 +905,7 @@
         '<section class="panel"><div class="section-title"><h2>主题与判定来源</h2><span class="muted">message-map 优先，其次渠道 token / 名称启发式</span></div>' +
           (topics.length ? '<div class="list">' + topics.map((item) => '<article class="row-card"><div class="repo-name">' + escapeHtml(item.topic) + '</div><div class="path-text">来源：' + escapeHtml(item.source) + ' · ' + escapeHtml(item.confidence) + '</div>' + renderDetails("出处", item.citations) + '</article>').join("") + '</div>' : '<div class="empty">未匹配到主题；请确认已生成拓扑并导出路由快照。</div>') +
         '</section>' +
-        '<section class="panel"><div class="section-title"><h2>受影响仓库 / 组件</h2><span class="muted">投递任务、供应商 API 与依赖闭包</span></div>' + renderRepoItems(repos, "暂无已知仓库组件") + '</section>' +
+        '<section class="panel"><div class="section-title"><h2>受影响仓库 / 组件</h2><span class="muted">渠道拥有 / 波及(库级)、投递任务、供应商 API 与依赖闭包</span></div>' + renderByRelation((report.affected_repos || {}).by_relation) + renderRepoItems(repos, "暂无已知仓库组件") + '</section>' +
         '<section class="panel"><div class="section-title"><h2>出处汇总</h2></div>' + renderCitations(report.citations || []) + '</section>';
     }
 

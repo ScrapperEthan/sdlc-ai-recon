@@ -6,12 +6,26 @@ import os
 import re
 from collections import defaultdict
 
-from retriever import config, graph, messages
+from retriever import config, graph, messages, repo_tags
 
 
 CHANNELS = ("sms", "mms", "email", "letter", "whatsapp", "wechat", "push")
 SOURCE_PRIORITY = {"message-map": 3, "channel-token": 2, "token-heuristic": 1}
 GENERIC_NAME_TOKENS = {"mc", "hk", "x", "amet", "mdc", "hsbc"}
+# "other"/"others" is a sheet bucket, never a delivery channel — mirror make_repo_tags /
+# make_arch_map so serves_channels can never surface it. The data is already clean; keep the
+# guard defensive.
+NON_CHANNELS = frozenset({"other", "others", "unknown", "n/a", ""})
+# Preferred order for grouping the affected-repo list and the by_relation breakdown:
+# owners first, then library blast-radius, then the delivery chain, then the dependency closure.
+RELATION_ORDER = (
+    "channel-owner",
+    "serves-channel",
+    "delivery-job",
+    "outbound-api",
+    "dependency-upstream",
+    "dependency-downstream",
+)
 
 
 def display_path(path):
@@ -197,7 +211,41 @@ def affected_use_cases(topics):
     ]
 
 
-def affected_repos(groups):
+def _clean_channels(values):
+    """Lowercased channel set with the sheet buckets (other/others/…) stripped out."""
+    return {
+        str(value).strip().lower()
+        for value in (values or [])
+        if str(value).strip().lower() not in NON_CHANNELS
+    }
+
+
+def serves_channel_repos(channels):
+    """Repos that own or serve the outage's channels, from the pre-computed repo_tags index.
+
+    For the resolved channel set, return ``{repo: row}`` where a row cites ``index/repo_tags.json``
+    (path only — it's a generated artifact) and carries the strongest relation:
+    - ``channel-owner``  — the repo's own ``channel`` tags intersect the outage channels.
+    - ``serves-channel`` — else its ``serves_channels`` (library blast-radius) intersect them.
+    Empty/missing index → ``{}`` (never crash). ``other``/``others`` never count as a channel.
+    """
+    wanted = _clean_channels(channels)
+    if not wanted:
+        return {}
+    citation = display_path(config.REPO_TAGS_JSON)
+    rows = {}
+    for repo, meta in repo_tags.load().items():
+        if _clean_channels(meta.get("channel")) & wanted:
+            relation = "channel-owner"
+        elif _clean_channels(meta.get("serves_channels")) & wanted:
+            relation = "serves-channel"
+        else:
+            continue
+        rows[repo] = {"repo": repo, "relation": relation, "citations": [citation]}
+    return rows
+
+
+def affected_repos(groups, channels=None):
     rows = {}
     topo_citation = display_path(config.DELIVERY_TOPOLOGY_JSON)
     seed_jobs = []
@@ -216,14 +264,37 @@ def affected_repos(groups):
         for relation, names in (("dependency-upstream", closure["depended_on_by"]), ("dependency-downstream", closure["depends_on"])):
             for repo in names:
                 rows.setdefault(repo, {"repo": repo, "relation": relation, "citations": [display_path(config.EDGES_CSV)]})
+    # Fold in the channel blast-radius (owners + serving libs) under the topology-derived rows:
+    # setdefault means a repo already labelled delivery-job/outbound-api/dependency-* keeps that label.
+    for repo, row in serves_channel_repos(channels).items():
+        rows.setdefault(repo, row)
     return [rows[name] for name in sorted(rows)]
+
+
+def _relation_rank(relation):
+    try:
+        return RELATION_ORDER.index(relation)
+    except ValueError:
+        return len(RELATION_ORDER)
+
+
+def count_by_relation(repos):
+    """Ordered {relation: count} over the affected-repo rows; counts sum to len(repos)."""
+    counts = {}
+    for item in repos:
+        relation = item.get("relation", "")
+        counts[relation] = counts.get(relation, 0) + 1
+    ordered = {relation: counts[relation] for relation in RELATION_ORDER if relation in counts}
+    for relation in sorted(counts):
+        ordered.setdefault(relation, counts[relation])
+    return ordered
 
 
 def build_report(target):
     resolved = resolve_topics_for(target)
     topics = resolved["topics"]
     use_cases = affected_use_cases(topics)
-    repos = affected_repos(resolved["groups"])
+    repos = affected_repos(resolved["groups"], resolved["channels"])
     kind = resolved["target"]["kind"]
     confidence = (
         "渠道级影响基于路由快照中的 channel token，当前数据下为可靠结论。"
@@ -243,7 +314,7 @@ def build_report(target):
         ),
         "affected_topics": topics,
         "affected_use_cases": {"count": len(use_cases), "items": use_cases},
-        "affected_repos": {"count": len(repos), "items": repos},
+        "affected_repos": {"count": len(repos), "items": repos, "by_relation": count_by_relation(repos)},
         "citations": citations,
     }
 
@@ -266,9 +337,17 @@ def render_markdown(report):
         for item in report["affected_use_cases"]["items"]
     ] or ["- none"])
     lines.extend(["", f"## Affected repos/components ({report['affected_repos']['count']})"])
+    lines.append(
+        "图例 / Legend: `channel-owner` 拥有该渠道 · `serves-channel` 故障波及(库级) · "
+        "`delivery-job`/`outbound-api` 投递链 · `dependency-*` 依赖闭包"
+    )
+    repo_items = sorted(
+        report["affected_repos"]["items"],
+        key=lambda item: (_relation_rank(item.get("relation", "")), item.get("relation", ""), item.get("repo", "")),
+    )
     lines.extend([
         f"- `{item['repo']}` — {item['relation']}; citations: {', '.join(item['citations'])}"
-        for item in report["affected_repos"]["items"]
+        for item in repo_items
     ] or ["- none"])
     lines.extend(["", "## Citations"])
     lines.extend(f"- {citation}" for citation in report["citations"])

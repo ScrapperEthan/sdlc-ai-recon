@@ -526,10 +526,22 @@
         const chips = items.slice(0, 8).map((item) =>
           '<span class="chip">' + escapeHtml(item.use_case) + "</span>").join("");
         const more = items.length > 8 ? '<span class="chip">+' + (items.length - 8) + "</span>" : "";
+        const affectedRepos = payload.affected_repos || {};
+        const relationLabelMap = {
+          "channel-owner": "拥有渠道",
+          "serves-channel": "波及(库级)",
+          "delivery-job": "投递任务",
+          "outbound-api": "供应商 API",
+          "dependency-upstream": "上游依赖",
+          "dependency-downstream": "下游依赖",
+        };
+        const relChips = Object.entries(affectedRepos.by_relation || {}).map(([relation, n]) =>
+          '<span class="chip">' + escapeHtml(relationLabelMap[relation] || relation) + " · " + escapeHtml(n) + "</span>").join("");
         result.innerHTML =
           '<div class="banner ' + level + '"><strong>受影响用例：' + count + " 个</strong><br>" +
           escapeHtml(payload.confidence_banner || "") + "</div>" +
-          (chips ? '<div class="uc-chips">' + chips + more + "</div>" : "");
+          (chips ? '<div class="uc-chips">' + chips + more + "</div>" : "") +
+          (relChips ? '<div class="uc-chips" style="margin-top: 8px;">受影响仓库 ' + escapeHtml(affectedRepos.count || 0) + " 个 · " + relChips + "</div>" : "");
       } catch (error) {
         result.innerHTML = '<div class="banner error">' + escapeHtml(error.message || "反查失败。") + "</div>";
       } finally {

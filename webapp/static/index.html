@@ -1295,9 +1295,16 @@ function renderMarkdown(text) {
         i += 1;
       }
       if (i < lines.length) i += 1;
-      blocks.push(
-        `<pre><code${lang ? ` data-lang="${escapeAttribute(lang)}"` : ''}>${escapeHtml(codeLines.join('\n'))}</code></pre>`
-      );
+      const fenceBody = codeLines.join('\n');
+      if (lang.toLowerCase() === 'mermaid') {
+        // Rendered to a live diagram after the message completes (renderMermaid). The escaped
+        // source stays as the text content, so it degrades to readable text if mermaid is absent.
+        blocks.push(`<pre class="mermaid">${escapeHtml(fenceBody)}</pre>`);
+      } else {
+        blocks.push(
+          `<pre><code${lang ? ` data-lang="${escapeAttribute(lang)}"` : ''}>${escapeHtml(fenceBody)}</code></pre>`
+        );
+      }
       continue;
     }
 
@@ -1537,11 +1544,26 @@ async function openSource(ref) {
   }
 }
 
+function renderMermaid(root) {
+  // Only called on a completed message (never mid-stream), so the ```mermaid source is whole.
+  if (!window.mermaid || !root) return;
+  const nodes = Array.from(root.querySelectorAll('pre.mermaid:not([data-mermaid-done])'));
+  if (!nodes.length) return;
+  nodes.forEach((el) => el.setAttribute('data-mermaid-done', '1'));
+  try {
+    // mermaid v10+/v11: run() reads each node's text as the diagram source and swaps in the SVG.
+    window.mermaid.run({ nodes });
+  } catch (error) {
+    // Bad syntax or a missing/old mermaid build -> leave the escaped source visible (no crash).
+  }
+}
+
 function setBubbleContent(bubble, text, renderMarkdownContent = false) {
   if (renderMarkdownContent) {
     bubble.classList.add('markdown');
     bubble.innerHTML = renderMarkdown(text || '');
     decorateAnswer(bubble);
+    renderMermaid(bubble);
     return;
   }
 
@@ -1806,6 +1828,20 @@ q.addEventListener('keydown', e => {
 resetLog(true);
 initializeSessions();
 refreshIndexStatus();
+</script>
+<style>
+  .bubble.markdown pre.mermaid { background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow-x:auto; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; white-space:pre; }
+  .bubble.markdown pre.mermaid[data-mermaid-done] { background:transparent; padding:0; overflow-x:auto; }
+  .bubble.markdown pre.mermaid svg { max-width:100%; height:auto; }
+</style>
+<!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
+     blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->
+<script src="/static/vendor/mermaid.min.js"></script>
+<script>
+  if (window.mermaid) {
+    try { window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' }); }
+    catch (error) {}
+  }
 </script>
 </body>
 </html>

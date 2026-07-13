@@ -40,6 +40,15 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             with open(INDEX, "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
+        elif path == "/static/vendor/mermaid.min.js":
+            # Locally vendored (air-gapped, no CDN). Absent until dropped in -> 404, and the page
+            # degrades to showing mermaid source as text.
+            vendor = os.path.join(HERE, "static", "vendor", "mermaid.min.js")
+            try:
+                with open(vendor, "rb") as f:
+                    self._send(200, f.read(), "application/javascript; charset=utf-8")
+            except FileNotFoundError:
+                self._send(404, b"mermaid.min.js not vendored yet", "text/plain; charset=utf-8")
         elif path == "/api/source":
             qs = parse_qs(urlparse(self.path).query)
             relpath = (qs.get("path") or [""])[0]

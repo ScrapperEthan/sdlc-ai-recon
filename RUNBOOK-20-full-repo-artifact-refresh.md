@@ -65,8 +65,12 @@ refresh steps failed: [ N — and the failing step's stderr_tail if N>0 ]
 Step 2 UI:        [ (optional) SMS/Sinch/WhatsApp show full repos + outage set? screenshots ]
 Surprises:        [ ... ]
 ```
-Expected in the summary: `maven graph` jumps to ~390 repos; `repo tags` shows `serves_channel_set`
-approaching ~390 with a small `channel_true_dark`; `arch map` shows most nodes bound (few empty).
+Expected in the summary: `maven graph` jumps to a few hundred repos. **Note (corrected):**
+`serves_channel_set` reflects **Maven blast-radius only** (the shared-library spine), so it lands
+well below the repo total and `channel_true_dark` stays large — those repos reach a channel via
+**messaging**, not code deps (the message map is the separate next layer). `arch map` binds only the
+repo-backed nodes; external/vendor/topic nodes stay grey by design. See RUNBOOK-21 for the
+universe-completeness follow-up.
 
 ## What this establishes
 Green = the **dependency/channel-level** retrieval surface (arch.html, impact, outage, `serves_channels`,

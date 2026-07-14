@@ -133,6 +133,36 @@ class MakeRepoTagsTests(unittest.TestCase):
             self.assertEqual(entry["channel"], ["sms"])
             self.assertEqual(entry["bundle"], "ingress")
 
+    def test_repos_file_seeds_edgeless_repos_into_universe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            repos_file = os.path.join(tmp, "repos.txt")
+            bundles = os.path.join(tmp, "bundles.json")
+            with open(edges, "w", encoding="utf-8", newline="") as handle:
+                handle.write(EDGES)
+            # An isolated repo with no internal Maven edge, plus one already in the edges.
+            with open(repos_file, "w", encoding="utf-8") as handle:
+                handle.write("shp-pipeline-shared-lib-python\nmc-hk-hase-svc-rt-alert-sms-api\n")
+            with open(bundles, "w", encoding="utf-8") as handle:
+                json.dump({"pipeline": {"primary": ["shp-pipeline-shared-lib-python"]}}, handle)
+
+            args = make_repo_tags.parse_args([
+                "--edges", edges, "--repos-file", repos_file, "--bundles", bundles,
+                "--override", os.path.join(tmp, "missing.json"),
+                "--mdc", os.path.join(tmp, "missing-mdc.json"),
+                "--out", os.path.join(tmp, "out.json"),
+            ])
+            payload = make_repo_tags.build_repo_tags(args)
+
+            # The edge-less repo is now present, with name-derived tags, its frozen bundle,
+            # and an honestly-empty serves_channels (nothing channel-owning depends on it).
+            self.assertIn("shp-pipeline-shared-lib-python", payload)
+            entry = payload["shp-pipeline-shared-lib-python"]
+            self.assertEqual(entry["bundle"], "pipeline")
+            self.assertEqual(entry["serves_channels"], [])
+            # Edge-derived repos are unaffected.
+            self.assertIn("amet-mdc-hsbc-batch-email-job", payload)
+
     def test_override_merge_wins_over_derived(self):
         with tempfile.TemporaryDirectory() as tmp:
             edges = os.path.join(tmp, "internal_edges.csv")

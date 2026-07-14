@@ -53,6 +53,23 @@ def load_pom_only_repos(path=None, inline=None):
     return repos
 
 
+def load_repo_list(path):
+    """Full scanned repo universe (recon_out/repos.txt), unioned in so edge-less repos still
+    get a tag entry. Missing file → empty set (back-compatible with edge-only runs)."""
+    repos = set()
+    if not path:
+        return repos
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line and not line.startswith("#"):
+                    repos.add(line)
+    except FileNotFoundError:
+        pass
+    return repos
+
+
 def load_json(path):
     try:
         with open(path, encoding="utf-8-sig") as handle:
@@ -190,11 +207,12 @@ def serves_channels(repo, tags, edges_path, graph_data=None):
 
 def build_repo_tags(args):
     universe = load_repo_universe(args.edges)
+    repo_list = load_repo_list(args.repos_file)
     pom_only = load_pom_only_repos(args.pom_only_file, args.pom_only_repo)
     bundle_map = load_bundle_map(args.bundles)
     mdc = load_json(args.mdc)
     overrides = load_json(args.override)
-    repos = sorted(universe | pom_only)
+    repos = sorted(universe | repo_list | pom_only)
 
     payload = {
         repo: merge_mdc(derive_repo_tags(repo, bundle_map), mdc.get(repo.lower()))
@@ -269,6 +287,11 @@ def write_payload(payload, out_path):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--edges", default=config.EDGES_CSV)
+    parser.add_argument(
+        "--repos-file",
+        default=config.REPOS_TXT,
+        help="full scanned repo list (recon_out/repos.txt) unioned into the universe",
+    )
     parser.add_argument("--bundles", default=config.BUNDLES_JSON)
     parser.add_argument("--override", default=config.REPO_TAGS_OVERRIDE_JSON)
     parser.add_argument("--mdc", default=config.REPO_TAGS_MDC_JSON)

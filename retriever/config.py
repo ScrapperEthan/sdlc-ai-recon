@@ -13,6 +13,9 @@ RECON_DIR = _p("SDLC_RECON", "recon_out")
 INDEX_DIR = _p("SDLC_INDEX", "index")
 
 EDGES_CSV = _p("SDLC_EDGES", "recon_out", "internal_edges.csv")
+# Full scanned repo list from recon_maven_graph — seeds the tag universe so repos with no
+# internal Maven edge still get an entry (edge endpoints alone miss config/Gradle/isolated repos).
+REPOS_TXT = _p("SDLC_REPOS_TXT", "recon_out", "repos.txt")
 MESSAGE_EDGES_CSV = _p("SDLC_MSG_EDGES", "index", "message_edges.csv")
 USECASE_SNAPSHOT_CSV = _p(
     "SDLC_USECASE_SNAPSHOT", "index", "tbl_event_router_usecase_topic.snapshot.csv"

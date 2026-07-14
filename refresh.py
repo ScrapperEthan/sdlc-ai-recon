@@ -176,6 +176,7 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
 
     py = sys.executable
     edges_csv = os.path.join(recon_dir, "internal_edges.csv")
+    repos_txt = os.path.join(recon_dir, "repos.txt")
     mdc_json = os.path.join(index_dir, "repo_tags.mdc.json")
     repo_tags_json = os.path.join(index_dir, "repo_tags.json")
     delivery_json = os.path.join(index_dir, "delivery_topology.json")
@@ -204,8 +205,8 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
     # stays consistent with the per-bundle CodeGraph indexes that retrieval routing points at.
     if os.path.exists(edges_csv):
         report["steps"].append(
-            _run([py, "make_repo_tags.py", "--edges", edges_csv, "--mdc", mdc_json,
-                  "--out", repo_tags_json], root)
+            _run([py, "make_repo_tags.py", "--edges", edges_csv, "--repos-file", repos_txt,
+                  "--mdc", mdc_json, "--out", repo_tags_json], root)
         )
         report["steps"].append(
             _run([py, "make_delivery_topology.py", "--edges", edges_csv,

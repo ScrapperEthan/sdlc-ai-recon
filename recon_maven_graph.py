@@ -128,6 +128,11 @@ def main():
         w = csv.writer(f)
         w.writerow(['from_repo', 'to_repo', 'via_artifact'])
         w.writerows(edges)
+    # Full scanned repo list — the authoritative universe. Repos with no internal Maven edge
+    # never appear in internal_edges.csv, so downstream tagging seeds from this to cover them.
+    with open(os.path.join(out_dir, 'repos.txt'), 'w', encoding='utf-8') as f:
+        for repo in repos:
+            f.write(repo + "\n")
     with open(os.path.join(out_dir, 'produced.csv'), 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['artifact', 'repos'])
@@ -175,7 +180,8 @@ def main():
     for repo, c in indeg.most_common(10):
         P(f"  {c:>4}  {repo}")
     P("")
-    P(f"outputs in: {out_dir}/  (internal_edges.csv, produced.csv, top_shared.csv)")
+    P(f"full repo list written        : {n_total} repos -> repos.txt")
+    P(f"outputs in: {out_dir}/  (internal_edges.csv, repos.txt, produced.csv, top_shared.csv)")
     summary = "\n".join(out)
     print(summary)
     with open(os.path.join(out_dir, 'summary.txt'), 'w', encoding='utf-8') as f:

@@ -57,6 +57,46 @@ class PlanTests(unittest.TestCase):
             rows = build_codegraph.plan(BUNDLES, tmp, only="tracking")
             self.assertEqual([row["bundle"] for row in rows], ["tracking"])
 
+    def test_merge_manifest_upserts_and_preserves_other_bundles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = os.path.join(tmp, "codegraph_build.json")
+            _write_json(manifest, {"bundles": [
+                {"bundle": "ingress", "returncode": 0, "db_mib": 120},
+                {"bundle": "tracking", "returncode": 0, "db_mib": 130},
+            ]})
+            # An `--only tracking`-style run supplies just tracking; ingress must survive.
+            merged = build_codegraph.merge_manifest_bundles(
+                manifest, [{"bundle": "tracking", "returncode": 0, "db_mib": 137}]
+            )
+            names = [entry["bundle"] for entry in merged]
+            self.assertEqual(names, ["ingress", "tracking"])          # ingress preserved
+            self.assertEqual(merged[1]["db_mib"], 137)                # tracking upserted
+            # No prior manifest -> just the new entries.
+            self.assertEqual(
+                build_codegraph.merge_manifest_bundles(os.path.join(tmp, "nope.json"),
+                                                       [{"bundle": "x", "returncode": 0}]),
+                [{"bundle": "x", "returncode": 0}],
+            )
+
+    def test_reconcile_rebuilds_manifest_from_built_dirs_without_building(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = os.path.join(tmp, "codegraph")
+            for name in ("ingress", "tracking"):
+                dbdir = os.path.join(out_root, name, ".codegraph")
+                os.makedirs(dbdir)
+                with open(os.path.join(dbdir, "codegraph.db"), "wb") as handle:
+                    handle.write(b"x" * 2048)
+            os.makedirs(os.path.join(out_root, "not-built"))  # no .codegraph -> ignored
+            manifest = os.path.join(tmp, "codegraph_build.json")
+
+            code = build_codegraph.main(["--reconcile", "--out-root", out_root, "--manifest", manifest])
+
+            self.assertEqual(code, 0)
+            data = json.load(open(manifest, encoding="utf-8"))
+            names = sorted(b["bundle"] for b in data["bundles"])
+            self.assertEqual(names, ["ingress", "tracking"])
+            self.assertTrue(all(b["returncode"] == 0 and b["reconciled"] for b in data["bundles"]))
+
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             mirror = os.path.join(tmp, "mirror")

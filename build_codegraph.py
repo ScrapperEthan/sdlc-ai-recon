@@ -156,6 +156,47 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def reconcile_from_disk(out_root):
+    """Recover manifest entries from already-built index dirs (each `<bundle>/.codegraph/codegraph.db`)
+    WITHOUT rebuilding — for when a completed build's manifest got clobbered by an `--only` run."""
+    entries = []
+    if not os.path.isdir(out_root):
+        return entries
+    for name in sorted(os.listdir(out_root)):
+        root = os.path.join(out_root, name)
+        db = os.path.join(root, ".codegraph", "codegraph.db")
+        if os.path.isfile(db):
+            entries.append({
+                "bundle": name,
+                "root": root,
+                "returncode": 0,
+                "db_mib": round(os.path.getsize(db) / (1024 * 1024), 1),
+                "reconciled": True,
+            })
+    return entries
+
+
+def merge_manifest_bundles(existing_path, new_entries):
+    """Preserve prior per-bundle records so a subset run (``--only``) upserts instead of wiping
+    the manifest. Routing reads this manifest, so a lone ``--only`` must NOT drop the other
+    already-built bundles. A full run simply re-supplies every bundle and replaces them all."""
+    by_name = {}
+    try:
+        with open(existing_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        for entry in (data.get("bundles") if isinstance(data, dict) else None) or []:
+            name = entry.get("bundle") if isinstance(entry, dict) else None
+            if name:
+                by_name[name] = entry
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+    for entry in new_entries:
+        name = entry.get("bundle")
+        if name:
+            by_name[name] = entry
+    return sorted(by_name.values(), key=lambda entry: entry.get("bundle", ""))
+
+
 def write_manifest(manifest, path):
     out_dir = os.path.dirname(path)
     if out_dir:
@@ -166,6 +207,18 @@ def write_manifest(manifest, path):
 
 
 def build_all(args):
+    if getattr(args, "reconcile", False):
+        entries = reconcile_from_disk(args.out_root)
+        merged = merge_manifest_bundles(args.manifest, entries)
+        write_manifest(
+            {"generated_at": _now_iso(), "mirror": args.mirror,
+             "out_root": args.out_root, "bundles": merged},
+            args.manifest,
+        )
+        print(f"Reconciled {len(entries)} built bundle(s) from {args.out_root} "
+              f"→ {args.manifest} ({len(merged)} bundles recorded)")
+        return 0
+
     bundles = load_bundles(args.bundles)
     rows = plan(bundles, args.mirror, only=args.only)
     if args.only and not rows:
@@ -220,16 +273,19 @@ def build_all(args):
         print("\n(dry run — nothing staged, built, or written)")
         return 0
 
+    # Upsert into any existing manifest so an `--only` run never wipes the other built bundles
+    # (routing resolves a bundle only if its entry is present here).
+    merged = merge_manifest_bundles(args.manifest, manifest_bundles)
     write_manifest(
         {
             "generated_at": _now_iso(),
             "mirror": args.mirror,
             "out_root": args.out_root,
-            "bundles": manifest_bundles,
+            "bundles": merged,
         },
         args.manifest,
     )
-    print(f"\nWrote {args.manifest}")
+    print(f"\nWrote {args.manifest} ({len(merged)} bundles recorded)")
     return 0
 
 
@@ -240,6 +296,11 @@ def parse_args(argv=None):
     parser.add_argument("--only", help="build a single bundle by name")
     parser.add_argument(
         "--dry-run", action="store_true", help="print the present/total plan and build nothing"
+    )
+    parser.add_argument(
+        "--reconcile", action="store_true",
+        help="rebuild the manifest from already-built index dirs under --out-root (no rebuild); "
+             "use when a completed build's manifest was clobbered by an --only run",
     )
     parser.add_argument("--mirror", default=config.MIRROR)
     parser.add_argument("--out-root", default=config.CODEGRAPH_ROOT)
@@ -253,7 +314,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    if not os.path.isfile(args.bundles):
+    if not args.reconcile and not os.path.isfile(args.bundles):
         print(f"no bundles.json at {args.bundles} — run make_bundles.py first")
         return 2
     return build_all(args)

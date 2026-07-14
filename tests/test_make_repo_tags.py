@@ -163,6 +163,37 @@ class MakeRepoTagsTests(unittest.TestCase):
             # Edge-derived repos are unaffected.
             self.assertIn("amet-mdc-hsbc-batch-email-job", payload)
 
+    def test_bundle_plan_seeds_universe_without_edges_or_repos_file(self):
+        # Canonical universe = edges ∪ bundle plan (no --repos-file). Repos named only in the
+        # frozen bundle plan get tagged even with no Maven edge, and nothing extra is invented.
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            bundles = os.path.join(tmp, "bundles.json")
+            with open(edges, "w", encoding="utf-8", newline="") as handle:
+                handle.write(EDGES)
+            with open(bundles, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "pipeline": {
+                        "primary": ["shp-pipeline-shared-lib-python"],
+                        "with_libs": ["shp-pipeline-shared-lib-python", "shp-pipeline-configuration"],
+                    },
+                }, handle)
+
+            args = make_repo_tags.parse_args([
+                "--edges", edges, "--bundles", bundles,
+                "--override", os.path.join(tmp, "missing.json"),
+                "--mdc", os.path.join(tmp, "missing-mdc.json"),
+                "--out", os.path.join(tmp, "out.json"),
+            ])
+            payload = make_repo_tags.build_repo_tags(args)
+
+            self.assertIn("shp-pipeline-shared-lib-python", payload)   # bundle primary, no edge
+            self.assertIn("shp-pipeline-configuration", payload)       # bundle with_libs, no edge
+            self.assertEqual(payload["shp-pipeline-shared-lib-python"]["bundle"], "pipeline")
+            self.assertEqual(payload["shp-pipeline-shared-lib-python"]["serves_channels"], [])
+            # Universe is exactly edges (3 endpoints) ∪ bundle repos (2) — no scanned-dir extras.
+            self.assertEqual(len(payload), 5)
+
     def test_override_merge_wins_over_derived(self):
         with tempfile.TemporaryDirectory() as tmp:
             edges = os.path.join(tmp, "internal_edges.csv")

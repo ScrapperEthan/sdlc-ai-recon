@@ -103,6 +103,24 @@ def load_bundle_map(path):
     return primary
 
 
+def load_bundle_universe(path):
+    """All repos named in the frozen bundle plan (primary ∪ with_libs) — the canonical system
+    universe (390), so every partitioned repo gets a tag entry even with no Maven edge, WITHOUT
+    pulling in the extract's non-system extras (scanned dirs beyond the plan)."""
+    payload = load_json(path)
+    repos = set()
+    if isinstance(payload, dict):
+        for meta in payload.values():
+            if not isinstance(meta, dict):
+                continue
+            for key in ("primary", "with_libs"):
+                for repo in meta.get(key) or []:
+                    name = str(repo).strip()
+                    if name:
+                        repos.add(name)
+    return repos
+
+
 def detect_system(repo):
     lowered = repo.lower()
     for prefix, system in SYSTEM_PREFIXES:
@@ -207,12 +225,16 @@ def serves_channels(repo, tags, edges_path, graph_data=None):
 
 def build_repo_tags(args):
     universe = load_repo_universe(args.edges)
+    bundle_repos = load_bundle_universe(args.bundles)
     repo_list = load_repo_list(args.repos_file)
     pom_only = load_pom_only_repos(args.pom_only_file, args.pom_only_repo)
     bundle_map = load_bundle_map(args.bundles)
     mdc = load_json(args.mdc)
     overrides = load_json(args.override)
-    repos = sorted(universe | repo_list | pom_only)
+    # Canonical universe = Maven edge endpoints ∪ the frozen bundle plan (the 390-repo system).
+    # NOT all scanned dirs — the extract carries ~66 non-system extras we deliberately exclude.
+    # `--repos-file` stays available as an explicit opt-in for a "tag every scanned dir" run.
+    repos = sorted(universe | bundle_repos | repo_list | pom_only)
 
     payload = {
         repo: merge_mdc(derive_repo_tags(repo, bundle_map), mdc.get(repo.lower()))
@@ -289,8 +311,9 @@ def parse_args(argv=None):
     parser.add_argument("--edges", default=config.EDGES_CSV)
     parser.add_argument(
         "--repos-file",
-        default=config.REPOS_TXT,
-        help="full scanned repo list (recon_out/repos.txt) unioned into the universe",
+        default="",
+        help="opt-in: a repo list (e.g. recon_out/repos.txt) unioned into the universe to tag "
+             "every scanned dir, including non-system extras. Default off — the bundle plan is canonical.",
     )
     parser.add_argument("--bundles", default=config.BUNDLES_JSON)
     parser.add_argument("--override", default=config.REPO_TAGS_OVERRIDE_JSON)

@@ -9,6 +9,10 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-5.5")
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 LLM_MOCK = os.environ.get("LLM_MOCK", "") not in ("", "0", "false", "False")
+# Opt-in true token streaming (Responses API SSE). OFF by default so behaviour is unchanged until
+# the internal side turns it on and verifies against its copilot-api; any streaming failure falls
+# back to the blocking call automatically. See webapp/llm_providers/copilot_responses.chat_stream.
+LLM_STREAM = os.environ.get("LLM_STREAM", "") not in ("", "0", "false", "False")
 
 # ---- assistant behaviour ----
 SYSTEM_PROMPT = os.environ.get(

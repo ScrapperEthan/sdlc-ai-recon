@@ -103,7 +103,14 @@ def answer_events(question, history=None):
     trace = []
     usage = llm_usage.empty_usage()
     for _ in range(config.MAX_TOOL_ITERS):
-        message = llm.chat(messages, tools.TOOLS)
+        message = None
+        streamed = False
+        for kind, payload in llm.chat_stream(messages, tools.TOOLS):
+            if kind == "delta":
+                streamed = True
+                yield {"type": "token", "text": payload}
+            else:  # "final"
+                message = payload
         llm_usage.add_call(usage, message)
         calls = message.get("tool_calls") or _fallback_tool_calls(message)
         if calls and not message.get("tool_calls"):
@@ -113,8 +120,10 @@ def answer_events(question, history=None):
         messages.append(message)
         if not calls:
             answer_text = message.get("content") or ""
-            for chunk in llm.stream_text(message):
-                yield {"type": "token", "text": chunk}
+            # When the turn was truly streamed, its tokens are already out — don't re-emit.
+            if not streamed:
+                for chunk in llm.stream_text(message):
+                    yield {"type": "token", "text": chunk}
             yield {
                 "type": "done",
                 "answer": answer_text,
@@ -147,11 +156,19 @@ def answer_events(question, history=None):
     # tool budget exhausted — force a final answer
     messages.append({"role": "user",
                      "content": "Answer now with what you have; mark anything unverified as partial."})
-    message = llm.chat(messages)
+    message = None
+    streamed = False
+    for kind, payload in llm.chat_stream(messages):
+        if kind == "delta":
+            streamed = True
+            yield {"type": "token", "text": payload}
+        else:  # "final"
+            message = payload
     llm_usage.add_call(usage, message)
     answer_text = message.get("content") or ""
-    for chunk in llm.stream_text(message):
-        yield {"type": "token", "text": chunk}
+    if not streamed:
+        for chunk in llm.stream_text(message):
+            yield {"type": "token", "text": chunk}
     yield {
         "type": "done",
         "answer": answer_text,

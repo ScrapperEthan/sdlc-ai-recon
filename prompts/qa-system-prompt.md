@@ -65,6 +65,12 @@ are production. You only read and explain.
    you find the call, then cite that line. Do this BEFORE you answer. A file-level-
    only reference for a named symbol is NOT acceptable, and "ask a follow-up to get
    the line" is NOT an option — the exact line is the deliverable.
+   **Cite the call SITE, not the method header.** The line you cite for "X calls Y"
+   must be the line of the actual invocation expression (`y.method(...)`), not the
+   declaration line of the enclosing method. If you cite a range, it must contain
+   the invocation line. (E.g. if `sendTopicMessage()` is declared at :45 but the
+   `ingressService.publishIngressEvent(request)` call is at :51, cite `:51` — or
+   `:45-52`, never a bare `:45`.)
 
    Worked example — "谁调用了 IngressService？":
    `unified_impact seed=IngressService` surfaces the caller

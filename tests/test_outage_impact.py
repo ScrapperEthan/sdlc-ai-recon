@@ -139,6 +139,40 @@ class OutageImpactTests(unittest.TestCase):
                 self.assertNotIn("others", by_relation)
                 self.assertEqual(sum(by_relation.values()), affected["count"])
 
+    def test_vendor_outage_excludes_channel_blast_radius(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_fixture_root(tmp)
+            self._write_repo_tags(tmp, {
+                # whole-SMS-channel repos: a Sinch-only outage must NOT pull these in.
+                "sms-owner": {"channel": ["sms"]},
+                "lib": {"serves_channels": ["sms"]},
+                "msg-only": {"msg_channels": ["sms"]},
+                "mc-x-svc-bat-sinch-sms-deli-job": {"channel": ["sms"]},
+            })
+            with ExitStack() as stack:
+                self._patch_config(stack, tmp)
+                self._build_topology()
+
+                vendor = outage_report.build_report("vendor:sinch")
+                vrows = {item["repo"]: item for item in vendor["affected_repos"]["items"]}
+                # the vendor's own delivery job stays in scope, labelled by the topology...
+                self.assertEqual(vrows["mc-x-svc-bat-sinch-sms-deli-job"]["relation"], "delivery-job")
+                # ...but the channel blast-radius is NOT folded into a single-vendor outage.
+                self.assertNotIn("sms-owner", vrows)
+                self.assertNotIn("lib", vrows)
+                self.assertNotIn("msg-only", vrows)
+                vby = vendor["affected_repos"]["by_relation"]
+                self.assertNotIn("channel-owner", vby)
+                self.assertNotIn("serves-channel", vby)
+                self.assertNotIn("msg-channel", vby)
+
+                # regression guard: a CHANNEL outage STILL folds the blast-radius in.
+                channel = outage_report.build_report("channel:sms")
+                crows = {item["repo"]: item for item in channel["affected_repos"]["items"]}
+                self.assertEqual(crows["sms-owner"]["relation"], "channel-owner")
+                self.assertEqual(crows["lib"]["relation"], "serves-channel")
+                self.assertEqual(crows["msg-only"]["relation"], "msg-channel")
+
     def test_http_matches_cli_shape_and_unknown_target_is_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._write_fixture_root(tmp)

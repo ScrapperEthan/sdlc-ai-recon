@@ -164,3 +164,97 @@ def chat(messages, tools=None, temperature=0):
         raise RuntimeError(f"copilot-api unreachable at {config.LLM_BASE_URL}: {e.reason}")
 
     return _from_responses(body)
+
+
+def _iter_sse_events(stream):
+    """Yield decoded JSON objects from a text/event-stream body (an iterable of byte lines).
+
+    Tolerant: skips comments/heartbeats and unparseable data, honours a `[DONE]` sentinel, and
+    accumulates multi-line `data:` fields per SSE framing (blank line = end of one event)."""
+    data_lines = []
+    for raw in stream:
+        line = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else raw
+        line = line.rstrip("\n").rstrip("\r")
+        if line == "":
+            if data_lines:
+                blob = "\n".join(data_lines)
+                data_lines = []
+                if blob.strip() == "[DONE]":
+                    return
+                try:
+                    yield json.loads(blob)
+                except json.JSONDecodeError:
+                    pass
+            continue
+        if line.startswith(":") or line.startswith("event:"):
+            continue  # comment / heartbeat / event-name line (we key off the JSON `type` instead)
+        if line.startswith("data:"):
+            data_lines.append(line[len("data:"):].lstrip())
+    if data_lines:
+        blob = "\n".join(data_lines)
+        if blob.strip() != "[DONE]":
+            try:
+                yield json.loads(blob)
+            except json.JSONDecodeError:
+                pass
+
+
+def chat_stream(messages, tools=None, temperature=0):
+    """Stream a Responses turn: yield ("delta", text) as tokens arrive, then ("final", message).
+
+    The authoritative message (text + tool_calls + usage) comes from the terminal
+    `response.completed` event, so a mismatched delta event name only costs the live typing
+    effect, never the answer. Raises if the endpoint sends no terminal event (caller falls back
+    to the blocking `chat`)."""
+    instructions, input_items = _to_responses_input(messages)
+    payload = {
+        "model": config.LLM_MODEL,
+        "input": input_items,
+        "max_output_tokens": config.LLM_MAX_TOKENS,
+        "stream": True,
+    }
+    if instructions:
+        payload["instructions"] = instructions
+    if tools:
+        payload["tools"] = _to_responses_tools(tools)
+        payload["tool_choice"] = "auto"
+
+    req = urllib.request.Request(
+        config.LLM_BASE_URL.rstrip("/") + "/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    if config.LLM_API_KEY:
+        req.add_header("Authorization", f"Bearer {config.LLM_API_KEY}")
+
+    try:
+        resp = urllib.request.urlopen(req, timeout=config.LLM_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"copilot-api HTTP {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"copilot-api unreachable at {config.LLM_BASE_URL}: {e.reason}")
+
+    final_message = None
+    try:
+        for event in _iter_sse_events(resp):
+            if not isinstance(event, dict):
+                continue
+            etype = event.get("type") or ""
+            if etype.endswith("output_text.delta"):
+                delta = event.get("delta")
+                if isinstance(delta, str) and delta:
+                    yield ("delta", delta)
+            elif etype.endswith("completed") and isinstance(event.get("response"), dict):
+                final_message = _from_responses(event["response"])
+    finally:
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    if final_message is None:
+        raise RuntimeError("no terminal response.completed event (streaming not supported?)")
+    yield ("final", final_message)

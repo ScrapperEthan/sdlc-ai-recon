@@ -31,6 +31,37 @@ def chat(messages, tools=None, temperature=0):
     return _provider_module().chat(messages, tools, temperature)
 
 
+def chat_stream(messages, tools=None, temperature=0):
+    """One model turn as a generator of ('delta', text) chunks then ('final', message).
+
+    True token streaming only when `LLM_STREAM` is on AND the provider supports it; otherwise (and
+    on ANY streaming failure) it degrades to a single blocking `chat` yielded as one ('final', …),
+    so callers get identical behaviour to `chat` when streaming is off or unavailable."""
+    if config.LLM_MOCK:
+        yield ("final", _mock(messages, tools))
+        return
+
+    provider = _provider_module()
+    streamer = getattr(provider, "chat_stream", None)
+    if config.LLM_STREAM and streamer:
+        emitted = False
+        try:
+            for item in streamer(messages, tools, temperature):
+                if item and item[0] == "delta":
+                    emitted = True
+                yield item
+            return
+        except Exception:  # noqa: BLE001 — endpoint can't stream / mid-stream drop
+            if emitted:
+                # Already showed partial text; finish with a clean blocking result so the answer
+                # is complete (rare: a mid-stream connection drop).
+                yield ("final", provider.chat(messages, tools, temperature))
+                return
+            # nothing shown yet -> clean fall-through to the blocking call below
+
+    yield ("final", provider.chat(messages, tools, temperature))
+
+
 def stream_text(message):
     """Yield assistant text in chunks, using provider streaming when available."""
     if not config.LLM_MOCK:

@@ -299,8 +299,14 @@ def build_report(target):
     resolved = resolve_topics_for(target)
     topics = resolved["topics"]
     use_cases = affected_use_cases(topics)
-    repos = affected_repos(resolved["groups"], resolved["channels"])
     kind = resolved["target"]["kind"]
+    # The channel blast-radius (channel-owner + serves-channel libs + msg-only repos) is a
+    # CHANNEL-level concept. Folding it into a single-VENDOR outage over-counts wildly: Sinch is
+    # one of several SMS vendors, yet it would pull in EVERY sms repo — including CSL/CM delivery
+    # jobs a Sinch outage can't touch. Scope vendor/repo outages to that target's own delivery +
+    # outbound repos and their dependency closure; only a channel outage folds the blast-radius in.
+    channels_for_repos = resolved["channels"] if kind == "channel" else None
+    repos = affected_repos(resolved["groups"], channels_for_repos)
     confidence = (
         "渠道级影响基于路由快照中的 channel token，当前数据下为可靠结论。"
         if kind == "channel" else

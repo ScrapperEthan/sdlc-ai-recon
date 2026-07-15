@@ -153,7 +153,12 @@ def build_payload(catalog_path, topology_path, tags_path, override_path):
     tags = load_json(tags_path)
     override = load_json(override_path)
     nodes = build_map(catalog, topology, tags, override)
-    return {"generated_at": _now(), "nodes": nodes, "coverage": dict(coverage(nodes))}
+    return {
+        "generated_at": _now(),
+        "repo_total": len(tags) if isinstance(tags, dict) else 0,
+        "nodes": nodes,
+        "coverage": dict(coverage(nodes)),
+    }
 
 
 def write_payload(payload, path):

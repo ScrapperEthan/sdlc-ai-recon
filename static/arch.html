@@ -124,6 +124,18 @@
     }
     .pill.solid { background: var(--accent-soft); color: var(--accent); border-color: rgba(0,87,217,0.2); }
 
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 720px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .stat {
+      background: linear-gradient(180deg, #ffffff, #f5f9ff);
+      border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px;
+    }
+    .stat .num { font-size: clamp(24px, 3vw, 34px); font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; }
+    .stat .num small { font-size: 15px; font-weight: 700; color: var(--muted); }
+    .stat .lbl { margin-top: 4px; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+    .stat.accent { border-color: rgba(0,87,217,0.25); background: linear-gradient(180deg, #f4f8ff, #e7f0ff); }
+    .stat.accent .num { color: var(--accent); }
+
     .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .swatch { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }
@@ -238,6 +250,7 @@
       </div>
       <h1>MDC 通知管线，<br>每个节点都指向真实仓库。</h1>
       <p>面向领导层演示、新人上手与投屏救火：从来源到供应商的完整通知链路。点击任意节点，查看它背后的真实仓库、覆盖渠道，并一键跳转到影响分析或故障影响反查。</p>
+      <div id="stats" class="stats"></div>
       <div id="coverage" class="coverage"></div>
       <div class="legend">
         <span><span class="swatch" style="background:var(--sms)"></span>SMS</span>
@@ -324,6 +337,31 @@
       return payload;
     }
 
+    function renderStats() {
+      const nodes = state.catalog.nodes || [];
+      const total = nodes.length;
+      const bound = nodes.filter((n) => binding(n.id).repo_count > 0).length;
+      const repoTotal = state.archMap.repo_total || 0;
+      let top = { label: "—", count: 0 };
+      const channels = new Set();
+      nodes.forEach((n) => {
+        const count = binding(n.id).repo_count;
+        if (n.role === "delivery-job" && count > 0) {
+          channels.add(n.channel);
+          if (count > top.count) top = { label: CHANNEL_LABELS[n.channel] || n.channel, count: count };
+        }
+      });
+      const tiles = [
+        { num: repoTotal ? String(repoTotal) : "—", lbl: "全量系统仓库", accent: true },
+        { num: bound + '<small> / ' + total + "</small>", lbl: "管线节点已映射到仓库" },
+        { num: (top.count || 0) + '<small> repos</small>', lbl: "最大投递渠道 · " + top.label },
+        { num: String(channels.size), lbl: "已覆盖投递渠道" },
+      ];
+      document.getElementById("stats").innerHTML = tiles.map((tile) =>
+        '<div class="stat' + (tile.accent ? " accent" : "") + '"><div class="num">' + tile.num +
+        '</div><div class="lbl">' + escapeHtml(tile.lbl) + "</div></div>").join("");
+    }
+
     function renderCoverage() {
       const nodes = state.catalog.nodes || [];
       const total = nodes.length;
@@ -381,19 +419,24 @@
         }));
       });
 
+      // Weight each bound node by how many repos sit behind it, so the estate's real mass
+      // (e.g. SMS ≫ Letter) reads at a glance instead of every node looking identical.
+      const maxCount = nodes.reduce((m, n) => Math.max(m, binding(n.id).repo_count), 0) || 1;
+
       // Nodes.
       nodes.forEach((node) => {
         const bind = binding(node.id);
         const empty = bind.repo_count === 0;
+        const weight = empty ? 0 : Math.min(1, bind.repo_count / maxCount);
         const color = nodeColor(node);
         const x = xOf(node), y = yOf(node);
         const g = el("g", { "data-node-id": node.id, class: "node" + (empty ? " empty" : "") });
 
         g.appendChild(el("rect", {
           class: "box", x: x, y: y, width: NODE_W, height: NODE_H, rx: 12,
-          fill: empty ? "#eef1f6" : hexToRgba(color, 0.12),
+          fill: empty ? "#eef1f6" : hexToRgba(color, 0.12 + weight * 0.22),
           stroke: empty ? "#b8c2d4" : color,
-          "stroke-width": 1.6,
+          "stroke-width": empty ? 1.6 : 1.6 + weight * 1.4,
           "stroke-dasharray": empty ? "5 4" : "none"
         }));
         g.appendChild(el("text", {
@@ -411,11 +454,13 @@
           }, "⚠"));
         }
         if (!empty) {
-          const bx = x + NODE_W - 15, by = y + 14;
-          g.appendChild(el("circle", { cx: bx, cy: by, r: 11, fill: color }));
+          const r = 11 + Math.round(weight * 7);
+          const bx = x + NODE_W - r - 4, by = y + r + 2;
+          g.appendChild(el("circle", { cx: bx, cy: by, r: r, fill: color }));
           const shown = bind.repo_count > 99 ? "99+" : String(bind.repo_count);
           g.appendChild(el("text", {
-            x: bx, y: by + 4, "text-anchor": "middle", "font-size": 11, "font-weight": 700, fill: "#fff"
+            x: bx, y: by + 4, "text-anchor": "middle",
+            "font-size": 10.5 + Math.round(weight * 2), "font-weight": 700, fill: "#fff"
           }, shown));
         }
         g.addEventListener("click", () => selectNode(node.id));
@@ -560,6 +605,7 @@
         state.archMap = archMap && archMap.nodes ? archMap : { nodes: {} };
         state.nodeById = {};
         (catalog.nodes || []).forEach((node) => { state.nodeById[node.id] = node; });
+        renderStats();
         renderCoverage();
         renderDiagram();
       } catch (error) {

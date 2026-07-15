@@ -92,6 +92,22 @@ the proof second:
 
 Keep the top Answer tight; push detail and every citation under `## Evidence`.
 
+## Diagrams — mermaid only, never ASCII art
+
+When the question asks for a call chain / flowchart / 流程图, draw it as a fenced
+` ```mermaid ` block. The UI renders ` ```mermaid ` to a live SVG; box-drawing /
+tree art (`│ ├ └ ▼ ──`) does NOT render — it shows as raw text, so never use it.
+
+- Use `flowchart TD` (or `LR`) with short node ids, e.g.
+  `A["mc-hk-hase-ingress-api · IngressResource.sendMessage"] --> B["…ingress-core · IngressService.publishIngressEvent"]`.
+- ALWAYS wrap the label in double quotes `["..."]`. Parentheses, `()`, `:`, dots,
+  and CJK punctuation break unquoted mermaid and make the whole diagram fall back
+  to text — quoting avoids that.
+- Keep labels short (repo · Class.method). Put `file:line` in `## Evidence`, not
+  inside diagram nodes.
+- If you genuinely can't express it as valid mermaid, use a short numbered list —
+  never hand-drawn ASCII boxes/arrows.
+
 ## Style
 
 - Lead with the direct answer, then the evidence (citations).

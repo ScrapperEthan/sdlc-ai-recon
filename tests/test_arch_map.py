@@ -199,5 +199,53 @@ class ArchMapServiceTests(unittest.TestCase):
                 teardown()
 
 
+class CoverageServiceTests(unittest.TestCase):
+    def test_coverage_html_and_repo_tags_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump({"mc-x-sms-deli-job": {"channel": ["sms"], "serves_channels": ["sms"]}}, handle)
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rconfig, "REPO_TAGS_JSON", tags_path))
+                server = retrieval_service.create_server("127.0.0.1", 0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    host, port = server.server_address[:2]
+                    base = f"http://{host}:{port}"
+                    with urllib.request.urlopen(f"{base}/coverage.html", timeout=5) as response:
+                        self.assertEqual(response.getcode(), 200)
+                        self.assertEqual(response.info().get_content_type(), "text/html")
+                        self.assertIn("仓库全景", response.read().decode("utf-8"))
+                    with urllib.request.urlopen(f"{base}/repo-tags", timeout=5) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(payload["count"], 1)
+                    self.assertIn("mc-x-sms-deli-job", payload["repos"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+    def test_repo_tags_absent_returns_clean_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(rconfig, "REPO_TAGS_JSON", os.path.join(tmp, "nope.json"))
+                )
+                server = retrieval_service.create_server("127.0.0.1", 0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    host, port = server.server_address[:2]
+                    with urllib.request.urlopen(f"http://{host}:{port}/repo-tags", timeout=5) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(payload["repos"], {})
+                    self.assertIn("note", payload)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

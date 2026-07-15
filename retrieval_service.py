@@ -15,6 +15,7 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 IMPACT_HTML_PATH = os.path.join(STATIC_DIR, "impact.html")
 ARCH_HTML_PATH = os.path.join(STATIC_DIR, "arch.html")
 ARCH_NODES_PATH = os.path.join(STATIC_DIR, "arch_nodes.json")
+COVERAGE_HTML_PATH = os.path.join(STATIC_DIR, "coverage.html")
 
 
 def _int(qs, key, default):
@@ -115,6 +116,21 @@ def _arch_map_payload():
     return data
 
 
+def _repo_tags_payload():
+    """Return every repo's tags (the full 392-repo universe) for the coverage view, or an empty
+    map plus a clear note if absent. Like /arch-map: read-only over a generated artifact."""
+    try:
+        with open(rconfig.REPO_TAGS_JSON, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, OSError):
+        return {"repos": {}, "note": "repo_tags.json not generated yet; run python refresh.py."}
+    except json.JSONDecodeError:
+        return {"repos": {}, "note": "repo_tags.json is invalid JSON; re-run make_repo_tags.py."}
+    if not isinstance(data, dict):
+        return {"repos": {}, "note": "repo_tags.json is not an object; re-run make_repo_tags.py."}
+    return {"repos": data, "count": len(data)}
+
+
 ROUTES = {
     "/impact": lambda qs: graph.impact(_required_repo(qs), _str(qs, "transitive").lower() in {"1", "true"}),
     "/hubs": lambda qs: graph.hubs(_int(qs, "top", 20)),
@@ -169,6 +185,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path in {"/arch.html", "/static/arch.html"}:
                 self._send(200, _static_file(ARCH_HTML_PATH), "text/html; charset=utf-8")
+                return
+            if path in {"/coverage.html", "/static/coverage.html"}:
+                self._send(200, _static_file(COVERAGE_HTML_PATH), "text/html; charset=utf-8")
+                return
+            if path == "/repo-tags":
+                self._send_json(200, _repo_tags_payload())
                 return
             if path in {"/arch_nodes.json", "/static/arch_nodes.json"}:
                 self._send(200, _static_file(ARCH_NODES_PATH), "application/json; charset=utf-8")

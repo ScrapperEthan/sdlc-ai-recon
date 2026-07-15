@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>仓库全景 · MDC 系统</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230057d9'/%3E%3Cpath d='M20 44V20h8v16h16v8H20Z' fill='white'/%3E%3Ccircle cx='44' cy='20' r='8' fill='%23ffd166'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fb; --panel: #ffffff; --panel-alt: #eef3f9; --line: #d7dfeb;
+      --text: #152033; --muted: #5a6a82; --accent: #0057d9; --accent-soft: #dfeaff;
+      --shadow: 0 20px 50px rgba(21, 32, 51, 0.08);
+      --sms: #0057d9; --push: #7d4df5; --email: #107c41; --whatsapp: #0d8f5b;
+      --wechat: #007a3d; --letter: #8f5a00; --mms: #0f766e; --none: #7c8aa0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      background: radial-gradient(circle at top left, rgba(0,87,217,0.15), transparent 28rem),
+                  linear-gradient(180deg, #fbfdff 0%, var(--bg) 45%, #eef2f8 100%);
+    }
+    .shell { width: min(1440px, calc(100vw - 32px)); margin: 24px auto 40px; display: grid; gap: 18px; }
+    .hero, .panel {
+      background: rgba(255,255,255,0.92); border: 1px solid rgba(215,223,235,0.9);
+      border-radius: 24px; box-shadow: var(--shadow); backdrop-filter: blur(12px);
+    }
+    .hero { padding: 26px 28px; display: grid; gap: 16px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .eyebrow {
+      display: inline-flex; padding: 6px 12px; border-radius: 999px; background: var(--accent-soft);
+      color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
+    }
+    .nav { display: inline-flex; gap: 8px; }
+    .nav a {
+      border: 1px solid var(--line); background: #fff; color: var(--muted); border-radius: 999px;
+      padding: 8px 16px; font-weight: 700; font-size: 14px; text-decoration: none; transition: 160ms ease;
+    }
+    .nav a.active { border-color: transparent; background: var(--text); color: #fff; }
+    .nav a:hover { transform: translateY(-1px); }
+    h1 { margin: 0; font-size: clamp(24px, 3.2vw, 36px); line-height: 1.12; }
+    .hero p { margin: 0; color: var(--muted); line-height: 1.6; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+    @media (max-width: 720px) { .stats { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    .stat { background: linear-gradient(180deg, #fff, #f5f9ff); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; }
+    .stat .num { font-size: clamp(24px, 3vw, 34px); font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; }
+    .stat.accent { border-color: rgba(0,87,217,0.25); background: linear-gradient(180deg, #f4f8ff, #e7f0ff); }
+    .stat.accent .num { color: var(--accent); }
+    .stat .lbl { margin-top: 4px; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .controls input {
+      flex: 1 1 260px; min-height: 40px; padding: 0 14px; border-radius: 12px;
+      border: 1px solid var(--line); font: inherit; background: #fff; color: var(--text);
+    }
+    .controls .hint { color: var(--muted); font-size: 12.5px; }
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }
+
+    .lanes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; align-items: start; }
+    .lane { padding: 14px; display: grid; gap: 10px; }
+    .lane.dim { opacity: 0.9; }
+    .lane-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .lane-head .name { font-size: 14.5px; font-weight: 800; }
+    .lane-head .cnt { font-size: 13px; font-weight: 800; color: var(--accent); }
+    .lane-bar { height: 4px; border-radius: 4px; background: var(--accent); opacity: 0.85; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 340px; overflow-y: auto; padding-right: 2px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+      padding: 5px 9px; border-radius: 9px; font-size: 12px; font-weight: 600;
+      text-decoration: none; color: var(--text); border: 1px solid var(--line);
+      background: #fff; transition: 120ms ease; cursor: pointer;
+    }
+    .chip:hover { transform: translateY(-1px); border-color: var(--accent); }
+    .chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .chip .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+    .chip.hidden { display: none; }
+    .lane.empty-lane { display: none; }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="topbar">
+        <span class="eyebrow">Repository Coverage · MDC System</span>
+        <nav class="nav">
+          <a href="/impact.html">分析</a>
+          <a href="/arch.html">架构图</a>
+          <a href="/coverage.html" class="active">仓库全景</a>
+        </nav>
+      </div>
+      <h1>系统仓库全景 —— 每个仓库都归位。</h1>
+      <p>与架构图互补：架构图讲“通知怎么流”，这里把<strong>全部仓库</strong>按它在系统里的角色/渠道铺出来，一个不藏。点任意仓库 → 影响分析。颜色 = 它拥有或波及的渠道。</p>
+      <div id="stats" class="stats"></div>
+      <div class="controls">
+        <input id="search" type="search" placeholder="搜索仓库名，例如 sms / tracking / ingress …" aria-label="搜索仓库">
+        <span id="searchHint" class="hint"></span>
+      </div>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--sms)"></span>SMS</span>
+        <span><span class="swatch" style="background:var(--push)"></span>Push</span>
+        <span><span class="swatch" style="background:var(--email)"></span>Email</span>
+        <span><span class="swatch" style="background:var(--mms)"></span>MMS</span>
+        <span><span class="swatch" style="background:var(--whatsapp)"></span>WhatsApp</span>
+        <span><span class="swatch" style="background:var(--wechat)"></span>WeChat</span>
+        <span><span class="swatch" style="background:var(--letter)"></span>Letter</span>
+        <span><span class="swatch" style="background:var(--none)"></span>无渠道（基础设施/未连）</span>
+      </div>
+    </section>
+
+    <section id="lanes" class="lanes panel" style="padding:16px;"></section>
+  </main>
+
+  <script>
+    const CHANNELS = ["sms", "email", "push", "mms", "whatsapp", "wechat", "letter"];
+    const CH_LABEL = { sms: "SMS", email: "Email", push: "Push", mms: "MMS", whatsapp: "WhatsApp", wechat: "WeChat", letter: "Letter" };
+    const CH_COLOR = { sms: "#0057d9", push: "#7d4df5", email: "#107c41", whatsapp: "#0d8f5b", wechat: "#007a3d", letter: "#8f5a00", mms: "#0f766e" };
+    const NONE = "#7c8aa0";
+    const SHARED_RE = /-(core|lib|common|parent|starter|sdk|client|util|utils)(\b|$)/i;
+
+    const LANES = [
+      { key: "ingress", label: "接入 Ingress" },
+      { key: "decision", label: "决策 Decision" },
+      ...CHANNELS.map((c) => ({ key: "ch:" + c, label: CH_LABEL[c] + " 渠道", channel: c })),
+      { key: "outbound", label: "出站 Outbound" },
+      { key: "shared", label: "共享库 / 平台" },
+      { key: "other", label: "其他 / 基础设施" },
+    ];
+
+    function escapeHtml(v) {
+      return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    function laneOf(name, meta) {
+      const n = String(name).toLowerCase();
+      const channels = meta.channel || [];
+      if (n.includes("ingress")) return "ingress";
+      if (n.includes("decision")) return "decision";
+      if (channels.length) return "ch:" + channels[0];
+      if (n.includes("outbound")) return "outbound";
+      if (SHARED_RE.test(n) || (meta.serves_channels || []).length) return "shared";
+      return "other";
+    }
+
+    function chipColor(meta) {
+      const owned = (meta.channel || [])[0];
+      if (owned && CH_COLOR[owned]) return CH_COLOR[owned];
+      const served = (meta.serves_channels || [])[0];
+      if (served && CH_COLOR[served]) return CH_COLOR[served];
+      return NONE;
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      const raw = await res.text();
+      let data; try { data = raw ? JSON.parse(raw) : {}; } catch (e) { throw new Error("服务返回了非 JSON。"); }
+      if (!res.ok) throw new Error(data.error || "请求失败。");
+      return data;
+    }
+
+    function render(repos) {
+      const names = Object.keys(repos).sort();
+      const buckets = {};
+      LANES.forEach((l) => (buckets[l.key] = []));
+      let owns = 0, shared = 0, other = 0;
+      names.forEach((name) => {
+        const meta = repos[name] || {};
+        const key = laneOf(name, meta);
+        (buckets[key] || (buckets[key] = [])).push({ name, meta });
+        if ((meta.channel || []).length) owns++;
+        if (key === "shared") shared++;
+        if (key === "other") other++;
+      });
+
+      document.getElementById("stats").innerHTML = [
+        { num: names.length, lbl: "全量系统仓库（全部归位）", accent: true },
+        { num: owns, lbl: "拥有渠道的仓库" },
+        { num: shared, lbl: "共享库 / 平台" },
+        { num: other, lbl: "其他 / 基础设施（无渠道）" },
+      ].map((t) => '<div class="stat' + (t.accent ? " accent" : "") + '"><div class="num">' +
+        t.num + '</div><div class="lbl">' + escapeHtml(t.lbl) + "</div></div>").join("");
+
+      const lanesEl = document.getElementById("lanes");
+      lanesEl.innerHTML = LANES.map((lane) => {
+        const items = buckets[lane.key] || [];
+        const barColor = lane.channel ? CH_COLOR[lane.channel] : (lane.key === "other" ? NONE : "var(--accent)");
+        const chips = items.map(({ name, meta }) => {
+          const color = chipColor(meta);
+          const served = (meta.serves_channels || []).join(",");
+          return '<a class="chip" href="/impact.html?target=' + encodeURIComponent(name) + '"' +
+            ' data-name="' + escapeHtml(name.toLowerCase()) + '"' +
+            ' title="' + escapeHtml(name) + (served ? " · serves: " + escapeHtml(served) : "") +
+            (meta.bundle ? " · bundle: " + escapeHtml(meta.bundle) : "") + '">' +
+            '<span class="dot" style="background:' + color + '"></span>' +
+            '<span class="txt">' + escapeHtml(name) + "</span></a>";
+        }).join("");
+        return '<div class="lane panel" data-lane="' + lane.key + '"' + (items.length ? "" : ' style="display:none"') + '>' +
+          '<div class="lane-head"><span class="name">' + escapeHtml(lane.label) +
+          '</span><span class="cnt" data-cnt>' + items.length + "</span></div>" +
+          '<div class="lane-bar" style="background:' + barColor + '"></div>' +
+          '<div class="chips">' + chips + "</div></div>";
+      }).join("");
+    }
+
+    function wireSearch() {
+      const input = document.getElementById("search");
+      const hint = document.getElementById("searchHint");
+      input.addEventListener("input", () => {
+        const q = input.value.trim().toLowerCase();
+        let shown = 0;
+        document.querySelectorAll(".lane").forEach((lane) => {
+          let visible = 0;
+          lane.querySelectorAll(".chip").forEach((chip) => {
+            const hit = !q || chip.getAttribute("data-name").includes(q);
+            chip.classList.toggle("hidden", !hit);
+            if (hit) visible++;
+          });
+          lane.querySelector("[data-cnt]").textContent = visible;
+          lane.style.display = visible ? "" : "none";
+          shown += visible;
+        });
+        hint.textContent = q ? ("匹配 " + shown + " 个仓库") : "";
+      });
+    }
+
+    async function boot() {
+      try {
+        const data = await fetchJson("/repo-tags");
+        const repos = (data && data.repos) || {};
+        if (!Object.keys(repos).length) {
+          document.getElementById("lanes").innerHTML =
+            '<div class="lane"><p class="muted">' + escapeHtml(data.note || "暂无 repo_tags 数据。运行 python refresh.py。") + "</p></div>";
+          return;
+        }
+        render(repos);
+        wireSearch();
+      } catch (error) {
+        document.getElementById("lanes").innerHTML =
+          '<div class="lane"><p class="muted">加载失败：' + escapeHtml(error.message || "") +
+          "<br>请通过 retrieval_service 访问本页。</p></div>";
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

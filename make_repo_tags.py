@@ -231,6 +231,8 @@ def build_repo_tags(args):
     bundle_map = load_bundle_map(args.bundles)
     mdc = load_json(args.mdc)
     overrides = load_json(args.override)
+    msg = load_json(args.msg_channels)
+    msg_repos = msg.get("repos") if isinstance(msg.get("repos"), dict) else msg
     # Canonical universe = Maven edge endpoints ∪ the frozen bundle plan (the 390-repo system).
     # NOT all scanned dirs — the extract carries ~66 non-system extras we deliberately exclude.
     # `--repos-file` stays available as an explicit opt-in for a "tag every scanned dir" run.
@@ -247,6 +249,14 @@ def build_repo_tags(args):
         payload[repo]["serves_channels"] = serves_channels(
             repo, payload, args.edges, dependency_graph
         )
+        # Channels reached via async messaging (topics/queues in this repo's config), from
+        # make_message_map — additive, kept separate from the Maven-derived serves_channels.
+        declared = ((msg_repos or {}).get(repo) or {}).get("channels") or []
+        payload[repo]["msg_channels"] = sorted({
+            str(channel).strip().lower()
+            for channel in declared
+            if str(channel).strip().lower() not in NON_CHANNELS
+        })
     return payload
 
 
@@ -262,11 +272,13 @@ def coverage_rows(payload):
     marketing_servicing_set = sum(1 for meta in payload.values() if meta.get("marketing_servicing"))
     time_critical_set = sum(1 for meta in payload.values() if meta.get("time_critical"))
     mdc_common_set = sum(1 for meta in payload.values() if meta.get("mdc_common"))
+    msg_channel_set = sum(1 for meta in payload.values() if meta.get("msg_channels"))
     channel_explained = sum(
         1
         for meta in payload.values()
         if not meta.get("channel")
-        and (meta.get("mdc_common") or "other" in meta.get("channel_declared", []) or meta.get("serves_channels"))
+        and (meta.get("mdc_common") or "other" in meta.get("channel_declared", [])
+             or meta.get("serves_channels") or meta.get("msg_channels"))
     )
     channel_true_dark = channel_unknown - channel_explained
     return [
@@ -281,6 +293,7 @@ def coverage_rows(payload):
         ("marketing_servicing_set", marketing_servicing_set),
         ("time_critical_set", time_critical_set),
         ("mdc_common_set", mdc_common_set),
+        ("msg_channel_set", msg_channel_set),
         ("channel_explained", channel_explained),
         ("channel_true_dark", channel_true_dark),
     ]
@@ -318,6 +331,8 @@ def parse_args(argv=None):
     parser.add_argument("--bundles", default=config.BUNDLES_JSON)
     parser.add_argument("--override", default=config.REPO_TAGS_OVERRIDE_JSON)
     parser.add_argument("--mdc", default=config.REPO_TAGS_MDC_JSON)
+    parser.add_argument("--msg-channels", default=config.MESSAGE_CHANNELS_JSON,
+                        help="message_channels.json from make_message_map (adds msg_channels)")
     parser.add_argument("--out", default=config.REPO_TAGS_JSON)
     parser.add_argument("--pom-only-file", help="newline-delimited repo names to add to the universe")
     parser.add_argument(

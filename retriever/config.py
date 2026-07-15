@@ -17,6 +17,7 @@ EDGES_CSV = _p("SDLC_EDGES", "recon_out", "internal_edges.csv")
 # internal Maven edge still get an entry (edge endpoints alone miss config/Gradle/isolated repos).
 REPOS_TXT = _p("SDLC_REPOS_TXT", "recon_out", "repos.txt")
 MESSAGE_EDGES_CSV = _p("SDLC_MSG_EDGES", "index", "message_edges.csv")
+MESSAGE_CHANNELS_JSON = _p("SDLC_MSG_CHANNELS", "index", "message_channels.json")
 USECASE_SNAPSHOT_CSV = _p(
     "SDLC_USECASE_SNAPSHOT", "index", "tbl_event_router_usecase_topic.snapshot.csv"
 )

@@ -177,6 +177,7 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
     py = sys.executable
     edges_csv = os.path.join(recon_dir, "internal_edges.csv")
     mdc_json = os.path.join(index_dir, "repo_tags.mdc.json")
+    msg_channels_json = os.path.join(index_dir, "message_channels.json")
     repo_tags_json = os.path.join(index_dir, "repo_tags.json")
     delivery_json = os.path.join(index_dir, "delivery_topology.json")
     reconcile_md = os.path.join(index_dir, "reports", "TAG_RECONCILE.md")
@@ -199,13 +200,26 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
             {"cmd": ["enrich_repo_tags.py"], "returncode": 0, "skipped": f"missing MDC sheet {config.MDC_SHEET_XLSX}"}
         )
 
+    # Async message wiring (repo -> topic/queue -> channel) from source; feeds msg_channels into
+    # make_repo_tags below so messaging-only repos get a channel Maven blast-radius can't reach.
+    if os.path.isdir(mirror):
+        report["steps"].append(
+            _run([py, "make_message_map.py", "--mirror", mirror,
+                  "--edges-out", os.path.join(index_dir, "message_edges.csv"),
+                  "--channels-out", msg_channels_json], root)
+        )
+    else:
+        report["steps"].append(
+            {"cmd": ["make_message_map.py"], "returncode": 0, "skipped": f"missing mirror {mirror}"}
+        )
+
     # Repo tags + serves_channels over the full graph, then the delivery topology. These read the
     # FROZEN index/bundles.json (make_bundles is deliberately NOT run here) so each repo's `bundle`
     # stays consistent with the per-bundle CodeGraph indexes that retrieval routing points at.
     if os.path.exists(edges_csv):
         report["steps"].append(
             _run([py, "make_repo_tags.py", "--edges", edges_csv, "--mdc", mdc_json,
-                  "--out", repo_tags_json], root)
+                  "--msg-channels", msg_channels_json, "--out", repo_tags_json], root)
         )
         report["steps"].append(
             _run([py, "make_delivery_topology.py", "--edges", edges_csv,
@@ -223,13 +237,12 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
             {"cmd": ["make_repo_tags.py"], "returncode": 1, "error": f"missing edges {edges_csv}"}
         )
 
-    message_edges = os.path.join(index_dir, "message_edges.csv")
-    if os.path.exists(message_edges) and os.path.isdir(mirror):
-        report["steps"].append(_run([py, "message_map_enrich.py", "--edges", message_edges, "--mirror", mirror], root))
-    else:
-        report["steps"].append(
-            {"cmd": ["message_map_enrich.py"], "returncode": 0, "skipped": "missing message_edges.csv or mirror"}
-        )
+    # NOTE: message_map_enrich.py (enum-symbol resolution) is superseded by make_message_map.py above —
+    # RUNBOOK-26 confirmed this estate declares topics in config, not enum NAME("literal") constants, so
+    # the enricher found nothing to resolve AND would rewrite the source-generated message_edges.csv.
+    report["steps"].append(
+        {"cmd": ["message_map_enrich.py"], "returncode": 0, "skipped": "superseded by make_message_map.py"}
+    )
 
     # Re-bind the architecture map from the latest delivery_topology.json + repo_tags.json so the
     # clickable pipeline diagram never goes stale. The catalog is committed, so this always runs;

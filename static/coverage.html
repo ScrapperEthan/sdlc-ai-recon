@@ -107,6 +107,7 @@
         <span><span class="swatch" style="background:var(--wechat)"></span>WeChat</span>
         <span><span class="swatch" style="background:var(--letter)"></span>Letter</span>
         <span><span class="swatch" style="background:var(--none)"></span>无渠道（基础设施/未连）</span>
+        <span><span class="swatch" style="background:transparent;border:2px solid var(--sms)"></span>空心 = 经消息连接（非自身拥有）</span>
       </div>
     </section>
 
@@ -142,12 +143,21 @@
       if (channels.length) return "ch:" + channels[0];
       if (n.includes("outbound")) return "outbound";
       if (SHARED_RE.test(n) || (meta.serves_channels || []).length) return "shared";
+      // Connected to a channel only through async messaging (topic/queue in its config).
+      const msg = meta.msg_channels || [];
+      if (msg.length) return "ch:" + msg[0];
       return "other";
+    }
+
+    function viaMsgOnly(meta) {
+      return !(meta.channel || []).length && (meta.msg_channels || []).length;
     }
 
     function chipColor(meta) {
       const owned = (meta.channel || [])[0];
       if (owned && CH_COLOR[owned]) return CH_COLOR[owned];
+      const msg = (meta.msg_channels || [])[0];
+      if (msg && CH_COLOR[msg]) return CH_COLOR[msg];
       const served = (meta.serves_channels || [])[0];
       if (served && CH_COLOR[served]) return CH_COLOR[served];
       return NONE;
@@ -165,20 +175,20 @@
       const names = Object.keys(repos).sort();
       const buckets = {};
       LANES.forEach((l) => (buckets[l.key] = []));
-      let owns = 0, shared = 0, other = 0;
+      let owns = 0, viaMsg = 0, other = 0;
       names.forEach((name) => {
         const meta = repos[name] || {};
         const key = laneOf(name, meta);
         (buckets[key] || (buckets[key] = [])).push({ name, meta });
         if ((meta.channel || []).length) owns++;
-        if (key === "shared") shared++;
+        else if (viaMsgOnly(meta)) viaMsg++;
         if (key === "other") other++;
       });
 
       document.getElementById("stats").innerHTML = [
         { num: names.length, lbl: "全量系统仓库（全部归位）", accent: true },
         { num: owns, lbl: "拥有渠道的仓库" },
-        { num: shared, lbl: "共享库 / 平台" },
+        { num: viaMsg, lbl: "经消息连接的仓库（点亮）" },
         { num: other, lbl: "其他 / 基础设施（无渠道）" },
       ].map((t) => '<div class="stat' + (t.accent ? " accent" : "") + '"><div class="num">' +
         t.num + '</div><div class="lbl">' + escapeHtml(t.lbl) + "</div></div>").join("");
@@ -189,12 +199,18 @@
         const barColor = lane.channel ? CH_COLOR[lane.channel] : (lane.key === "other" ? NONE : "var(--accent)");
         const chips = items.map(({ name, meta }) => {
           const color = chipColor(meta);
+          const msgOnly = viaMsgOnly(meta);
           const served = (meta.serves_channels || []).join(",");
+          const msg = (meta.msg_channels || []).join(",");
+          const dot = msgOnly
+            ? 'border:2px solid ' + color + ';background:transparent'
+            : 'background:' + color;
           return '<a class="chip" href="/impact.html?target=' + encodeURIComponent(name) + '"' +
             ' data-name="' + escapeHtml(name.toLowerCase()) + '"' +
             ' title="' + escapeHtml(name) + (served ? " · serves: " + escapeHtml(served) : "") +
+            (msgOnly && msg ? " · 经消息连接: " + escapeHtml(msg) : "") +
             (meta.bundle ? " · bundle: " + escapeHtml(meta.bundle) : "") + '">' +
-            '<span class="dot" style="background:' + color + '"></span>' +
+            '<span class="dot" style="' + dot + '"></span>' +
             '<span class="txt">' + escapeHtml(name) + "</span></a>";
         }).join("");
         return '<div class="lane panel" data-lane="' + lane.key + '"' + (items.length ? "" : ' style="display:none"') + '>' +

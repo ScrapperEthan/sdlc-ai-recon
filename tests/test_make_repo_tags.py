@@ -194,6 +194,27 @@ class MakeRepoTagsTests(unittest.TestCase):
             # Universe is exactly edges (3 endpoints) ∪ bundle repos (2) — no scanned-dir extras.
             self.assertEqual(len(payload), 5)
 
+    def test_msg_channels_folded_from_message_map(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            msg = os.path.join(tmp, "message_channels.json")
+            with open(edges, "w", encoding="utf-8", newline="") as handle:
+                handle.write("from_repo,to_repo\nmc-hk-hase-recon-report-job,lib\n")
+            # a repo with NO name-derived channel gains one purely from its messaging config
+            with open(msg, "w", encoding="utf-8") as handle:
+                json.dump({"repos": {"mc-hk-hase-recon-report-job": {"channels": ["sms", "email", "other"]}}}, handle)
+            args = make_repo_tags.parse_args([
+                "--edges", edges, "--bundles", os.path.join(tmp, "no.json"),
+                "--override", os.path.join(tmp, "no.json"), "--mdc", os.path.join(tmp, "no.json"),
+                "--msg-channels", msg, "--out", os.path.join(tmp, "out.json"),
+            ])
+            payload = make_repo_tags.build_repo_tags(args)
+            entry = payload["mc-hk-hase-recon-report-job"]
+            self.assertEqual(entry["channel"], [])                       # still owns none
+            self.assertEqual(entry["msg_channels"], ["email", "sms"])    # from messaging; "other" scrubbed
+            metrics = dict(make_repo_tags.coverage_rows(payload))
+            self.assertEqual(metrics["msg_channel_set"], 1)
+
     def test_override_merge_wins_over_derived(self):
         with tempfile.TemporaryDirectory() as tmp:
             edges = os.path.join(tmp, "internal_edges.csv")

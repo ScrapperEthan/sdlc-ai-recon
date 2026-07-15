@@ -92,7 +92,8 @@ class PlanTests(unittest.TestCase):
             code = build_codegraph.main(["--reconcile", "--out-root", out_root, "--manifest", manifest])
 
             self.assertEqual(code, 0)
-            data = json.load(open(manifest, encoding="utf-8"))
+            with open(manifest, encoding="utf-8") as handle:
+                data = json.load(handle)
             names = sorted(b["bundle"] for b in data["bundles"])
             self.assertEqual(names, ["ingress", "tracking"])
             self.assertTrue(all(b["returncode"] == 0 and b["reconciled"] for b in data["bundles"]))

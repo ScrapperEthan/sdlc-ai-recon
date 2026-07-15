@@ -22,6 +22,9 @@ def _coerce_entry(entry):
         "serves_channels": [
             str(item).strip() for item in (entry.get("serves_channels") or []) if str(item).strip()
         ],
+        "msg_channels": [
+            str(item).strip() for item in (entry.get("msg_channels") or []) if str(item).strip()
+        ],
         "mdc_common": bool(entry.get("mdc_common")),
         "marketing_servicing": (entry.get("marketing_servicing") or "").strip(),
         "time_critical": bool(entry.get("time_critical")),

@@ -112,6 +112,8 @@ class OutageImpactTests(unittest.TestCase):
                 "others-lib": {"serves_channels": ["others"]},
                 # a library serving a different channel must not appear for channel:sms
                 "email-lib": {"serves_channels": ["email"]},
+                # a messaging-only repo (no name/Maven channel) reached only via its topic config
+                "msg-only": {"msg_channels": ["sms"]},
             })
             with ExitStack() as stack:
                 self._patch_config(stack, tmp)
@@ -125,11 +127,14 @@ class OutageImpactTests(unittest.TestCase):
                 self.assertEqual(rows["sms-owner"]["relation"], "channel-owner")
                 # topology wins the label — the deli-job repo stays delivery-job, not channel-owner
                 self.assertEqual(rows["mc-x-svc-bat-sinch-sms-deli-job"]["relation"], "delivery-job")
+                # a messaging-only repo now folds in via its topic/queue channel
+                self.assertEqual(rows["msg-only"]["relation"], "msg-channel")
                 self.assertNotIn("others-lib", rows)
                 self.assertNotIn("email-lib", rows)
 
                 by_relation = affected["by_relation"]
                 self.assertEqual(by_relation.get("serves-channel"), 1)
+                self.assertEqual(by_relation.get("msg-channel"), 1)
                 self.assertEqual(by_relation.get("channel-owner"), 1)
                 self.assertNotIn("others", by_relation)
                 self.assertEqual(sum(by_relation.values()), affected["count"])

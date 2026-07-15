@@ -21,6 +21,7 @@ NON_CHANNELS = frozenset({"other", "others", "unknown", "n/a", ""})
 RELATION_ORDER = (
     "channel-owner",
     "serves-channel",
+    "msg-channel",
     "delivery-job",
     "outbound-api",
     "dependency-upstream",
@@ -226,7 +227,9 @@ def serves_channel_repos(channels):
     For the resolved channel set, return ``{repo: row}`` where a row cites ``index/repo_tags.json``
     (path only — it's a generated artifact) and carries the strongest relation:
     - ``channel-owner``  — the repo's own ``channel`` tags intersect the outage channels.
-    - ``serves-channel`` — else its ``serves_channels`` (library blast-radius) intersect them.
+    - ``serves-channel`` — else its ``serves_channels`` (Maven library blast-radius) intersect them.
+    - ``msg-channel``    — else its ``msg_channels`` (async topic/queue wiring) intersect them, i.e.
+      a messaging-only repo the Maven graph can't reach (from make_message_map).
     Empty/missing index → ``{}`` (never crash). ``other``/``others`` never count as a channel.
     """
     wanted = _clean_channels(channels)
@@ -239,6 +242,8 @@ def serves_channel_repos(channels):
             relation = "channel-owner"
         elif _clean_channels(meta.get("serves_channels")) & wanted:
             relation = "serves-channel"
+        elif _clean_channels(meta.get("msg_channels")) & wanted:
+            relation = "msg-channel"
         else:
             continue
         rows[repo] = {"repo": repo, "relation": relation, "citations": [citation]}

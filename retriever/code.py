@@ -2,6 +2,7 @@
 falls back to a stdlib walk so it runs with nothing installed."""
 import os
 import re
+import time
 import shutil
 import fnmatch
 import functools
@@ -10,6 +11,12 @@ from . import config
 
 _SKIP = {'.git', 'target', 'build', 'node_modules', '.codegraph'}
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+# Wall-clock ceiling for a single code search. ripgrep is fast, but the stdlib fallback walks the
+# WHOLE mirror (all ~390 repos of the full extract) and, for a sparse/no-match pattern, can run for
+# minutes — that is the kind of stall that wedged a live demo. Bound it: return whatever was found
+# so far rather than hang. Tunable via SDLC_SEARCH_DEADLINE (seconds).
+_SEARCH_DEADLINE = float(os.environ.get("SDLC_SEARCH_DEADLINE", "20"))
 
 
 def _mirror_real():
@@ -83,15 +90,25 @@ def search_code(pattern, glob="*.java", max_results=50):
         cmd += [pattern, config.MIRROR]
         try:
             out = subprocess.run(cmd, capture_output=True, text=True,
-                                 encoding='utf-8', errors='replace').stdout
+                                 encoding='utf-8', errors='replace',
+                                 timeout=_SEARCH_DEADLINE).stdout
             return out.splitlines()[:max_results]
+        except subprocess.TimeoutExpired as timed_out:
+            # Salvage the partial output ripgrep produced before the deadline, if any.
+            partial = timed_out.stdout or ""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", "replace")
+            return partial.splitlines()[:max_results]
         except Exception:
             pass  # fall through to stdlib
 
     rx = re.compile(pattern)
     results = []
+    deadline = time.monotonic() + _SEARCH_DEADLINE
     for dp, dn, fn in os.walk(config.MIRROR):
         dn[:] = [d for d in dn if d not in _SKIP]
+        if time.monotonic() > deadline:
+            break
         for name in fn:
             if glob and not fnmatch.fnmatch(name, glob):
                 continue
@@ -105,6 +122,8 @@ def search_code(pattern, glob="*.java", max_results=50):
                                 return results
             except (OSError, UnicodeError):
                 continue
+        if time.monotonic() > deadline:
+            break
     return results
 
 

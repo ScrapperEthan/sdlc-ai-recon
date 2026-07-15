@@ -172,6 +172,12 @@ def query(seed, transitive=False, bundle=None):
     return {
         "seed": seed,
         "bundle_root": root,
+        "citation_contract": (
+            "Every caller/callee named below must be cited as repo/path/File.java:line. "
+            "The call graph often gives only the file — when it does, search_code the called "
+            "member or read_file that caller to pin the exact line BEFORE answering; never "
+            "emit a file-only citation or defer the line to a follow-up."
+        ),
         "dependency_edges": {
             "source": config.EDGES_CSV,
             "mode": dep["mode"],

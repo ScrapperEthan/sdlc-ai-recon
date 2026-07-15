@@ -87,6 +87,24 @@ class MakeArchMapTests(unittest.TestCase):
         self.assertFalse(haro["bound"])
         self.assertIn("override", haro["note"])
 
+    def test_external_vendor_node_binds_integrating_repos(self):
+        catalog = {"nodes": [
+            {"id": "ext-sinch", "label": "Sinch", "column": 6, "slot": 2, "role": "external",
+             "kind": "vendor", "channel": "sms", "vendor": "sinch"},
+            {"id": "ext-csl", "label": "CSL SMSC", "column": 6, "slot": 1, "role": "external",
+             "kind": "vendor", "channel": "sms"},
+        ]}
+        nodes = make_arch_map.build_map(catalog, TOPOLOGY, TAGS)
+        # vendor-scoped external node -> only the sinch sms repos (deli-job + outbound), not a terminal
+        self.assertEqual(
+            sorted(nodes["ext-sinch"]["repos"]),
+            ["mc-x-sinch-outbound-api", "mc-x-svc-bat-sinch-sms-deli-job"],
+        )
+        self.assertTrue(nodes["ext-sinch"]["bound"])
+        # channel-only external node -> ALL sms delivery repos across vendors
+        self.assertIn("mc-x-svc-bat-csl-sms-deli-job", nodes["ext-csl"]["repos"])
+        self.assertIn("mc-x-svc-bat-sinch-sms-deli-job", nodes["ext-csl"]["repos"])
+
     def test_override_fills_name_opaque_node(self):
         override = {
             "whatsapp-haro": {

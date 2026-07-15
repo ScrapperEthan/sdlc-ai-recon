@@ -84,6 +84,16 @@ def bind_node(node, topology, tags):
             if role in repo.lower():
                 repos.add(repo)
         source = "repo_tags"
+    elif role == "external" and channel:
+        # Vendor endpoints / terminals (APNs·FCM, CSL SMSC, ProofPoint, …) are third-party, not our
+        # code — but the repos that INTEGRATE with them (deliver on this channel, to this vendor when
+        # known) ARE ours. Bind those, so the node maps to real repos instead of an empty terminal.
+        for name, group in _channel_groups(topology, channel).items():
+            if vendor and name.lower() != vendor:
+                continue
+            repos.update(job["repo"] for job in group.get("delivery_jobs") or [] if job.get("repo"))
+            repos.update(api["repo"] for api in group.get("outbound_apis") or [] if api.get("repo"))
+        source = "delivery_topology"
 
     return repos, (source if repos else None)
 

@@ -489,7 +489,9 @@
         return { kind: "vendor", value: node.vendor, heuristic: true,
                  label: "查故障影响（供应商级 · 启发式）" };
       }
-      if (node.channel && (node.role === "topic" || node.role === "delivery-job")) {
+      // Any node tied to a channel — delivery job, topic, or an external vendor/terminal — is a
+      // valid outage entry point (channel-level, solid confidence).
+      if (node.channel) {
         return { kind: "channel", value: node.channel, heuristic: false,
                  label: "查故障影响（渠道级）" };
       }
@@ -542,7 +544,7 @@
         '<div class="meta-line">' + meta.join("") + "</div>" +
         noteHtml +
         "<h3>覆盖渠道 serves_channels</h3>" + servesHtml +
-        "<h3>绑定的真实仓库</h3>" + reposHtml +
+        "<h3>" + (node.role === "external" ? "对接该终端 / 供应商的我方仓库" : "绑定的真实仓库") + "</h3>" + reposHtml +
         outageHtml;
 
       document.getElementById("closeSide").addEventListener("click", clearSide);

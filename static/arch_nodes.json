@@ -49,11 +49,11 @@
     {"id": "wechat-gw", "label": "CN Gateway", "sub": "Nginx → 专线 Lease line", "column": 5, "slot": 7.0, "role": "outbound-api", "channel": "wechat", "vendor": "cn-gateway", "note": "⚠ WeChat 走 CN Gateway/专线，不经 HARO——纯基础设施，需人工 override。"},
 
     {"id": "ext-apns-fcm", "label": "APNs / FCM", "sub": "推送终端", "column": 6, "slot": 0.0, "role": "external", "kind": "vendor", "channel": "push"},
-    {"id": "ext-csl-smsc", "label": "CSL SMSC", "sub": "短信中心", "column": 6, "slot": 1.0, "role": "external", "kind": "vendor", "channel": "sms"},
+    {"id": "ext-csl-smsc", "label": "CSL SMSC", "sub": "短信中心", "column": 6, "slot": 1.0, "role": "external", "kind": "vendor", "channel": "sms", "vendor": "csl"},
     {"id": "ext-3hk-smsc", "label": "3HK SMSC", "sub": "短信中心", "column": 6, "slot": 1.5, "role": "external", "kind": "vendor", "channel": "sms"},
-    {"id": "ext-sinch", "label": "Sinch", "sub": "供应商", "column": 6, "slot": 2.0, "role": "external", "kind": "vendor", "channel": "sms"},
+    {"id": "ext-sinch", "label": "Sinch", "sub": "供应商", "column": 6, "slot": 2.0, "role": "external", "kind": "vendor", "channel": "sms", "vendor": "sinch"},
     {"id": "ext-3hk-mmsc", "label": "3HK MMSC", "sub": "彩信中心", "column": 6, "slot": 3.0, "role": "external", "kind": "vendor", "channel": "mms"},
-    {"id": "ext-proofpoint", "label": "ProofPoint", "sub": "邮件网关", "column": 6, "slot": 4.0, "role": "external", "kind": "vendor", "channel": "email"},
+    {"id": "ext-proofpoint", "label": "ProofPoint", "sub": "邮件网关", "column": 6, "slot": 4.0, "role": "external", "kind": "vendor", "channel": "email", "vendor": "pfp"},
     {"id": "ext-iccm-otx", "label": "打印 / 邮寄", "sub": "ICCM / OTX 终端", "column": 6, "slot": 5.0, "role": "external", "kind": "vendor", "channel": "letter"},
     {"id": "ext-whatsapp", "label": "WhatsApp", "sub": "客户", "column": 6, "slot": 6.0, "role": "external", "kind": "vendor", "channel": "whatsapp"},
     {"id": "ext-wechat", "label": "WeChat", "sub": "客户", "column": 6, "slot": 7.0, "role": "external", "kind": "vendor", "channel": "wechat"}

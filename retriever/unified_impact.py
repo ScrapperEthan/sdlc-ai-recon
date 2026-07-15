@@ -7,10 +7,15 @@ that root from the build manifest; when nothing is built (or the seed can't be r
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 
 from . import code, config, graph, messages, repo_tags
+
+# A search hit is "path:line:text"; capture the path up to the .java (robust to colons in text
+# and to a Windows drive letter) so a bare symbol can be routed to the repo that defines it.
+_HIT_RE = re.compile(r"^(?P<path>.*?\.java):\d+:", re.IGNORECASE)
 
 
 def _message_peers(seed):
@@ -53,12 +58,53 @@ def _built_roots():
     return roots
 
 
+def _repo_of_hit(hit):
+    """The repo (first path segment under the mirror) for a 'path:line:text' search hit."""
+    match = _HIT_RE.match(hit or "")
+    if not match:
+        return "", ""
+    path = match.group("path")
+    try:
+        rel = os.path.relpath(path, config.MIRROR).replace("\\", "/")
+    except ValueError:
+        return "", path
+    if rel.startswith(".."):
+        return "", path
+    return rel.split("/", 1)[0], path
+
+
+def _symbol_defining_root(seed, roots):
+    """Route a bare symbol to a built bundle via the repo that defines it: search the mirror for the
+    symbol, prefer a hit in ``<Symbol>.java`` (the definition), and use that repo's bundle root."""
+    try:
+        hits = code.search_code(seed, "*.java", 40)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(hits, list):
+        return None
+    want_file = (str(seed).split(".")[-1] + ".java").lower()
+    fallback = None
+    for hit in hits:
+        repo, path = _repo_of_hit(hit)
+        if not repo:
+            continue
+        root = roots.get((repo_tags.for_repo(repo).get("bundle") or "").strip())
+        if not root:
+            continue
+        if os.path.basename(path).lower() == want_file:
+            return root  # the definition file — strongest signal
+        if fallback is None:
+            fallback = root
+    return fallback
+
+
 def bundle_root_for(seed, bundle=None):
     """Resolve the staging root to run ``codegraph explore`` in for this seed.
 
     (1) explicit ``bundle`` arg if built; else (2) if ``seed`` is a repo in repo_tags.json, its
     ``bundle`` field's root; else (3) a built bundle whose staging dir contains a ``<seed>`` repo
-    dir; else ``None`` (caller falls back to the process cwd — back-compatible pre-build).
+    dir; else (4) for a bare symbol, the bundle of the repo that defines it; else ``None`` (caller
+    falls back to the process cwd — back-compatible pre-build).
     """
     roots = _built_roots()
     if not roots:
@@ -71,7 +117,7 @@ def bundle_root_for(seed, bundle=None):
     for root in roots.values():
         if os.path.isdir(os.path.join(root, seed)):
             return root
-    return None
+    return _symbol_defining_root(seed, roots)
 
 
 def _call_graph(seed, cwd=None):

@@ -1,7 +1,5 @@
 """Tool registry: OpenAI-style schemas + dispatch into the retrieval layer.
 Add a tool by adding a schema here and a branch in dispatch()."""
-import shutil
-import subprocess
 from retriever import graph, messages as msg, code, flow, unified_impact
 
 
@@ -32,10 +30,18 @@ TOOLS = [
              "end": {"type": "integer"}}, ["path"]),
     _schema("trace", "Stitch use-case/destination across the async message wiring.",
             {"use_case_id": {"type": "string"}, "destination": {"type": "string"}}),
-    _schema("unified_impact", "Blast radius across deps, async message peers, and callers/source hits.",
+    _schema("unified_impact",
+            "CROSS-REPO CALL GRAPH + blast radius. For 'who calls / who uses / the call chain of X' "
+            "(X = a class, method, service, or repo), pass X as `seed`. Returns REAL callers from the "
+            "per-bundle CodeGraph index — auto-routed to the right bundle, you do NOT need to know it — "
+            "plus dependency and async-message peers. PREFER THIS over search_code for any call/usage "
+            "relationship; it returns precise cross-repo call paths, not text matches. Only fall back "
+            "to search_code/read_file if the result's `callers.available` is false.",
             {"seed": {"type": "string"}, "transitive": {"type": "boolean"},
              "bundle": {"type": "string"}}, ["seed"]),
-    _schema("call_graph", "Synchronous who-calls-whom via the CodeGraph CLI (if installed).",
+    _schema("call_graph",
+            "Raw `codegraph explore <query>` for a symbol, routed to the bundle that defines it. "
+            "Prefer `unified_impact` (it wraps this plus deps/messages); use this only for a raw dump.",
             {"query": {"type": "string"}}, ["query"]),
 ]
 
@@ -63,18 +69,8 @@ def dispatch(name, a):
     if name == "unified_impact":
         return unified_impact.query(a["seed"], a.get("transitive", False), a.get("bundle"))
     if name == "call_graph":
-        return _call_graph(a["query"])
+        # Route to the bundle that defines the symbol, reusing the retriever's routed explorer
+        # (the previous copy shelled `codegraph explore` in the process cwd — no index there).
+        root = unified_impact.bundle_root_for(a["query"])
+        return unified_impact._call_graph(a["query"], cwd=root)
     return {"error": f"unknown tool: {name}"}
-
-
-def _call_graph(query):
-    cg = shutil.which("codegraph")
-    if not cg:
-        return {"available": False,
-                "note": "codegraph CLI not on PATH; use search_code/read_file instead"}
-    try:
-        out = subprocess.run([cg, "explore", query], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=60)
-        return {"available": True, "output": out.stdout[:8000]}
-    except Exception as e:  # noqa: BLE001
-        return {"available": False, "error": str(e)}

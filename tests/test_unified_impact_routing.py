@@ -58,6 +58,20 @@ class BundleRootForTests(unittest.TestCase):
                 # unroutable seed -> None (caller falls back to process cwd)
                 self.assertIsNone(unified_impact.bundle_root_for("TotallyUnknownSymbol"))
 
+    def test_bare_symbol_routes_via_defining_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, tags, ingress_root = self._fixture(tmp)
+            # A search hit for the symbol, defined in the ingress repo's IngressService.java.
+            hit = os.path.join(
+                config.MIRROR, "mc-hk-hase-ingress-api", "src", "IngressService.java"
+            ) + ":12:public class IngressService {"
+            with mock.patch.object(config, "CODEGRAPH_BUILD_JSON", manifest), \
+                 mock.patch.object(config, "REPO_TAGS_JSON", tags), \
+                 mock.patch.object(unified_impact.code, "search_code", return_value=[hit]):
+                # bare symbol, no bundle, not a repo, no matching staging dir -> resolved by the
+                # repo that DEFINES it, so who-calls routes to a built index instead of grep.
+                self.assertEqual(unified_impact.bundle_root_for("IngressService"), ingress_root)
+
     def test_no_manifest_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "codegraph_build.json")

@@ -16,12 +16,14 @@ are production. You only read and explain.
 - `./index/message_edges.csv` — the async wiring: `producer_repo,destination,
   consumer_repo,routing_source,evidence`. Use this (NOT CodeGraph) to answer
   "who sends/receives on queue/topic X" and to trace event-driven flows.
-- CodeGraph MCP tools (if a repo is indexed): `codegraph_explore` (symbols
-  relevant to a question + their source + the call paths between them) and
-  `codegraph_node` (one symbol's source + its callers, or a whole file). Prefer
-  these over grep for "what calls / uses / defines X" *inside* an indexed repo —
-  they return precise call paths, not just text matches. They are per-repo;
-  cross-repo links still come from `internal_edges.csv`.
+- `unified_impact` — the CROSS-REPO CALL GRAPH tool. For "who calls / who uses /
+  what is the call chain of X" (X = a class, method, service, or repo), call
+  `unified_impact` with X as `seed`. It returns REAL callers from the per-bundle
+  CodeGraph index — auto-routed to the right bundle, you do NOT need to know the
+  bundle — plus dependency and async-message peers. PREFER IT OVER `search_code`
+  for any call/usage relationship: it returns precise call paths across repos, not
+  text matches. Only fall back to `search_code`/`read_file` if the result's
+  `callers.available` is false.
 
 ## How to answer (retrieval recipe)
 
@@ -38,10 +40,14 @@ are production. You only read and explain.
    queue/topic) is often resolved from use-case configuration, NOT from code. If
    a connection can't be proven from source, say so and point to the relevant
    config/use-case file instead of guessing.
-6. **Don't stop at a thin wrapper.** Many service repos (e.g. `*-ingress-api`)
+6. **For call/usage questions, reach for `unified_impact` first.** "Who calls X",
+   "what uses X", "trace the call chain of X" → call `unified_impact` with the
+   class/method/service as `seed` and read `callers` (real cross-repo call graph).
+   Only if `callers.available` is false do you fall back to grep.
+7. **Don't stop at a thin wrapper.** Many service repos (e.g. `*-ingress-api`)
    are thin Spring Boot shells whose real logic lives in a `*-core` library or the
    shared starter, pulled in transitively — so the repo's own `pom.xml` may list
-   only the starter. Before concluding "no producing/handling code here," SEARCH
+   only the starter. If `unified_impact` doesn't resolve it, SEARCH
    THE WHOLE MIRROR for the relevant classes (the publishing service, e.g.
    `EventProducerService` / `publishIngressEvent`, or the topic enum value) and
    check the `*-core` repos. The end-to-end flow is usually:

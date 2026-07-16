@@ -145,14 +145,18 @@ def dispatch(name, a):
         except Exception:  # noqa: BLE001 — impact chips are optional; keep the inline view usable
             return {"ok": True, "view": "impact", "url": url,
                     "summary": f"已打开 {repo} 的依赖影响视图；依赖计数暂不可用。"}
-        down, up = dep["depends_on"], dep["depended_on_by"]
+        # "改 X 会连累谁" asks for the blast radius: repos that DEPEND ON this one and break if it
+        # changes = graph.impact's `depended_on_by` (downstream consumers). `depends_on` is what this
+        # repo itself needs (its upstream deps). Keep these straight — the labels were inverted before.
+        downstream = dep["depended_on_by"]  # affected consumers — the answer to "连累谁"
+        upstream = dep["depends_on"]         # this repo's own dependencies
         return {
             "ok": True, "view": "impact",
             "url": url,
-            "summary": f"已在依赖图上展开 {repo} 的影响：下游 {len(down)} 个、上游 {len(up)} 个仓库。",
-            "impact": {"repos": {"count": len(down) + len(up),
-                                    "by_relation": {"dependency-downstream": len(down), "dependency-upstream": len(up)},
-                                    "sample": sorted(down)[:6]}},
+            "summary": f"已在依赖图上展开 {repo} 的影响：下游（受影响）{len(downstream)} 个、上游（依赖）{len(upstream)} 个仓库。",
+            "impact": {"repos": {"count": len(downstream) + len(upstream),
+                                    "by_relation": {"dependency-downstream": len(downstream), "dependency-upstream": len(upstream)},
+                                    "sample": sorted(downstream)[:6]}},
         }
     if name == "show_coverage":
         kind = (a.get("kind") or "").strip().lower()

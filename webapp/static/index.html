@@ -1423,7 +1423,16 @@ async function refreshIndexStatus() {
     indexStatus.textContent = when && !Number.isNaN(when.getTime())
       ? `Indexed ${when.toLocaleString()}`
       : 'Index metadata loaded';
-    indexStatus.title = `${Number((status.repos || []).length)} repos tracked`;
+    // Distinguish the two counts that used to be conflated: the mirror scan is a superset (incl.
+    // non-system extras), the MDC product estate is the frozen set the views actually cover.
+    const mirror = Number((status.repos || []).length);
+    let title = `镜像扫描 ${mirror} 仓库`;
+    try {
+      const tags = await fetchJson('/repo-tags');  // same-origin via the proxy; the product estate
+      const product = Number(tags.count || Object.keys(tags.repos || {}).length) || 0;
+      if (product) title += ` · MDC 产品 ${product} 仓库`;
+    } catch (e) { /* proxy/data not up — keep the mirror-only label */ }
+    indexStatus.title = title;
   } catch (error) {
     indexStatus.textContent = 'Index status unavailable';
   }
@@ -1694,7 +1703,10 @@ async function ask(text) {
 }
 
 // Retrieval service (serves arch.html + its data) — same host, port 8848 by convention.
-const RETRIEVAL_BASE = (window.RETRIEVAL_BASE) || (location.protocol + '//' + location.hostname + ':8848');
+// Same-origin by default: the chat server now reverse-proxies the arch/impact/coverage pages, so
+// inline views load from this one port (no separate :8848 to reach or hardcode). Override only if
+// you deliberately point the frontend at a standalone retrieval host.
+const RETRIEVAL_BASE = (window.RETRIEVAL_BASE != null) ? window.RETRIEVAL_BASE : '';
 
 // Inline architecture view: the assistant embeds the highlighted diagram straight into its answer,
 // so the user never opens a page or clicks a node. Appended to the message CONTAINER (not the text

@@ -27,3 +27,9 @@ SESSION_STORE = os.environ.get(
 # ---- server ----
 HOST = os.environ.get("SDLC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SDLC_PORT", "8765"))
+
+# ---- retrieval upstream (single-entry proxy) ----
+# retrieval_service.py serves the arch/impact/coverage pages + their data endpoints. The chat
+# reverse-proxies every non-webapp GET to it, so users only ever hit ONE port (this one) and the
+# inline views load same-origin. Keep the retrieval service on loopback; point this at it.
+RETRIEVAL_UPSTREAM = os.environ.get("RETRIEVAL_UPSTREAM_URL", "http://127.0.0.1:8848").rstrip("/")

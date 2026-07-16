@@ -8,6 +8,8 @@ Run from the workspace root (where mirror/, recon_out/, index/ live):
 """
 import json
 import os
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -16,6 +18,25 @@ from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
 INDEX = os.path.join(HERE, "static", "index.html")
+
+
+def proxy_fetch(url, timeout=30):
+    """GET `url` (the retrieval service, loopback) and return (status, content_type, body_bytes).
+    Never raises on an HTTP error — relays it — and turns a dead upstream into a clear 502 so the
+    single-entry chat degrades gracefully instead of throwing."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            ctype = resp.headers.get("Content-Type", "application/octet-stream")
+            return resp.status, ctype, resp.read()
+    except urllib.error.HTTPError as e:
+        ctype = e.headers.get("Content-Type", "application/json; charset=utf-8")
+        return e.code, ctype, e.read()
+    except (urllib.error.URLError, OSError) as e:
+        reason = getattr(e, "reason", e)
+        body = json.dumps({"error": f"retrieval service unavailable: {reason}",
+                           "hint": "start it with: python retrieval_service.py"},
+                          ensure_ascii=False).encode("utf-8")
+        return 502, "application/json; charset=utf-8", body
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -87,8 +108,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": f"Session not found: {session_id}"})
             else:
                 self._send_json(200, session)
-        else:
+        elif path == "/health":
+            # One unified health check for the single entry: this app + the retrieval upstream.
+            self._send_json(200, self._unified_health())
+        elif path.startswith("/api/"):
             self._send(404, b"not found", "text/plain")
+        else:
+            # Single entry: reverse-proxy everything else (arch/impact/coverage pages + their data
+            # endpoints) to the retrieval service, so users only ever hit this one port.
+            status, ctype, body = proxy_fetch(config.RETRIEVAL_UPSTREAM + self.path)
+            self._send(status, body, ctype)
+
+    def _unified_health(self):
+        status, _ctype, body = proxy_fetch(config.RETRIEVAL_UPSTREAM + "/health", timeout=5)
+        try:
+            retrieval = json.loads(body)
+        except (ValueError, TypeError):
+            retrieval = {"available": False}
+        return {"ok": status == 200, "webapp": "ok",
+                "retrieval_upstream": config.RETRIEVAL_UPSTREAM, "retrieval": retrieval}
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -197,6 +235,7 @@ def main():
     server = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
     mode = "MOCK (no model)" if config.LLM_MOCK else f"model={config.LLM_MODEL} @ {config.LLM_BASE_URL}"
     print(f"HASE assistant: http://{config.HOST}:{config.PORT}   [{mode}]")
+    print(f"  single entry — proxying arch/impact/coverage + data from {config.RETRIEVAL_UPSTREAM}")
     print("Ctrl+C to stop.")
     try:
         server.serve_forever()

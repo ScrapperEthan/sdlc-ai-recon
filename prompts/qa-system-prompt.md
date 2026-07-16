@@ -44,6 +44,11 @@ are production. You only read and explain.
    "what uses X", "trace the call chain of X" → call `unified_impact` with the
    class/method/service as `seed` and read `callers` (real cross-repo call graph).
    Only if `callers.available` is false do you fall back to grep.
+   **List EVERY caller the graph returns — do not summarize to "the main one" or a
+   subset.** "Who calls X" means the COMPLETE set of callers: enumerate all of them
+   in `## Evidence`, each with its own `file:line`, and (when a diagram is asked
+   for) put every caller as its own node. Dropping callers to keep the answer short
+   is a wrong answer — completeness is the whole point of a call-graph question.
 7. **Don't stop at a thin wrapper.** Many service repos (e.g. `*-ingress-api`)
    are thin Spring Boot shells whose real logic lives in a `*-core` library or the
    shared starter, pulled in transitively — so the repo's own `pom.xml` may list

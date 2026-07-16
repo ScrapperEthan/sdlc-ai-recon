@@ -434,14 +434,27 @@
         const to = state.nodeById[edge[1]];
         if (!from || !to) return;
         const dashed = edge[2] === "uses";
-        const x1 = xOf(from) + NODE_W, y1 = yOf(from) + NODE_H / 2;
-        const x2 = xOf(to), y2 = yOf(to) + NODE_H / 2;
-        const mid = (x1 + x2) / 2;
+        let d;
+        if (!dashed && from.column === to.column) {
+          // Same column: the right-to-left S-curve below would loop back on itself and read as a
+          // tangle. Route it vertically instead — from the facing edge of the upper node straight
+          // down (or up) to the facing edge of the lower node, both on the shared column centre.
+          const cx = xOf(from) + NODE_W / 2;
+          const fromAbove = yOf(from) <= yOf(to);
+          const y1 = fromAbove ? yOf(from) + NODE_H : yOf(from);
+          const y2 = fromAbove ? yOf(to) : yOf(to) + NODE_H;
+          d = "M " + cx + " " + y1 + " L " + cx + " " + y2;
+        } else {
+          const x1 = xOf(from) + NODE_W, y1 = yOf(from) + NODE_H / 2;
+          const x2 = xOf(to), y2 = yOf(to) + NODE_H / 2;
+          const mid = (x1 + x2) / 2;
+          d = "M " + x1 + " " + y1 + " C " + mid + " " + y1 + ", " + mid + " " + y2 + ", " + x2 + " " + y2;
+        }
         svg.appendChild(el("path", {
           class: "edge",
           "data-from": edge[0],
           "data-to": edge[1],
-          d: "M " + x1 + " " + y1 + " C " + mid + " " + y1 + ", " + mid + " " + y2 + ", " + x2 + " " + y2,
+          d: d,
           fill: "none",
           stroke: dashed ? "#b8c2d4" : "#9fb0c9",
           "stroke-width": dashed ? 1.4 : 1.8,

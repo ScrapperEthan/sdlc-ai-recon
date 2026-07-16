@@ -174,6 +174,13 @@
       padding: 5px 13px; font-weight: 700; cursor: pointer; font-size: 12.5px;
     }
 
+    /* Embed mode: /arch.html?embed=1 — just the diagram, for inlining inside the chat answer. */
+    body.embed { background: #fff; }
+    body.embed .hero, body.embed .side { display: none; }
+    body.embed .shell { width: 100%; margin: 0; gap: 0; }
+    body.embed .board { grid-template-columns: 1fr; gap: 0; }
+    body.embed .diagram-wrap { border: none; border-radius: 0; box-shadow: none; padding: 10px; background: transparent; }
+
     .note-banner {
       padding: 12px 14px;
       border-radius: 14px;
@@ -693,6 +700,7 @@
 
     function applyDeepLink() {
       const params = new URLSearchParams(location.search);
+      if (params.get("embed") === "1") document.body.classList.add("embed");
       const hl = parseHighlightParam(params);
       if (hl && hl.value) {
         const hit = computeHighlight(hl.kind, hl.value);
@@ -704,12 +712,17 @@
             '<button type="button" id="hlClear">显示全部</button>';
           banner.classList.add("show");
           document.getElementById("hlClear").addEventListener("click", clearHighlight);
-          const rep = representativeNode(hl.kind, hl.value);
-          if (rep) {
-            selectNode(rep);
-            if (params.get("run") !== "0") {
-              const btn = document.querySelector("#side button.outage");
-              if (btn) btn.click();  // auto-run the outage panel (needs the backend; harmless if absent)
+          // Standalone page: also open the node's side panel + run the outage numbers. Embedded in
+          // the chat the side panel is hidden and the assistant already gives the numbers in text,
+          // so we just highlight.
+          if (!document.body.classList.contains("embed")) {
+            const rep = representativeNode(hl.kind, hl.value);
+            if (rep) {
+              selectNode(rep);
+              if (params.get("run") !== "0") {
+                const btn = document.querySelector("#side button.outage");
+                if (btn) btn.click();  // auto-run the outage panel (needs the backend; harmless if absent)
+              }
             }
           }
           return;

@@ -80,7 +80,10 @@ def answer(question, history=None):
     trace = []
     usage = llm_usage.empty_usage()
     citation_report = citations.verify("")
+    views = []
     for event in answer_events(question, history):
+        if event.get("type") == "view" and event.get("view"):
+            views.append(event["view"])
         if event.get("type") == "done":
             answer_text = event.get("answer") or ""
             trace = event.get("tool_trace") or []
@@ -91,6 +94,7 @@ def answer(question, history=None):
         "tool_trace": trace,
         "usage": usage,
         "citations": citation_report,
+        "views": views,
     }
 
 
@@ -146,6 +150,10 @@ def answer_events(question, history=None):
             except Exception as e:  # noqa: BLE001
                 result = {"error": str(e)}
             yield {"type": "tool_end", "name": name}
+            # show_arch renders inline: hand the frontend a view directive so the diagram appears
+            # in the answer itself (the user never opens a page or clicks a node).
+            if name == "show_arch" and isinstance(result, dict) and result.get("ok"):
+                yield {"type": "view", "view": result}
             trace.append({"tool": name, "args": args})
             messages.append({
                 "role": "tool",

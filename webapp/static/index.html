@@ -1674,6 +1674,7 @@ async function ask(text) {
       setBubbleContent(bubble, d.answer || '(empty)', true);
       markCitations(bubble, d.citations);
       history.push({role:'assistant', content:d.answer || ''});
+      if (d.views && d.views.length) d.views.forEach((v) => renderInlineView(pending, v));
       if (d.tool_trace && d.tool_trace.length) addToolTrace(pending, d.tool_trace);
       if (d.usage) renderUsage(pending, d.usage);
       if (d.session) {
@@ -1687,6 +1688,32 @@ async function ask(text) {
   }
   setBusy(false);
   q.focus();
+}
+
+// Retrieval service (serves arch.html + its data) — same host, port 8848 by convention.
+const RETRIEVAL_BASE = (window.RETRIEVAL_BASE) || (location.protocol + '//' + location.hostname + ':8848');
+
+// Inline architecture view: the assistant embeds the highlighted diagram straight into its answer,
+// so the user never opens a page or clicks a node. Appended to the message CONTAINER (not the text
+// bubble, which streaming overwrites).
+function renderInlineView(container, view) {
+  if (!container || !view || !view.url) return;
+  if (container.querySelector('.inline-view[data-url="' + view.url + '"]')) return;  // no dupes
+  const wrap = document.createElement('div');
+  wrap.className = 'inline-view';
+  wrap.setAttribute('data-url', view.url);
+  const cap = document.createElement('div');
+  cap.className = 'inline-view-cap';
+  cap.textContent = view.summary || '架构图 · 受影响链路';
+  const frame = document.createElement('iframe');
+  frame.className = 'inline-view-frame';
+  frame.src = RETRIEVAL_BASE + view.url;
+  frame.setAttribute('loading', 'lazy');
+  frame.setAttribute('title', 'architecture diagram');
+  wrap.appendChild(cap);
+  wrap.appendChild(frame);
+  container.appendChild(wrap);
+  if (typeof log !== 'undefined' && log) log.scrollTop = log.scrollHeight;
 }
 
 async function askStream(text) {
@@ -1736,6 +1763,8 @@ async function askStream(text) {
         if (event.type === 'tool_start') {
           trace.push({tool: event.name || 'tool'});
           showLiveTools(pending, trace);
+        } else if (event.type === 'view') {
+          renderInlineView(pending, event.view);
         } else if (event.type === 'token') {
           if (!started) {
             bubble.classList.remove('loading');
@@ -1833,6 +1862,9 @@ refreshIndexStatus();
   .bubble.markdown pre.mermaid { background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow-x:auto; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; white-space:pre; }
   .bubble.markdown pre.mermaid[data-mermaid-done] { background:transparent; padding:0; overflow-x:auto; }
   .bubble.markdown pre.mermaid svg { max-width:100%; height:auto; }
+  .inline-view { margin-top:12px; border:1px solid #d7dfeb; border-radius:12px; overflow:hidden; background:#fff; }
+  .inline-view-cap { font-size:12.5px; font-weight:600; color:#5a6a82; padding:8px 12px; border-bottom:1px solid #eef3f9; background:#f7fafc; }
+  .inline-view-frame { width:100%; height:460px; border:0; display:block; background:#fff; }
 </style>
 <!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
      blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->

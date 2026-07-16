@@ -1,6 +1,6 @@
 """Tool registry: OpenAI-style schemas + dispatch into the retrieval layer.
 Add a tool by adding a schema here and a branch in dispatch()."""
-from retriever import graph, messages as msg, code, flow, unified_impact
+from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus
 
 
 def _schema(name, desc, props, required=()):
@@ -43,6 +43,15 @@ TOOLS = [
             "Raw `codegraph explore <query>` for a symbol, routed to the bundle that defines it. "
             "Prefer `unified_impact` (it wraps this plus deps/messages); use this only for a raw dump.",
             {"query": {"type": "string"}}, ["query"]),
+    _schema("show_arch",
+            "Render the architecture diagram INLINE in your answer with the affected chain "
+            "highlighted. Call this whenever the user asks what is affected / impacted / broken by a "
+            "CHANNEL or VENDOR problem or outage (e.g. 'SMS channel is down', '短信受影响了', 'Sinch "
+            "出问题了'). `kind` is 'channel' or 'vendor'; `value` is the channel (sms/email/push/mms/"
+            "whatsapp/wechat/letter) or the vendor (sinch/csl/3hk/…). The user then SEES the "
+            "highlighted diagram in your reply — they never open a page or click a node themselves. "
+            "Still write the affected-path explanation in text too.",
+            {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind", "value"]),
 ]
 
 
@@ -73,4 +82,6 @@ def dispatch(name, a):
         # (the previous copy shelled `codegraph explore` in the process cwd — no index there).
         root = unified_impact.bundle_root_for(a["query"])
         return unified_impact._call_graph(a["query"], cwd=root)
+    if name == "show_arch":
+        return arch_focus.focus(a.get("kind"), a.get("value"))
     return {"error": f"unknown tool: {name}"}

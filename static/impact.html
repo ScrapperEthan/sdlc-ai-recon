@@ -506,6 +506,24 @@
       border-radius: 8px;
     }
 
+    /* Embed mode: /impact.html?embed=1 — just the rendered result inside the chat answer. */
+    body.embed { background: #fff; min-width: 0; overflow-x: hidden; }
+    body.embed .hero { display: none; }
+    body.embed .shell { width: 100%; margin: 0; min-width: 0; }
+    body.embed .layout { margin: 0; min-width: 0; }
+    body.embed .result-grid { gap: 10px; min-width: 0; }
+    body.embed .embed-secondary { display: none; }
+    body.embed .panel,
+    body.embed .target-card {
+      border: none; border-radius: 0; box-shadow: none; padding: 12px; background: transparent;
+      min-width: 0;
+    }
+    body.embed .columns > *,
+    body.embed .section-title > * { min-width: 0; }
+    body.embed .repo-name,
+    body.embed .path-text,
+    body.embed .inline-code { overflow-wrap: anywhere; word-break: break-word; }
+
     @media (max-width: 960px) {
       .controls,
       .filter-grid,
@@ -839,7 +857,7 @@
           "</article>" +
         "</section>" +
 
-        '<section class="panel">' +
+        '<section class="panel embed-secondary">' +
           '<div class="section-title"><h2>风险提示</h2><span class="muted">包括 hub 风险与说明性提示</span></div>' +
           renderRiskCallouts(report.risk_callouts || []) +
         "</section>" +
@@ -858,17 +876,17 @@
           "</div>" +
         "</section>" +
 
-        '<section class="panel">' +
+        '<section class="panel embed-secondary">' +
           '<div class="section-title"><h2>异步链路</h2><span class="muted">按 destination 汇总 producer / consumer / channel</span></div>' +
           renderRoutes(report.async_routes || []) +
         "</section>" +
 
-        '<section class="panel">' +
+        '<section class="panel embed-secondary">' +
           '<div class="section-title"><h2>渠道线索</h2><span class="muted">为何判定是 SMS / Email / Push 等</span></div>' +
           renderChannelChain(report.channel_chain || []) +
         "</section>" +
 
-        '<section class="panel">' +
+        '<section class="panel embed-secondary">' +
           '<div class="section-title"><h2>出处汇总</h2><span class="muted">完整证据清单</span></div>' +
           renderCitations(report.citations || []) +
         "</section>";
@@ -939,6 +957,8 @@
         setAnalyzeStatus("分析失败，请检查输入是否存在。");
       } finally {
         setLoading(analyzeButton, false);
+        requestAnimationFrame(postEmbedHeight);
+        setTimeout(postEmbedHeight, 250);
       }
     }
 
@@ -1032,11 +1052,24 @@
     outageInput.placeholder = outagePlaceholders[outageKind.value];
     outageResult.innerHTML = '<section class="panel"><div class="empty">切换到“故障影响”后，输入渠道、供应商或投递任务仓库，快速查看受影响用例、组件与结论置信度。</div></section>';
 
+    function postEmbedHeight() {
+      if (!document.body.classList.contains("embed")) return;
+      const wrap = document.querySelector(".layout");
+      if (!wrap) return;
+      const height = Math.ceil(wrap.getBoundingClientRect().height);
+      try { parent.postMessage({ type: "arch-embed-height", height: height }, "*"); } catch (e) {}
+    }
+
     // Deep link: architecture map (arch.html) links here as /impact.html?target=<repo>.
     // Support an optional "use-case:" / "topic:" prefix so any target kind can be linked.
     (function applyDeepLink() {
-      const raw = new URLSearchParams(window.location.search).get("target");
-      if (!raw) return;
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("embed") === "1") document.body.classList.add("embed");
+      const raw = params.get("target");
+      if (!raw) {
+        requestAnimationFrame(postEmbedHeight);
+        return;
+      }
       let kind = "repo";
       let value = raw;
       const match = /^(use-case|topic):(.+)$/i.exec(raw);
@@ -1050,6 +1083,7 @@
       activateTab("analyze");
       analyze();
     })();
+    window.addEventListener("resize", postEmbedHeight);
   </script>
 </body>
 </html>

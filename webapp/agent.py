@@ -2,8 +2,34 @@
 Model-agnostic; the model call goes through the `llm` facade. Token/credit usage
 is aggregated across the (possibly several) model calls one question triggers."""
 import json
+import re
 from retriever import citations
 from . import llm, tools, config, llm_usage
+
+
+# The model sometimes narrates the inline view it already triggered, e.g.
+#   <!-- architecture diagram rendered inline: vendor:csl -->
+# The diagram is rendered by the `view` event / iframe, NOT by this text; the
+# markdown renderer escapes the comment, so it surfaces as literal, ugly noise
+# in the answer bubble. Strip any HTML comment from the answer (a comment never
+# has a legitimate use on this Q&A surface — it can only render as escaped text).
+# Code fences are preserved so an example that legitimately contains `<!-- -->`
+# is left alone.
+_CODE_FENCE_SPLIT = re.compile(r"(```.*?```)", re.DOTALL)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_view_placeholders(text):
+    """Remove stray HTML comments (view-render placeholders) outside code fences."""
+    if not text or "<!--" not in text:
+        return text
+    parts = _CODE_FENCE_SPLIT.split(text)
+    for i in range(0, len(parts), 2):  # even indices are outside code fences
+        parts[i] = _HTML_COMMENT.sub("", parts[i])
+    cleaned = "".join(parts)
+    # collapse blank lines left where a comment sat on its own line
+    cleaned = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", cleaned)
+    return cleaned.strip("\n")
 
 
 def _system_prompt():
@@ -124,7 +150,7 @@ def answer_events(question, history=None):
             message["tool_calls"] = calls
         messages.append(message)
         if not calls:
-            answer_text = message.get("content") or ""
+            answer_text = strip_view_placeholders(message.get("content") or "")
             # When the turn was truly streamed, its tokens are already out — don't re-emit.
             if not streamed:
                 for chunk in llm.stream_text(message):
@@ -154,7 +180,7 @@ def answer_events(question, history=None):
             yield {"type": "tool_end", "name": name}
             # show_arch renders inline: hand the frontend a view directive so the diagram appears
             # in the answer itself (the user never opens a page or clicks a node).
-            if name == "show_arch" and isinstance(result, dict) and result.get("ok"):
+            if name in ("show_arch", "show_impact", "show_coverage") and isinstance(result, dict) and result.get("ok"):
                 emitted_views.append(result)
                 yield {"type": "view", "view": result}
             trace.append({"tool": name, "args": args})
@@ -176,7 +202,7 @@ def answer_events(question, history=None):
         else:  # "final"
             message = payload
     llm_usage.add_call(usage, message)
-    answer_text = message.get("content") or ""
+    answer_text = strip_view_placeholders(message.get("content") or "")
     if not streamed:
         for chunk in llm.stream_text(message):
             yield {"type": "token", "text": chunk}

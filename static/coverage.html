@@ -78,6 +78,18 @@
     .chip.hidden { display: none; }
     .lane.empty-lane { display: none; }
     .muted { color: var(--muted); }
+
+    /* Embed mode: /coverage.html?embed=1 — just the filtered estate overview. */
+    body.embed { background: #fff; min-width: 0; overflow-x: hidden; }
+    body.embed .hero { display: none; }
+    body.embed .shell { width: 100%; margin: 0; gap: 0; min-width: 0; }
+    body.embed .lanes {
+      border: none; border-radius: 0; box-shadow: none; padding: 10px !important;
+      background: transparent; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
+      min-width: 0; overflow-x: hidden;
+    }
+    body.embed .lane { min-width: 0; }
+    body.embed .chip .txt { max-width: 100%; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -202,11 +214,14 @@
           const msgOnly = viaMsgOnly(meta);
           const served = (meta.serves_channels || []).join(",");
           const msg = (meta.msg_channels || []).join(",");
+          const channels = [...new Set([...(meta.channel || []), ...(meta.msg_channels || []),
+            ...(meta.serves_channels || [])].map((item) => String(item).toLowerCase()))].join(",");
           const dot = msgOnly
             ? 'border:2px solid ' + color + ';background:transparent'
             : 'background:' + color;
           return '<a class="chip" href="/impact.html?target=' + encodeURIComponent(name) + '"' +
             ' data-name="' + escapeHtml(name.toLowerCase()) + '"' +
+            ' data-channels="' + escapeHtml(channels) + '"' +
             ' title="' + escapeHtml(name) + (served ? " · serves: " + escapeHtml(served) : "") +
             (msgOnly && msg ? " · 经消息连接: " + escapeHtml(msg) : "") +
             (meta.bundle ? " · bundle: " + escapeHtml(meta.bundle) : "") + '">' +
@@ -221,46 +236,72 @@
       }).join("");
     }
 
+    function applyFilter(query, channel) {
+      const q = String(query || "").trim().toLowerCase();
+      const ch = String(channel || "").trim().toLowerCase();
+      let shown = 0;
+      document.querySelectorAll(".lane").forEach((lane) => {
+        let visible = 0;
+        lane.querySelectorAll(".chip").forEach((chip) => {
+          const channels = (chip.getAttribute("data-channels") || "").split(",").filter(Boolean);
+          const hit = ch ? channels.includes(ch) : (!q || chip.getAttribute("data-name").includes(q));
+          chip.classList.toggle("hidden", !hit);
+          if (hit) visible++;
+        });
+        lane.querySelector("[data-cnt]").textContent = visible;
+        lane.style.display = visible ? "" : "none";
+        shown += visible;
+      });
+      document.getElementById("searchHint").textContent = (q || ch) ? ("匹配 " + shown + " 个仓库") : "";
+      requestAnimationFrame(postEmbedHeight);
+      setTimeout(postEmbedHeight, 250);
+    }
+
     function wireSearch() {
       const input = document.getElementById("search");
-      const hint = document.getElementById("searchHint");
       input.addEventListener("input", () => {
-        const q = input.value.trim().toLowerCase();
-        let shown = 0;
-        document.querySelectorAll(".lane").forEach((lane) => {
-          let visible = 0;
-          lane.querySelectorAll(".chip").forEach((chip) => {
-            const hit = !q || chip.getAttribute("data-name").includes(q);
-            chip.classList.toggle("hidden", !hit);
-            if (hit) visible++;
-          });
-          lane.querySelector("[data-cnt]").textContent = visible;
-          lane.style.display = visible ? "" : "none";
-          shown += visible;
-        });
-        hint.textContent = q ? ("匹配 " + shown + " 个仓库") : "";
+        applyFilter(input.value, "");
       });
     }
 
+    function postEmbedHeight() {
+      if (!document.body.classList.contains("embed")) return;
+      const wrap = document.querySelector(".lanes");
+      if (!wrap) return;
+      const height = Math.ceil(wrap.getBoundingClientRect().height);
+      try { parent.postMessage({ type: "arch-embed-height", height: height }, "*"); } catch (e) {}
+    }
+
     async function boot() {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("embed") === "1") document.body.classList.add("embed");
       try {
         const data = await fetchJson("/repo-tags");
         const repos = (data && data.repos) || {};
         if (!Object.keys(repos).length) {
           document.getElementById("lanes").innerHTML =
             '<div class="lane"><p class="muted">' + escapeHtml(data.note || "暂无 repo_tags 数据。运行 python refresh.py。") + "</p></div>";
+          requestAnimationFrame(postEmbedHeight);
+          setTimeout(postEmbedHeight, 250);
           return;
         }
         render(repos);
         wireSearch();
+        const channel = (params.get("channel") || "").trim();
+        const query = (params.get("q") || "").trim();
+        document.getElementById("search").value = channel || query;
+        applyFilter(query, channel);
       } catch (error) {
         document.getElementById("lanes").innerHTML =
           '<div class="lane"><p class="muted">加载失败：' + escapeHtml(error.message || "") +
           "<br>请通过 retrieval_service 访问本页。</p></div>";
+        requestAnimationFrame(postEmbedHeight);
+        setTimeout(postEmbedHeight, 250);
       }
     }
 
     boot();
+    window.addEventListener("resize", postEmbedHeight);
   </script>
 </body>
 </html>

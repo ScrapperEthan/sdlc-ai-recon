@@ -77,6 +77,18 @@ TOOLS = [
             "highlighted diagram in your reply — they never open a page or click a node themselves. "
             "Still write the affected-path explanation in text too.",
             {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind", "value"]),
+    _schema("show_impact",
+            "Render the dependency blast-radius INLINE in your answer for a repo the user wants to change "
+            "or is worried about. Call this whenever the user asks 'what breaks if I change X', 'who depends "
+            "on X', 'is X risky to touch', '改 X 会连累谁' (X = a repo name). `repo` is the repo id. The user "
+            "SEES the impact inline; also summarise the downstream/upstream counts in text.",
+            {"repo": {"type": "string"}}, ["repo"]),
+    _schema("show_coverage",
+            "Render the 392-repo estate overview INLINE, optionally filtered. Call this when the user asks "
+            "to see the repos on a channel or matching a keyword ('show me the SMS repos', '有哪些 tracking "
+            "仓库', 'what does the estate look like'). `kind` is 'channel' or 'query'; `value` is the channel "
+            "(sms/email/…) or a search keyword.",
+            {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind"]),
 ]
 
 
@@ -114,4 +126,39 @@ def dispatch(name, a):
             if impact:
                 result["impact"] = impact
         return result
+    if name == "show_impact":
+        repo = (a.get("repo") or "").strip()
+        if not repo:
+            return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
+        try:
+            known = graph.known_repos()
+        except Exception:  # noqa: BLE001 — the embeddable page can still explain a missing index
+            known = set()
+        if known and repo not in known:
+            return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
+        url = f"/impact.html?embed=1&target={repo}"
+        if not known:
+            return {"ok": True, "view": "impact", "url": url,
+                    "summary": f"已打开 {repo} 的依赖影响视图；当前依赖索引不可用，图中会显示可用的最佳结果。"}
+        try:
+            dep = graph.impact(repo, transitive=True)
+        except Exception:  # noqa: BLE001 — impact chips are optional; keep the inline view usable
+            return {"ok": True, "view": "impact", "url": url,
+                    "summary": f"已打开 {repo} 的依赖影响视图；依赖计数暂不可用。"}
+        down, up = dep["depends_on"], dep["depended_on_by"]
+        return {
+            "ok": True, "view": "impact",
+            "url": url,
+            "summary": f"已在依赖图上展开 {repo} 的影响：下游 {len(down)} 个、上游 {len(up)} 个仓库。",
+            "impact": {"repos": {"count": len(down) + len(up),
+                                    "by_relation": {"dependency-downstream": len(down), "dependency-upstream": len(up)},
+                                    "sample": sorted(down)[:6]}},
+        }
+    if name == "show_coverage":
+        kind = (a.get("kind") or "").strip().lower()
+        value = (a.get("value") or "").strip()
+        param = ("channel=" + value) if kind == "channel" and value else (("q=" + value) if value else "")
+        return {"ok": True, "view": "coverage",
+                "url": "/coverage.html?embed=1" + ("&" + param if param else ""),
+                "summary": ("仓库全景" + (f"（筛选：{kind}:{value}）" if value else "（全量 392）"))}
     return {"error": f"unknown tool: {name}"}

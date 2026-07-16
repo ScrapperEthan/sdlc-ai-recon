@@ -156,6 +156,24 @@
     .node.selected rect.box { stroke-width: 3; }
     .node.empty { opacity: 0.72; }
 
+    /* Deep-link highlight: dim everything, light up the affected chain in red. */
+    .node.dim { opacity: 0.13; transition: opacity 220ms ease; }
+    .node.affected { opacity: 1; }
+    .node.affected rect.box { stroke: var(--danger); stroke-width: 3; filter: drop-shadow(0 4px 12px rgba(154,47,47,0.28)); }
+    path.edge-dim { opacity: 0.08; }
+    path.edge-affected { stroke: var(--danger) !important; stroke-width: 2.6 !important; opacity: 1 !important; }
+    .hl-banner {
+      display: none; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 11px 14px; border-radius: 14px; margin-bottom: 12px;
+      background: var(--danger-bg); color: var(--danger);
+      border: 1px solid rgba(154,47,47,0.2); font-size: 13px; font-weight: 600;
+    }
+    .hl-banner.show { display: flex; }
+    .hl-banner button {
+      border: none; background: var(--danger); color: #fff; border-radius: 999px;
+      padding: 5px 13px; font-weight: 700; cursor: pointer; font-size: 12.5px;
+    }
+
     .note-banner {
       padding: 12px 14px;
       border-radius: 14px;
@@ -267,6 +285,7 @@
 
     <section class="board">
       <div class="panel diagram-wrap">
+        <div id="hlBanner" class="hl-banner"></div>
         <svg id="diagram" role="img" aria-label="MDC 通知管线架构图"></svg>
       </div>
       <aside id="side" class="panel side">
@@ -411,6 +430,9 @@
         const x2 = xOf(to), y2 = yOf(to) + NODE_H / 2;
         const mid = (x1 + x2) / 2;
         svg.appendChild(el("path", {
+          class: "edge",
+          "data-from": edge[0],
+          "data-to": edge[1],
           d: "M " + x1 + " " + y1 + " C " + mid + " " + y1 + ", " + mid + " " + y2 + ", " + x2 + " " + y2,
           fill: "none",
           stroke: dashed ? "#b8c2d4" : "#9fb0c9",
@@ -599,6 +621,104 @@
       }
     }
 
+    // ---- Deep-link highlight: /arch.html?highlight=vendor:sinch (or channel:sms / repo:<name>) ----
+    // dims the whole map and lights up only the affected chain, so the assistant can hand the user a
+    // link that opens straight onto "here is what breaks". Also accepts ?focus=<nodeId>.
+    function parseHighlightParam(params) {
+      const raw = params.get("highlight") || params.get("outage") || "";
+      const idx = raw.indexOf(":");
+      if (idx < 0) return null;
+      return { kind: raw.slice(0, idx).toLowerCase().trim(), value: raw.slice(idx + 1).trim() };
+    }
+
+    function computeHighlight(kind, value) {
+      const v = (value || "").toLowerCase();
+      const nodes = state.catalog.nodes || [];
+      const hit = new Set();
+      const routers = ["decision-topics", "decision-job"];
+      if (kind === "channel") {
+        nodes.forEach((n) => { if ((n.channel || "").toLowerCase() === v) hit.add(n.id); });
+        routers.forEach((id) => hit.add(id));
+      } else if (kind === "vendor") {
+        const chans = new Set();
+        nodes.forEach((n) => {
+          if ((n.vendor || "").toLowerCase() === v) { hit.add(n.id); if (n.channel) chans.add(n.channel.toLowerCase()); }
+        });
+        // shared upstream (topics + delivery job) of that vendor's channel — but NOT the other
+        // vendors' outbound/terminal nodes: a single-vendor outage doesn't take those down.
+        nodes.forEach((n) => {
+          if (chans.has((n.channel || "").toLowerCase()) && (n.role === "topic" || n.role === "delivery-job")) hit.add(n.id);
+        });
+        routers.forEach((id) => hit.add(id));
+      } else if (kind === "repo") {
+        nodes.forEach((n) => { if ((binding(n.id).repos || []).some((r) => r.toLowerCase() === v)) hit.add(n.id); });
+      }
+      return hit;
+    }
+
+    function applyHighlight(hit) {
+      Array.from(document.querySelectorAll("svg#diagram g.node")).forEach((g) => {
+        const on = hit.has(g.getAttribute("data-node-id"));
+        g.classList.toggle("affected", on);
+        g.classList.toggle("dim", !on);
+      });
+      Array.from(document.querySelectorAll("svg#diagram path.edge")).forEach((p) => {
+        const on = hit.has(p.getAttribute("data-from")) && hit.has(p.getAttribute("data-to"));
+        p.classList.toggle("edge-affected", on);
+        p.classList.toggle("edge-dim", !on);
+      });
+    }
+
+    function clearHighlight() {
+      Array.from(document.querySelectorAll(".node.dim, .node.affected")).forEach((g) => g.classList.remove("dim", "affected"));
+      Array.from(document.querySelectorAll(".edge-dim, .edge-affected")).forEach((p) => p.classList.remove("edge-dim", "edge-affected"));
+      const banner = document.getElementById("hlBanner");
+      banner.classList.remove("show");
+      banner.innerHTML = "";
+    }
+
+    function representativeNode(kind, value) {
+      const v = (value || "").toLowerCase();
+      const nodes = state.catalog.nodes || [];
+      if (kind === "vendor") {
+        const ext = nodes.find((n) => (n.vendor || "").toLowerCase() === v && n.role === "external");
+        return (ext || nodes.find((n) => (n.vendor || "").toLowerCase() === v) || {}).id;
+      }
+      if (kind === "channel") {
+        const deli = nodes.find((n) => (n.channel || "").toLowerCase() === v && n.role === "delivery-job");
+        return (deli || {}).id;
+      }
+      return null;
+    }
+
+    function applyDeepLink() {
+      const params = new URLSearchParams(location.search);
+      const hl = parseHighlightParam(params);
+      if (hl && hl.value) {
+        const hit = computeHighlight(hl.kind, hl.value);
+        if (hit.size) {
+          applyHighlight(hit);
+          const banner = document.getElementById("hlBanner");
+          banner.innerHTML = "<span>⚠ 已高亮 <strong>" + escapeHtml(hl.kind + ":" + hl.value) +
+            "</strong> 的受影响链路（" + hit.size + " 个节点）</span>" +
+            '<button type="button" id="hlClear">显示全部</button>';
+          banner.classList.add("show");
+          document.getElementById("hlClear").addEventListener("click", clearHighlight);
+          const rep = representativeNode(hl.kind, hl.value);
+          if (rep) {
+            selectNode(rep);
+            if (params.get("run") !== "0") {
+              const btn = document.querySelector("#side button.outage");
+              if (btn) btn.click();  // auto-run the outage panel (needs the backend; harmless if absent)
+            }
+          }
+          return;
+        }
+      }
+      const focus = params.get("focus");
+      if (focus && state.nodeById[focus]) selectNode(focus);
+    }
+
     async function boot() {
       try {
         const catalog = await fetchJson("/static/arch_nodes.json");
@@ -612,6 +732,7 @@
         renderStats();
         renderCoverage();
         renderDiagram();
+        applyDeepLink();
       } catch (error) {
         document.getElementById("side").innerHTML =
           '<div class="empty-box">加载架构目录失败：' + escapeHtml(error.message || "") +

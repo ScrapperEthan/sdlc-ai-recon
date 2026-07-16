@@ -82,6 +82,7 @@ def _session_detail(session):
             "tool_trace": deepcopy(message.get("tool_trace") or []),
             "usage": deepcopy(message.get("usage")) if message.get("usage") else None,
             "citations": deepcopy(message.get("citations")) if message.get("citations") else None,
+            "views": deepcopy(message.get("views") or []),
         }
         for message in session.get("messages") or []
     ]
@@ -132,7 +133,7 @@ def history_for_agent(session_id):
     ]
 
 
-def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None):
+def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None, views=None):
     question = (question or "").strip()
     if not question:
         raise ValueError("Question is required")
@@ -163,6 +164,7 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
                 "tool_trace": trace,
                 "usage": deepcopy(usage) if usage else None,
                 "citations": deepcopy(citations) if citations else None,
+                "views": deepcopy(views or []),
             }
         )
         session["updated_at"] = assistant_time

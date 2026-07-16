@@ -1087,6 +1087,9 @@ function renderSessionMessages(messages) {
     if (message.role === 'assistant' && message.tool_trace && message.tool_trace.length) {
       addToolTrace(container, message.tool_trace);
     }
+    if (message.role === 'assistant' && message.views && message.views.length) {
+      message.views.forEach((v) => renderInlineView(container, v));
+    }
     if (message.role === 'assistant' && message.citations) {
       markCitations(container.querySelector('.bubble'), message.citations);
     }
@@ -1696,6 +1699,25 @@ const RETRIEVAL_BASE = (window.RETRIEVAL_BASE) || (location.protocol + '//' + lo
 // Inline architecture view: the assistant embeds the highlighted diagram straight into its answer,
 // so the user never opens a page or clicks a node. Appended to the message CONTAINER (not the text
 // bubble, which streaming overwrites).
+const REL_LABELS = {
+  'channel-owner': '拥有渠道', 'serves-channel': '波及(库级)', 'msg-channel': '消息连接',
+  'delivery-job': '投递任务', 'outbound-api': '供应商 API',
+  'dependency-upstream': '上游依赖', 'dependency-downstream': '下游依赖'
+};
+
+function inlineImpactHtml(impact) {
+  if (!impact) return '';
+  const uc = impact.use_cases || {}, rp = impact.repos || {};
+  const chips = (arr) => (arr || []).map((x) => '<span class="ichip">' + escapeHtml(x) + '</span>').join('');
+  const relChips = Object.entries(rp.by_relation || {})
+    .map(([k, v]) => '<span class="ichip">' + escapeHtml(REL_LABELS[k] || k) + ' · ' + v + '</span>').join('');
+  const rows = [];
+  rows.push('<div class="ii-row"><b>受影响用例 ' + (uc.count || 0) + '</b>' + chips(uc.items) + '</div>');
+  rows.push('<div class="ii-row"><b>受影响仓库 ' + (rp.count || 0) + '</b>' + relChips + '</div>');
+  if (rp.sample && rp.sample.length) rows.push('<div class="ii-row ii-repos">' + chips(rp.sample) + '</div>');
+  return '<div class="inline-impact">' + rows.join('') + '</div>';
+}
+
 function renderInlineView(container, view) {
   if (!container || !view || !view.url) return;
   if (container.querySelector('.inline-view[data-url="' + view.url + '"]')) return;  // no dupes
@@ -1712,9 +1734,19 @@ function renderInlineView(container, view) {
   frame.setAttribute('title', 'architecture diagram');
   wrap.appendChild(cap);
   wrap.appendChild(frame);
+  if (view.impact) wrap.insertAdjacentHTML('beforeend', inlineImpactHtml(view.impact));
   container.appendChild(wrap);
   if (typeof log !== 'undefined' && log) log.scrollTop = log.scrollHeight;
 }
+
+// The embedded arch page reports its rendered height so the iframe fits with no scroll.
+window.addEventListener('message', (e) => {
+  const data = e.data;
+  if (!data || data.type !== 'arch-embed-height') return;
+  document.querySelectorAll('iframe.inline-view-frame').forEach((f) => {
+    if (f.contentWindow === e.source) f.style.height = Math.min(760, Math.max(220, (data.height || 0) + 6)) + 'px';
+  });
+});
 
 async function askStream(text) {
   add('user', text, 'you');
@@ -1864,7 +1896,12 @@ refreshIndexStatus();
   .bubble.markdown pre.mermaid svg { max-width:100%; height:auto; }
   .inline-view { margin-top:12px; border:1px solid #d7dfeb; border-radius:12px; overflow:hidden; background:#fff; }
   .inline-view-cap { font-size:12.5px; font-weight:600; color:#5a6a82; padding:8px 12px; border-bottom:1px solid #eef3f9; background:#f7fafc; }
-  .inline-view-frame { width:100%; height:460px; border:0; display:block; background:#fff; }
+  .inline-view-frame { width:100%; height:360px; border:0; display:block; background:#fff; transition:height 160ms ease; }
+  .inline-impact { padding:10px 12px; border-top:1px solid #eef3f9; font-size:12.5px; color:#41506a; }
+  .inline-impact .ii-row { margin:5px 0; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .inline-impact .ii-row b { color:#152033; margin-right:2px; }
+  .inline-impact .ii-repos .ichip { background:#e7f0ff; color:#0057d9; }
+  .ichip { display:inline-block; padding:2px 9px; border-radius:999px; background:#eef3f9; color:#41506a; font-weight:600; word-break:break-all; }
 </style>
 <!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
      blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->

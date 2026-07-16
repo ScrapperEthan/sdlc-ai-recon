@@ -105,6 +105,7 @@ def answer_events(question, history=None):
     messages.append({"role": "user", "content": question})
 
     trace = []
+    emitted_views = []
     usage = llm_usage.empty_usage()
     for _ in range(config.MAX_TOOL_ITERS):
         message = None
@@ -134,6 +135,7 @@ def answer_events(question, history=None):
                 "tool_trace": trace,
                 "usage": usage,
                 "citations": citations.verify(answer_text),
+                "views": emitted_views,
             }
             return
 
@@ -153,6 +155,7 @@ def answer_events(question, history=None):
             # show_arch renders inline: hand the frontend a view directive so the diagram appears
             # in the answer itself (the user never opens a page or clicks a node).
             if name == "show_arch" and isinstance(result, dict) and result.get("ok"):
+                emitted_views.append(result)
                 yield {"type": "view", "view": result}
             trace.append({"tool": name, "args": args})
             messages.append({
@@ -183,4 +186,5 @@ def answer_events(question, history=None):
         "tool_trace": trace,
         "usage": usage,
         "citations": citations.verify(answer_text),
+        "views": emitted_views,
     }

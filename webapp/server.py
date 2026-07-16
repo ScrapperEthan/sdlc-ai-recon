@@ -132,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                 result.get("tool_trace"),
                 result.get("usage"),
                 result.get("citations"),
+                result.get("views"),
             )
             result["session"] = {
                 "id": session["id"],
@@ -171,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                         event.get("tool_trace"),
                         event.get("usage"),
                         event.get("citations"),
+                        event.get("views"),
                     )
                     event["session"] = {
                         "id": session["id"],

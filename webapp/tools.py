@@ -1,6 +1,31 @@
 """Tool registry: OpenAI-style schemas + dispatch into the retrieval layer.
 Add a tool by adding a schema here and a branch in dispatch()."""
+import outage_report
 from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus
+
+# Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
+# (dependency closure), so the inline view's repo sample leads with what actually breaks.
+_REL_ORDER = {"delivery-job": 0, "outbound-api": 1, "channel-owner": 2, "msg-channel": 3,
+              "serves-channel": 4, "dependency-downstream": 5, "dependency-upstream": 6}
+
+
+def _arch_impact(kind, value):
+    """Best-effort outage impact (use-cases + repos) for the inline arch view; {} if data absent."""
+    try:
+        report = outage_report.build_report(f"{kind}:{value}")
+    except Exception:  # noqa: BLE001 — impact is a bonus; the diagram still renders without it
+        return {}
+    use_cases = report.get("affected_use_cases") or {}
+    repos = report.get("affected_repos") or {}
+    items = repos.get("items") or []
+    sample = [item.get("repo") for item in
+              sorted(items, key=lambda x: _REL_ORDER.get(x.get("relation"), 9))[:6] if item.get("repo")]
+    return {
+        "confidence": report.get("confidence"),
+        "use_cases": {"count": use_cases.get("count", 0),
+                      "items": [i.get("use_case") for i in (use_cases.get("items") or [])[:8]]},
+        "repos": {"count": repos.get("count", 0), "by_relation": repos.get("by_relation") or {}, "sample": sample},
+    }
 
 
 def _schema(name, desc, props, required=()):
@@ -83,5 +108,10 @@ def dispatch(name, a):
         root = unified_impact.bundle_root_for(a["query"])
         return unified_impact._call_graph(a["query"], cwd=root)
     if name == "show_arch":
-        return arch_focus.focus(a.get("kind"), a.get("value"))
+        result = arch_focus.focus(a.get("kind"), a.get("value"))
+        if isinstance(result, dict) and result.get("ok"):
+            impact = _arch_impact(result["kind"], result["value"])
+            if impact:
+                result["impact"] = impact
+        return result
     return {"error": f"unknown tool: {name}"}

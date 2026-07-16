@@ -179,7 +179,8 @@
     body.embed .hero, body.embed .side { display: none; }
     body.embed .shell { width: 100%; margin: 0; gap: 0; }
     body.embed .board { grid-template-columns: 1fr; gap: 0; }
-    body.embed .diagram-wrap { border: none; border-radius: 0; box-shadow: none; padding: 10px; background: transparent; }
+    body.embed .diagram-wrap { border: none; border-radius: 0; box-shadow: none; padding: 10px; background: transparent; overflow-x: hidden; }
+    body.embed svg#diagram { min-width: 0; }  /* scale to the iframe width — no horizontal scroll */
 
     .note-banner {
       padding: 12px 14px;
@@ -732,6 +733,14 @@
       if (focus && state.nodeById[focus]) selectNode(focus);
     }
 
+    function postEmbedHeight() {
+      if (!document.body.classList.contains("embed")) return;
+      const wrap = document.querySelector(".diagram-wrap");
+      if (!wrap) return;
+      const height = Math.ceil(wrap.getBoundingClientRect().height);
+      try { parent.postMessage({ type: "arch-embed-height", height: height }, "*"); } catch (e) {}
+    }
+
     async function boot() {
       try {
         const catalog = await fetchJson("/static/arch_nodes.json");
@@ -746,6 +755,8 @@
         renderCoverage();
         renderDiagram();
         applyDeepLink();
+        requestAnimationFrame(postEmbedHeight);
+        setTimeout(postEmbedHeight, 250);  // after fonts/layout settle
       } catch (error) {
         document.getElementById("side").innerHTML =
           '<div class="empty-box">加载架构目录失败：' + escapeHtml(error.message || "") +
@@ -754,6 +765,7 @@
     }
 
     boot();
+    window.addEventListener("resize", postEmbedHeight);
   </script>
 </body>
 </html>

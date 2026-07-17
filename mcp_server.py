@@ -54,8 +54,16 @@ def repo_routes(repo: str) -> list:
 
 @mcp.tool()
 def usecase_route(use_case_id: str = "", topic: str = "") -> dict:
-    """use-case -> topic from the dev/SCT routing snapshot (verify vs prod)."""
+    """use-case <-> topic from the dev/SCT snapshot. Both args = pair verification, NOT a topic's
+    other use cases — for that call use_cases_for_topic."""
     return messages.usecase_route(use_case_id or None, topic or None)
+
+
+@mcp.tool()
+def use_cases_for_topic(topic: str, exact: bool = True, limit: int = 50) -> dict:
+    """Reverse lookup: given a TOPIC, list every use case routing to it (dev/SCT snapshot), with
+    total/truncated + provenance. Use for 'what other use cases share this topic'."""
+    return messages.reverse_lookup_use_cases(topic, exact, limit)
 
 
 @mcp.tool()

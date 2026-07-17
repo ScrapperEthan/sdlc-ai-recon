@@ -53,6 +53,11 @@ def main():
     p.add_argument("--use-case-id")
     p.add_argument("--topic")
 
+    p = sub.add_parser("use-cases-for-topic", help="reverse: topic -> every use case (dev/SCT)")
+    p.add_argument("topic")
+    p.add_argument("--substring", action="store_true", help="substring match (default is exact)")
+    p.add_argument("--limit", type=int, default=50)
+
     p = sub.add_parser("search", help="grep the mirror")
     p.add_argument("pattern")
     p.add_argument("--glob", default="*.java")
@@ -91,6 +96,8 @@ def main():
         _emit(messages.routes_for_repo(args.repo))
     elif args.cmd == "usecase":
         _emit(messages.usecase_route(args.use_case_id, args.topic))
+    elif args.cmd == "use-cases-for-topic":
+        _emit(messages.reverse_lookup_use_cases(args.topic, not args.substring, args.limit))
     elif args.cmd == "search":
         for line in code.search_code(args.pattern, args.glob, args.max):
             print(line)

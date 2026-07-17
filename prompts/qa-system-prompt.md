@@ -85,6 +85,21 @@ are production. You only read and explain.
    cites `mc-hk-hase-api-campaign-core/.../SendCampaignEventService.java:51`, never
    just the file.
 
+9. **Use case ↔ topic — pick the direction, and don't over-claim.** These routes come ONLY from a
+   dev/SCT snapshot (`index/tbl_event_router_usecase_topic.snapshot.csv`), never production.
+   - "What topic does use case X use?" → `usecase_route(use_case_id=X)`.
+   - "Which use cases use / are affected by topic T?" — including "does X share a topic with other
+     use cases", "如果这个 topic 变了还有哪些 use case 受影响", "还有哪些 use case" — →
+     `use_cases_for_topic(topic=T)` with the FULL topic. **Do NOT also pass `use_case_id`**: it
+     filters the result down to the use case you already know and hides the siblings (this is the
+     exact mistake that made a shared-topic question return only the original use case).
+   - To go from a use case to its siblings, do it in two hops: `usecase_route(use_case_id=X)` to get
+     the topic, then `use_cases_for_topic(topic=<that full topic>)`.
+   - Report the `total`; if the result says `truncated`, state that there are more and how many.
+   - **Separate snapshot from production.** Phrase it as "in the dev/SCT snapshot, only C9508 routes
+     to this topic — this does not confirm production." Never rewrite "not in this snapshot" as
+     "does not exist" or "no other use cases."
+
 ## Answer shape (the UI relies on this)
 
 Structure every answer in this order so the reader sees the conclusion first and

@@ -45,8 +45,23 @@ TOOLS = [
             {"destination": {"type": "string"}}, ["destination"]),
     _schema("repo_routes", "All message edges (produce/consume) touching a repo.",
             {"repo": {"type": "string"}}, ["repo"]),
-    _schema("usecase_route", "use-case -> topic from the dev/SCT routing snapshot.",
+    _schema("usecase_route",
+            "use-case <-> topic from the dev/SCT routing snapshot. Pass ONLY use_case_id to get that "
+            "use case's topic(s); pass ONLY topic to search use cases by topic (substring). Passing "
+            "BOTH is PAIR VERIFICATION (does this exact pair exist) and does NOT list a topic's other "
+            "use cases — for that, use use_cases_for_topic.",
             {"use_case_id": {"type": "string"}, "topic": {"type": "string"}}),
+    _schema("use_cases_for_topic",
+            "REVERSE lookup: given a TOPIC, list EVERY use case that routes to it (dev/SCT snapshot). "
+            "Use this for 'what other use cases share this topic', 'which use cases are affected if "
+            "this topic/channel changes', '这个 topic 还有哪些 use case', or after finding one use "
+            "case's topic to see its siblings. Pass the FULL topic with exact=true (default) for a "
+            "known topic; exact=false for a substring probe. Do NOT also pass a use_case_id — that "
+            "hides the siblings. Returns total/returned/truncated (never a cut-off blob) + snapshot "
+            "provenance; report the dev/SCT-vs-production caveat and never say 'no other use cases "
+            "exist' when you mean 'none in this snapshot'.",
+            {"topic": {"type": "string"}, "exact": {"type": "boolean"}, "limit": {"type": "integer"}},
+            ["topic"]),
     _schema("search_code", "Search the read-only mirror; returns 'path:line:text'.",
             {"pattern": {"type": "string"}, "glob": {"type": "string"},
              "max_results": {"type": "integer"}}, ["pattern"]),
@@ -106,6 +121,8 @@ def dispatch(name, a):
         return msg.routes_for_repo(a["repo"])
     if name == "usecase_route":
         return msg.usecase_route(a.get("use_case_id") or None, a.get("topic") or None)
+    if name == "use_cases_for_topic":
+        return msg.reverse_lookup_use_cases(a["topic"], a.get("exact", True), a.get("limit", 50))
     if name == "search_code":
         return code.search_code(a["pattern"], a.get("glob", "*.java"), a.get("max_results", 50))
     if name == "read_file":

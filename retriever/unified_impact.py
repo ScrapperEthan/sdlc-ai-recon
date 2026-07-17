@@ -98,6 +98,63 @@ def _symbol_defining_root(seed, roots):
     return fallback
 
 
+def _known_repos():
+    """The repo universe used to decide whether a seed is already a repo (skip symbol routing).
+    Union of the dependency-graph nodes and the repo_tags universe; empty when no data is present
+    (in which case a seed is treated as a repo, i.e. exactly the pre-resolution behaviour)."""
+    repos = set()
+    try:
+        repos |= graph.known_repos()
+    except Exception:  # noqa: BLE001 — missing data must not break routing
+        pass
+    try:
+        repos |= set(repo_tags.load().keys())
+    except Exception:  # noqa: BLE001
+        pass
+    return repos
+
+
+def _defining_repo(seed):
+    """The repo that DEFINES a bare symbol — the repo owning a ``<Symbol>.java`` file.
+
+    Conservative on purpose: only a definition-file match counts, so a repo id (which has no
+    ``<id>.java``) never false-matches and gets its deps rerouted to the wrong repo. Returns ``""``
+    when the seed is not a symbol with a definition file in the mirror.
+    """
+    try:
+        hits = code.search_code(seed, "*.java", 40)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(hits, list):
+        return ""
+    want_file = (str(seed).split(".")[-1] + ".java").lower()
+    for hit in hits:
+        repo, path = _repo_of_hit(hit)
+        if repo and os.path.basename(path).lower() == want_file:
+            return repo
+    return ""
+
+
+def _resolve_dep_seed(seed):
+    """Return ``(repo_for_deps_and_messages, resolution_note_or_None)``.
+
+    A seed that is already a repo is used as-is. A bare symbol is routed to the repo that DEFINES
+    it, so ``dependency_edges``/``message_edges`` (which key on repo, not symbol) aren't empty. An
+    unroutable seed is returned unchanged — deps come back empty, which is honest, not a regression.
+    """
+    if seed in _known_repos():
+        return seed, None
+    repo = _defining_repo(seed)
+    if repo:
+        return repo, {
+            "symbol": seed,
+            "resolved_repo": repo,
+            "via": "definition file in the read-only mirror",
+            "note": "dependency/message sections below are for the repo that defines this symbol.",
+        }
+    return seed, None
+
+
 def bundle_root_for(seed, bundle=None):
     """Resolve the staging root to run ``codegraph explore`` in for this seed.
 
@@ -157,6 +214,16 @@ def _call_graph(seed, cwd=None):
         }
 
 
+def call_graph(query_text):
+    """Raw routed ``codegraph explore <symbol>``: resolve the symbol's bundle, then explore there.
+
+    Single source of truth so every entry point (webapp, MCP, CLI) routes identically instead of
+    each re-deriving the bundle root — the previous drift where only the webapp had this wired.
+    """
+    root = bundle_root_for(query_text)
+    return _call_graph(query_text, cwd=root)
+
+
 def query(seed, transitive=False, bundle=None):
     """Return deps + async peers + callers/source hits for a repo or symbol.
 
@@ -167,10 +234,15 @@ def query(seed, transitive=False, bundle=None):
     if not seed:
         return {"error": "seed is required"}
 
-    dep = graph.impact(seed, transitive=transitive)
+    # Deps and message edges key on repo names; a bare symbol seed would return empty from both.
+    # Route them through the repo that defines the symbol. The call graph still runs on the raw
+    # seed (codegraph explores the symbol itself), routed to that repo's built bundle.
+    dep_seed, resolution = _resolve_dep_seed(seed)
+    dep = graph.impact(dep_seed, transitive=transitive)
     root = bundle_root_for(seed, bundle=bundle)
-    return {
+    result = {
         "seed": seed,
+        "resolved_repo": dep_seed if dep_seed != seed else None,
         "bundle_root": root,
         "citation_contract": (
             "Every caller/callee named below must be cited as repo/path/File.java:line. "
@@ -180,13 +252,18 @@ def query(seed, transitive=False, bundle=None):
         ),
         "dependency_edges": {
             "source": config.EDGES_CSV,
+            "repo": dep_seed,
             "mode": dep["mode"],
             "depended_on_by": dep["depended_on_by"],
             "depends_on": dep["depends_on"],
         },
         "message_edges": {
             "source": config.MESSAGE_EDGES_CSV,
-            "peers": _message_peers(seed),
+            "repo": dep_seed,
+            "peers": _message_peers(dep_seed),
         },
         "callers": _call_graph(seed, cwd=root),
     }
+    if resolution:
+        result["resolution"] = resolution
+    return result

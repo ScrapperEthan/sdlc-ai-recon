@@ -74,6 +74,9 @@ def main():
     p.add_argument("--bundle", help="routing hint; else routes by repo tag / staging dir")
     p.add_argument("--transitive", action="store_true")
 
+    p = sub.add_parser("call-graph", help="raw codegraph explore, routed to the defining bundle")
+    p.add_argument("query")
+
     args = ap.parse_args()
 
     if args.cmd == "impact":
@@ -97,6 +100,8 @@ def main():
         _emit(flow.trace(args.use_case_id, args.destination))
     elif args.cmd == "unified-impact":
         _emit(unified_impact.query(args.seed, args.transitive, args.bundle))
+    elif args.cmd == "call-graph":
+        _emit(unified_impact.call_graph(args.query))
 
 
 if __name__ == "__main__":

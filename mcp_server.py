@@ -17,7 +17,7 @@ except ImportError:
         "let the agent call cli.py via shell."
     )
 
-from retriever import graph, messages, code, flow
+from retriever import graph, messages, code, flow, unified_impact
 
 mcp = FastMCP("sdlc-retriever")
 
@@ -74,6 +74,24 @@ def read_file(path: str, start: int = 1, end: int = 0) -> str:
 def trace(use_case_id: str = "", destination: str = "") -> dict:
     """Stitch use-case/destination across the async wiring; marks partial honestly."""
     return flow.trace(use_case_id or None, destination or None)
+
+
+@mcp.tool(name="unified_impact")
+def unified_impact_query(seed: str, transitive: bool = False, bundle: str = "") -> dict:
+    """Cross-repo call graph + blast radius for a repo OR a symbol (class/method/service).
+
+    Returns real callers from the per-bundle CodeGraph index (auto-routed to the right bundle),
+    plus dependency and async-message peers. Prefer this over search_code for any call/usage
+    relationship. A bare symbol is resolved to the repo that defines it so deps/messages aren't
+    empty. Exposed here so MCP-capable agents get the same flagship tool the webapp has.
+    """
+    return unified_impact.query(seed, transitive, bundle or None)
+
+
+@mcp.tool()
+def call_graph(query: str) -> dict:
+    """Raw `codegraph explore <symbol>`, routed to the bundle that defines the symbol."""
+    return unified_impact.call_graph(query)
 
 
 if __name__ == "__main__":

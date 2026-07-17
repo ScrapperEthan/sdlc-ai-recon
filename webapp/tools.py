@@ -117,8 +117,7 @@ def dispatch(name, a):
     if name == "call_graph":
         # Route to the bundle that defines the symbol, reusing the retriever's routed explorer
         # (the previous copy shelled `codegraph explore` in the process cwd — no index there).
-        root = unified_impact.bundle_root_for(a["query"])
-        return unified_impact._call_graph(a["query"], cwd=root)
+        return unified_impact.call_graph(a["query"])
     if name == "show_arch":
         result = arch_focus.focus(a.get("kind"), a.get("value"))
         if isinstance(result, dict) and result.get("ok"):

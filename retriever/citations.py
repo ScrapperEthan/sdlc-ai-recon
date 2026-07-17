@@ -5,8 +5,11 @@ import re
 
 from . import config
 
+# csv/gradle/txt matter here specifically: the retrieval tools cite their own evidence files
+# (message_edges.csv, the use-case snapshot csv, build.gradle, repos.txt). Without these
+# extensions the citation was extracted as bare text and silently skipped verification.
 _CITE = re.compile(
-    r"([\w./\-]+?\.(?:java|xml|ya?ml|properties|kts?|json|sql|md))(?::(\d+)(?:-\d+)?)?",
+    r"([\w./\-]+?\.(?:java|xml|ya?ml|properties|kts?|gradle|json|sql|csv|txt|md))(?::(\d+)(?:-\d+)?)?",
     re.IGNORECASE,
 )
 

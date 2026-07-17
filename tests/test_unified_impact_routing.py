@@ -88,5 +88,77 @@ class BundleRootForTests(unittest.TestCase):
             self.assertEqual(result["fallback_hits"], ["hit-1"])
 
 
+class QueryDepResolutionTests(unittest.TestCase):
+    """query() must route the dependency/message sections through the repo that defines a bare
+    symbol — otherwise those sections come back empty because they key on repo, not symbol."""
+
+    def test_symbol_seed_routes_deps_and_messages_to_defining_repo(self):
+        hit = os.path.join(config.MIRROR, "repoA", "src", "Foo.java") + ":3:class Foo {"
+        with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA", "repoB"}), \
+             mock.patch.object(unified_impact.code, "search_code", return_value=[hit]), \
+             mock.patch.object(unified_impact, "bundle_root_for", return_value=None), \
+             mock.patch.object(unified_impact, "_call_graph", return_value={"available": False}), \
+             mock.patch.object(
+                 unified_impact.graph, "impact",
+                 return_value={"mode": "direct", "depended_on_by": ["repoB"], "depends_on": []},
+             ) as impact, \
+             mock.patch.object(
+                 unified_impact, "_message_peers", return_value=[{"peer_repo": "repoB"}]
+             ) as peers:
+            out = unified_impact.query("Foo")
+
+        impact.assert_called_once_with("repoA", transitive=False)
+        peers.assert_called_once_with("repoA")
+        self.assertEqual(out["resolved_repo"], "repoA")
+        self.assertEqual(out["resolution"]["resolved_repo"], "repoA")
+        self.assertEqual(out["dependency_edges"]["repo"], "repoA")
+        self.assertEqual(out["dependency_edges"]["depended_on_by"], ["repoB"])
+        self.assertEqual(out["message_edges"]["peers"], [{"peer_repo": "repoB"}])
+
+    def test_repo_seed_is_used_directly_without_resolution(self):
+        with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA"}), \
+             mock.patch.object(unified_impact, "bundle_root_for", return_value=None), \
+             mock.patch.object(unified_impact, "_call_graph", return_value={"available": False}), \
+             mock.patch.object(
+                 unified_impact.graph, "impact",
+                 return_value={"mode": "direct", "depended_on_by": [], "depends_on": []},
+             ) as impact, \
+             mock.patch.object(unified_impact, "_message_peers", return_value=[]):
+            out = unified_impact.query("repoA")
+
+        impact.assert_called_once_with("repoA", transitive=False)
+        self.assertIsNone(out["resolved_repo"])
+        self.assertNotIn("resolution", out)
+
+    def test_unresolvable_symbol_is_left_as_is(self):
+        with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA"}), \
+             mock.patch.object(unified_impact.code, "search_code", return_value=[]), \
+             mock.patch.object(unified_impact, "bundle_root_for", return_value=None), \
+             mock.patch.object(unified_impact, "_call_graph", return_value={"available": False}), \
+             mock.patch.object(
+                 unified_impact.graph, "impact",
+                 return_value={"mode": "direct", "depended_on_by": [], "depends_on": []},
+             ) as impact, \
+             mock.patch.object(unified_impact, "_message_peers", return_value=[]):
+            out = unified_impact.query("MysterySymbol")
+
+        impact.assert_called_once_with("MysterySymbol", transitive=False)
+        self.assertIsNone(out["resolved_repo"])
+
+
+class CallGraphWrapperTests(unittest.TestCase):
+    def test_public_call_graph_routes_then_explores(self):
+        with mock.patch.object(unified_impact, "bundle_root_for", return_value="/root") as root, \
+             mock.patch.object(
+                 unified_impact, "_call_graph",
+                 return_value={"available": True, "bundle_root": "/root"},
+             ) as explore:
+            out = unified_impact.call_graph("Foo")
+
+        root.assert_called_once_with("Foo")
+        explore.assert_called_once_with("Foo", cwd="/root")
+        self.assertTrue(out["available"])
+
+
 if __name__ == "__main__":
     unittest.main()

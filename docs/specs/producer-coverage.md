@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** proposed (2026-07-17) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17, internal Codex — see `index/reports/PRODUCER-COVERAGE-RECON-2026-07-17.md` on the box; findings relayed) · build = NEXT (Claude, this repo) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem
@@ -72,24 +72,64 @@ Run over the mirror (read-only, stdlib/grep only). For each question, return a s
 
 ---
 
-## Part 2 — BUILD (Claude, this repo) — after the recon comes back
+## Part 2 — BUILD (Claude, this repo) — now grounded in the recon findings
 
-From the recon, Claude extends producer detection in `make_message_map.py` (and adds tests with
-synthetic fixtures — no real names). Likely shape, to be finalised from findings:
+The recon confirmed the hypothesis with numbers: **0% of destinations are string literals**;
+45% config/`@Value`/YAML, 32% builder/method-return, 9% constant/enum, 14% injected/framework-bound.
+So a keyword scan is the wrong tool — the extractor must be **type-aware + wrapper-aware + must
+resolve the destination through a small data-flow ladder.** Build order (each with synthetic
+fixtures + tests, no real repo names in-repo):
 
-- **Widen the produce evidence beyond one line.** Detect a send call site, then resolve its
-  destination by following the arg: literal → use it; constant/enum → look up the constant's value
-  in the same repo; builder → attribute the producer to the channel/topic the builder resolves to;
-  config-key → read the yml/properties value. Emit `producer_repo` with `routing_source` recording
-  *how* it was resolved (`literal` / `constant` / `builder` / `config` / `repo-convention`) and a
-  `confidence` field (Codex review §10 asked for this).
-- **Repo-convention fallback.** When a repo is a Topic/Delivery-Job repo (per repo_tags /
-  naming), treat it as a producer for its owned destination even without a literal send match,
-  tagged `confidence: low, routing_source: repo-convention`.
-- Keep the CSV schema backward-compatible; add `confidence` as a new trailing column so existing
-  consumers of the file don't break.
+### 2a. Framework signature registry (recon Q1/§8.1)
+A small table of `receiver_type → send method(s) → where the destination lives`. From the recon:
 
-Deliverable: code + fixtures + tests in this repo, pushed IN by the user.
+| receiver / wrapper | send method(s) | destination position |
+|---|---|---|
+| `JmsTemplate` | `send`, `convertAndSend` | arg0, else receiver default destination |
+| `KafkaTemplate` | `send` | arg0, or `topic` inside a `ProducerRecord` |
+| `MessageProducer` (JMS) | `send` | injected `Destination` / on the message |
+| SNS client | `publish` | request/builder (topic ARN) |
+| RocketMQ | `send` | message `topic`/`tags`, builder/constructor config |
+| in-house wrapper | `publishMessage`, `publishMessageForEventModel` | `EventConfig` / `topicName` |
+
+Guard generic `.send(`/`publish(` with the receiver type (recon §3.2): only count it when the
+receiver resolves to a known framework/wrapper type — never on keyword alone.
+
+### 2b. Wrapper-aware recognition (recon Q3/§5) — the highest-leverage step
+Producers overwhelmingly go through ~26 wrapper/base classes across ~22 repos. Recognise a class as
+a producer when it extends/implements one of the known bases and map its business-level call to a
+producer edge. Seed the base-class set from the recon (kept as config, not hard-coded literals):
+`AbstractEventProducer`, `AbstractKafkaProducerService`, `EventProducer`/`IEBProducer`,
+`RocketmqEventProducer`, `MailProducer`, `SqsProducer`, `EBKafkaProducer`,
+`EBKafkaTransactionProducer`, `EBProducer`, `Sender`/`KafkaSender`/`DelayQueueSender`, and the
+`*EventService` / `*SendService` families. Resolve each wrapper to the framework API it calls
+internally so business callers count as producers.
+
+### 2c. Destination resolution ladder (recon Q2/Q4/§4.3)
+Resolve `destination_expression` → `resolved_destination` by trying, in order, and recording which
+rung succeeded in `routing_source`: `literal` → `constant`/`enum` (look up the value in the same
+repo) → `config`/`@Value`/`yaml` (read the property) → `builder`/`method-return` (e.g.
+`EventConfig.getTopicName()`; attribute to the channel/topic it resolves to) → `injected`/
+`framework-bound` (binder default). Record fallbacks too (recon §6.4: primary + fallback topic).
+Anything unresolved is **kept, not dropped**, as `runtime-unresolved` / `framework-default` /
+`config-unresolved`.
+
+### 2d. Output schema (recon §8.2) — extend `index/message_edges.csv` additively
+Add trailing columns so existing readers (`retriever/messages.py`, `unified_impact`) keep working:
+`producer_type, producer_symbol, call_site, destination_expression, destination_kind, routing_source,
+confidence, resolution_status` (existing `producer_repo, destination, consumer_repo, routing_source,
+evidence` stay in place). `confidence` is tied to the resolution rung (literal/constant high →
+runtime-unresolved low), **never to keyword hit count** (recon §8.3).
+
+### 2e. Delivery-job repos — do NOT infer direction from the repo name (recon Q5/§7)
+110 delivery-job repos host producer AND consumer config together. Parse both `producer.enabled`
+and `consumer.enabled` and bind each `topicName` to the specific handler/sender class before
+emitting an edge. A repo-name/convention match alone yields at most a `confidence: low,
+routing_source: repo-convention` hint, never a confirmed producer edge.
+
+Deliverable: code + fixtures + tests in `make_message_map.py`, pushed IN by the user. **Symbol
+identity across bundles must be `repo+package+class+method`, not bare method name** (recon §9.3) —
+`publishMessage`/`getTopicName` recur in 20+ bundles and will cross-pollinate if keyed by name only.
 
 ---
 

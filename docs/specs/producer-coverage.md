@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** recon DONE (2026-07-17, internal Codex — see `index/reports/PRODUCER-COVERAGE-RECON-2026-07-17.md` on the box; findings relayed) · build = NEXT (Claude, this repo) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17, internal Codex) · **build DONE (2026-07-17, Claude — `producer_extract.py` + wired into `make_message_map.py`, 8 tests)** · verify = NEXT (internal Codex, real mirror — Part 3) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem

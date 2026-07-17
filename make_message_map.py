@@ -174,14 +174,49 @@ def coverage_rows(channels_payload, repo_tags):
     ]
 
 
+# The first five columns are the stable contract (retriever/messages.py reads only these); the rest
+# are additive producer evidence from producer_extract, blank for consumer-scan rows.
+EDGE_FIELDS = [
+    "producer_repo", "destination", "consumer_repo", "routing_source", "evidence",
+    "producer_type", "producer_symbol", "call_site", "destination_expression",
+    "destination_kind", "confidence", "resolution_status",
+]
+
+
 def write_csv(rows, path):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=["producer_repo", "destination", "consumer_repo", "routing_source", "evidence"]
-        )
+        writer = csv.DictWriter(handle, fieldnames=EDGE_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _consumer_map(repos):
+    """destination -> repos that consume it, from the existing config scan (for producer pairing)."""
+    out = defaultdict(list)
+    for repo, destinations in repos.items():
+        for name, meta in destinations.items():
+            if meta["role"] in ("consume", "reference"):
+                out[name].append(repo)
+    return out
+
+
+def producer_edges(records, consumer_map):
+    """Turn producer_extract records into CSV rows: a resolved destination pairs with each known
+    consumer; an unresolved one is still emitted (consumer blank) so producer coverage isn't lost."""
+    rows, seen = [], set()
+    for record in records:
+        destination = record.get("destination") or ""
+        consumers = consumer_map.get(destination) if destination else None
+        for consumer in (consumers or [""]):
+            row = dict(record)
+            row["consumer_repo"] = consumer
+            key = (row.get("producer_repo"), destination, consumer, row.get("call_site"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
 
 
 def write_json(payload, path):
@@ -210,16 +245,25 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    import producer_extract  # lazy: avoids a top-level import cycle (producer_extract imports us)
     args = parse_args(argv)
     repos = build(args.mirror)
     channels = to_channels(repos)
     edges = to_edges(repos)
+    # Signature/wrapper-aware producer edges (see docs/specs/producer-coverage.md). Additive: the
+    # config scan above is unchanged; these rows fill the sparse producer side.
+    producer_rows = producer_edges(producer_extract.scan_producers(args.mirror), _consumer_map(repos))
     write_json({"generated_at": _now(), "repos": channels}, args.channels_out)
-    write_csv(edges, args.edges_out)
+    write_csv(edges + producer_rows, args.edges_out)
     rows = coverage_rows(channels, load_json(args.repo_tags))
     print("Message-map coverage\n")
     for label, count in rows:
         print(f"{label:32} {count:6d}")
+    producer_repos = {row["producer_repo"] for row in producer_rows if row.get("producer_repo")}
+    resolved = sum(1 for row in producer_rows if row.get("resolution_status") == "resolved")
+    print(f"{'producer_edges_extracted':32} {len(producer_rows):6d}")
+    print(f"{'producer_repos':32} {len(producer_repos):6d}")
+    print(f"{'producer_edges_resolved_dest':32} {resolved:6d}")
     print(f"\nWrote {args.edges_out}\nWrote {args.channels_out}")
     return 0
 

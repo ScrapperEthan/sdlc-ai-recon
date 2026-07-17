@@ -100,6 +100,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, payload)
         elif path == "/api/usage":
             self._send_json(200, session_store.usage_summary())
+        elif path == "/api/feedback":
+            # Flat log of every 👍/👎 + comment, for later prompt/tool optimization.
+            self._send_json(200, {"feedback": session_store.list_feedback()})
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
@@ -130,7 +133,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions"):
+        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback"):
             self._send(404, b"not found", "text/plain")
             return
 
@@ -140,6 +143,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sessions":
                 session = session_store.create_session(req.get("title") or "New session")
                 self._send_json(201, session)
+                return
+
+            if path == "/api/feedback":
+                try:
+                    feedback = session_store.set_feedback(
+                        req.get("session_id"),
+                        req.get("message_index"),
+                        req.get("vote") or "",
+                        req.get("comment") or "",
+                    )
+                except KeyError:
+                    self._send_json(404, {"error": "session not found"})
+                except (ValueError, IndexError, TypeError) as e:
+                    self._send_json(400, {"error": str(e)})
+                else:
+                    self._send_json(200, {"ok": True, "feedback": feedback})
                 return
 
             question = (req.get("question") or "").strip()

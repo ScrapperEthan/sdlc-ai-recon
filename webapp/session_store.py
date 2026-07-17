@@ -83,6 +83,7 @@ def _session_detail(session):
             "usage": deepcopy(message.get("usage")) if message.get("usage") else None,
             "citations": deepcopy(message.get("citations")) if message.get("citations") else None,
             "views": deepcopy(message.get("views") or []),
+            "feedback": deepcopy(message.get("feedback")) if message.get("feedback") else None,
         }
         for message in session.get("messages") or []
     ]
@@ -170,6 +171,65 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
         session["updated_at"] = assistant_time
         _save_unlocked(data)
         return _session_detail(session)
+
+
+def set_feedback(session_id, message_index, vote, comment=""):
+    """Attach 👍/👎 feedback to one assistant message. `vote` is 'up', 'down', or '' to clear.
+
+    Feedback lives ON the assistant message (so it reloads with the session and the UI can show the
+    prior vote). `list_feedback` derives a flat log from these for later prompt/tool optimization —
+    one source of truth, no separate file to drift. Down-votes may carry a free-text `comment`."""
+    vote = (vote or "").strip().lower()
+    if vote not in ("up", "down", ""):
+        raise ValueError("vote must be 'up', 'down', or '' to clear")
+    with _LOCK:
+        data = _load_unlocked()
+        session = _find_session(data, session_id)
+        if session is None:
+            raise KeyError(session_id)
+        messages = session.get("messages") or []
+        if not isinstance(message_index, int) or not (0 <= message_index < len(messages)):
+            raise IndexError(f"message_index out of range: {message_index}")
+        message = messages[message_index]
+        if message.get("role") != "assistant":
+            raise ValueError("feedback can only attach to an assistant message")
+        if not vote:
+            message.pop("feedback", None)
+            result = None
+        else:
+            result = {"vote": vote, "comment": (comment or "").strip(), "created_at": _now()}
+            message["feedback"] = result
+        _save_unlocked(data)
+        return result
+
+
+def list_feedback():
+    """Flat, analysis-friendly view of every feedback entry: the vote/comment plus the question and
+    answer it refers to. This is the corpus future optimization reads (down-vote comments especially)."""
+    with _LOCK:
+        data = _load_unlocked()
+    out = []
+    for session in data.get("sessions") or []:
+        messages = session.get("messages") or []
+        for index, message in enumerate(messages):
+            feedback = message.get("feedback")
+            if not feedback:
+                continue
+            question = ""
+            for previous in range(index - 1, -1, -1):
+                if messages[previous].get("role") == "user":
+                    question = messages[previous].get("content", "")
+                    break
+            out.append({
+                "session_id": session.get("id"),
+                "message_index": index,
+                "vote": feedback.get("vote"),
+                "comment": feedback.get("comment", ""),
+                "created_at": feedback.get("created_at"),
+                "question": question,
+                "answer": message.get("content", ""),
+            })
+    return out
 
 
 def _empty_usage_bucket():

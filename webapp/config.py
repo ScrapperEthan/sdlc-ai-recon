@@ -1,18 +1,67 @@
-"""Web app config — all via env vars so Codex/ops can set them without code edits."""
+"""Web app config — all via env vars so Codex/ops can set them without code edits.
+
+Multi-user LLM routing: the five ``LLM_*`` endpoint fields below are NOT plain module constants —
+they are resolved through ``__getattr__`` against a per-request ``contextvars`` override. The env
+values are the DEFAULT (single-user / unset case, unchanged); when the server binds a request to a
+user's own LLM (their reverse-tunnel loopback port), every ``config.LLM_BASE_URL`` read in that
+request's thread returns that user's endpoint instead. This keeps the provider files
+(``llm_providers/*``, internal-owned) completely untouched — they still just read ``config.LLM_*``.
+"""
+import contextvars
 import os
 
-# ---- model: pick a provider, then point it at the endpoint ----
+# ---- model: provider is global (all users run the same local copilot-api); the ENDPOINT is
+#      per-user (see below). ----
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "copilot_responses")  # or "openai_chat"
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:4141/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "dummy")
-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-5.5")
-LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 LLM_MOCK = os.environ.get("LLM_MOCK", "") not in ("", "0", "false", "False")
 # Opt-in true token streaming (Responses API SSE). OFF by default so behaviour is unchanged until
 # the internal side turns it on and verifies against its copilot-api; any streaming failure falls
 # back to the blocking call automatically. See webapp/llm_providers/copilot_responses.chat_stream.
 LLM_STREAM = os.environ.get("LLM_STREAM", "") not in ("", "0", "false", "False")
+
+# The per-user-overridable endpoint fields. Env value = default; override key = the field name
+# without the LLM_ prefix, lower-cased (LLM_BASE_URL -> base_url).
+_LLM_DEFAULTS = {
+    "LLM_BASE_URL": os.environ.get("LLM_BASE_URL", "http://127.0.0.1:4141/v1"),
+    "LLM_API_KEY": os.environ.get("LLM_API_KEY", "dummy"),
+    "LLM_MODEL": os.environ.get("LLM_MODEL", "gpt-5.5"),
+    "LLM_MAX_TOKENS": int(os.environ.get("LLM_MAX_TOKENS", "4096")),
+    "LLM_TIMEOUT": int(os.environ.get("LLM_TIMEOUT", "120")),
+}
+_llm_override = contextvars.ContextVar("sdlc_llm_override", default=None)
+
+
+def __getattr__(name):
+    """Resolve the overridable LLM_* fields per-request (contextvars) with env fallback (PEP 562).
+
+    Only called for names not defined as real module attributes, so the static config above is
+    unaffected. Each request thread has its own context, so a set override never leaks across users.
+    """
+    if name in _LLM_DEFAULTS:
+        override = _llm_override.get()
+        if override:
+            key = name[len("LLM_"):].lower()
+            value = override.get(key)
+            if value not in (None, ""):
+                return value
+        return _LLM_DEFAULTS[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def set_llm_override(override):
+    """Bind this request's LLM endpoint. `override` is a dict (base_url/api_key/model/…) or None to
+    use the env default. Returns a reset token to pass to `reset_llm_override` in a finally block."""
+    return _llm_override.set(override or None)
+
+
+def reset_llm_override(token):
+    _llm_override.reset(token)
+
+
+def llm_default_base_url():
+    """The env-default endpoint, ignoring any active override (for status/health display)."""
+    return _LLM_DEFAULTS["LLM_BASE_URL"]
+
 
 # ---- assistant behaviour ----
 SYSTEM_PROMPT = os.environ.get(
@@ -23,6 +72,14 @@ TOOL_RESULT_CAP = int(os.environ.get("SDLC_TOOL_RESULT_CAP", "12000"))
 SESSION_STORE = os.environ.get(
     "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
 )
+# Per-user LLM route registry (token -> their loopback endpoint). Gitignored like the session store.
+LLM_ROUTES_STORE = os.environ.get(
+    "SDLC_LLM_ROUTES", os.path.join(os.getcwd(), "webapp_data", "llm_routes.json")
+)
+# Safety: a registered endpoint must be loopback (each user's LLM is reached via THEIR server-side
+# reverse-tunnel port, always 127.0.0.1:<port>). This also blocks SSRF to arbitrary internal hosts.
+# Set to "1" only if a deployment deliberately uses non-loopback connector hosts.
+LLM_ALLOW_NONLOOPBACK = os.environ.get("SDLC_LLM_ALLOW_NONLOOPBACK", "") not in ("", "0", "false", "False")
 
 # ---- server ----
 HOST = os.environ.get("SDLC_HOST", "127.0.0.1")

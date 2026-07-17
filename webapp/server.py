@@ -13,7 +13,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import agent, config, session_store
+from . import agent, config, session_store, llm_routes
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -55,6 +55,19 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw_body = self.rfile.read(length) or b"{}"
         return json.loads(raw_body)
+
+    def _user_token(self):
+        """Who is this request from — the pairing token that selects their LLM endpoint.
+        Header first (the frontend sends it), cookie as a fallback. Empty => env-default LLM."""
+        header = self.headers.get("X-SDLC-User-Token")
+        if header and header.strip():
+            return header.strip()
+        cookie = self.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "sdlc_token":
+                return value.strip()
+        return ""
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -103,6 +116,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/feedback":
             # Flat log of every 👍/👎 + comment, for later prompt/tool optimization.
             self._send_json(200, {"feedback": session_store.list_feedback()})
+        elif path == "/api/llm/me":
+            # Which LLM endpoint this browser is bound to (its own, or the env default).
+            self._send_json(200, llm_routes.describe(self._user_token()))
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
@@ -133,7 +149,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback"):
+        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
+                        "/api/llm/register"):
             self._send(404, b"not found", "text/plain")
             return
 
@@ -143,6 +160,19 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sessions":
                 session = session_store.create_session(req.get("title") or "New session")
                 self._send_json(201, session)
+                return
+
+            if path == "/api/llm/register":
+                # A user binds their own local LLM (reached via their reverse-tunnel loopback port).
+                try:
+                    record = llm_routes.register(
+                        req.get("base_url"), req.get("model") or "", req.get("api_key") or "",
+                        req.get("label") or "", req.get("provider") or "", req.get("token") or None,
+                    )
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                else:
+                    self._send_json(200, record)
                 return
 
             if path == "/api/feedback":
@@ -177,11 +207,24 @@ class Handler(BaseHTTPRequestHandler):
                 session_id = session_store.create_session()["id"]
                 history = []
 
+            # Bind this request to the caller's own LLM endpoint (their reverse-tunnel loopback
+            # port) for the whole agent turn; falls back to the env default when unbound. Each
+            # request thread has its own context, so users never share an endpoint.
+            override = llm_routes.resolve(self._user_token())
+
             if path == "/api/chat/stream":
-                self._send_chat_stream(session_id, question, history)
+                otoken = config.set_llm_override(override)
+                try:
+                    self._send_chat_stream(session_id, question, history)
+                finally:
+                    config.reset_llm_override(otoken)
                 return
 
-            result = agent.answer(question, history)
+            otoken = config.set_llm_override(override)
+            try:
+                result = agent.answer(question, history)
+            finally:
+                config.reset_llm_override(otoken)
             session = session_store.append_exchange(
                 session_id,
                 question,

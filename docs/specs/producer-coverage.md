@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · build v2 DONE (2026-07-18, RUNBOOK-42, Claude) · Part 5 re-verify DONE (2026-07-20, internal Codex — **FAILED gate**: v1/v2 `message_edges.csv` byte-identical on the real mirror, zero new resolutions) · **build v3 DONE (2026-07-20, Claude — Lombok `@Getter`/`@Data`/`@ConfigurationProperties` synthesis + method-declaration guard + multi-arg destination search, 17 producer tests / 156 total)** · re-verify = NEXT (internal Codex, real mirror — Part 8, same acceptance gate) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · build v2 DONE (2026-07-18, RUNBOOK-42, Claude) · Part 5 re-verify DONE (2026-07-20, internal Codex — **FAILED gate**: v1/v2 `message_edges.csv` byte-identical on the real mirror, zero new resolutions) · build v3 DONE (2026-07-20, Claude — Lombok `@Getter`/`@Data`/`@ConfigurationProperties` synthesis + method-declaration guard + multi-arg destination search) · Part 8 re-verify DONE (2026-07-20, internal Codex — **GATE PASSED**, promoted to live index: 0→3 resolved, 10→13 usable edges, 0/3 false positives, 699 consumers unchanged; flagged a metric mislabel + a runtime regression) · **build v3.1 DONE (2026-07-20, Claude — fixed both, 18 producer tests / 167 total)** · light re-check = NEXT (internal Codex, confirm the metric now reads 13 and runtime is back near baseline — not a full re-verify, resolution logic is unchanged) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem
@@ -287,6 +287,61 @@ regression check) against the **same acceptance gate**. Additionally:
 If the gate still fails, relay which of the four Part-6 root causes (Lombok, second-arg, false
 declarations) remain un-fixed vs. which of the ~20 lower-yield gaps (JMS default-destination, nested
 getters, SNS-embedded destination) are now the bottleneck, so the next round can be scoped precisely.
+
+---
+
+## Part 9 — RESULT (internal Codex, real mirror, 2026-07-20) → GATE PASSED, two flags
+
+Re-ran Part 8 on the full mirror against commit `d740f9c`:
+
+| item | result |
+|---|---|
+| resolved-destination delta | 0 → 3 |
+| usable producer edges (CSV total) | 10 → 13 (> 10 ✓) |
+| new-resolution false-positive rate | 0/3 (all 3 hand-verified against the cited `path:line`, each correctly resolved to its queue — fewer than 10 new edges existed to sample) |
+| consumer edges | 699 → 699, no regression |
+| producer candidates | 126 → 117 |
+| producer-specific tests | 17/17 |
+
+**Gate passed** — promoted `index/message_edges.csv` (old version kept as `.tmp/runbook42-v3-real/message_edges.csv.pre-v3.csv`; this is a box-local data promotion, not a repo push, per the gitignored-`index/` guardrail below.
+
+Two things flagged, neither blocking the gate:
+1. **Metric mislabel.** stdout printed `usable_topic_producer_edges=3`, but that line only summed
+   `producer_rows` (this resolver's own output) — the CSV's real total (old source-scan rows +
+   resolver rows) was 13, which is the number that actually matters for the gate. The 117 producer
+   candidates minus 126 before = exactly -9, matching the Part-6 method-declaration-guard fix
+   precisely (independent confirmation that fix landed correctly on real code).
+2. **Runtime regression.** ~49s (Part 8's own baseline run) → ~127s this round, a ~2.6x slowdown.
+
+---
+
+## Part 10 — RESOLVE (build v3.1, Claude, 2026-07-20) — both Part 9 flags fixed
+
+1. **Metric fix** (`make_message_map.py`): `usable_topic_producer_edges` now sums across `edges +
+   producer_rows` (distinct `producer_repo`+`destination` pairs with both non-empty) — matching what
+   the CSV and the acceptance gate actually mean. The old (resolver-only) count is kept as a separate
+   `usable_topic_producer_edges_new` line so the resolver's own contribution is still visible.
+2. **Runtime fix** (`producer_extract.py`), two changes targeting the likely causes:
+   - The Lombok/`@ConfigurationProperties` class-body scan added in v3 ran on every `.java` file
+     unconditionally. It now short-circuits with one cheap `in`-style regex check per file (does the
+     file mention `@Getter`/`@Data`/`@ConfigurationProperties` at all?) before doing any class
+     enumeration or brace-matching — skipping the expensive path entirely for files that don't use
+     Lombok.
+   - The multi-arg destination search re-ran the whole-line literal regex (`HRN_RE`/`QUEUE_APP_RE`/
+     `QUEUE_MQ_RE` against `line`, the long string) on every candidate argument, even though that
+     check doesn't depend on which argument is being tried. `_line_literal(line)` now computes it
+     once per call site; also capped argument scanning at 3 (recon never showed a destination past
+     argument 2, so this bounds cost for wide builder calls without losing coverage).
+
+New test locks the metric fix (a source-scan-only producer + a resolver-found producer in the same
+run — asserts the total exceeds the resolver-only count). 18 producer tests / 167 total, all pass.
+**This round does NOT change resolution logic or the destination ladder** — only the stdout report
+and internal cost, so a full Part-8-style re-verify with the acceptance gate isn't needed again.
+
+**NEXT: a light re-check (internal Codex, real mirror, based on commit `dba4bfe` or later)** —
+confirm `usable_topic_producer_edges` now prints `13` (matching the CSV) and the run completes
+closer to the ~49s baseline than the ~127s this round showed. No new acceptance-gate check required
+since the underlying resolution logic didn't change.
 
 ## Guardrails
 

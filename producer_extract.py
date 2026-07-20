@@ -263,6 +263,12 @@ def _build_index(java_texts, properties):
     # own name (resolved like any other identifier: an @Value field, or a @ConfigurationProperties
     # field bound below via relaxed camelCase -> kebab-case).
     for text in java_texts:
+        # Class/field enumeration + brace-matching is real work; skip it outright for the (vast
+        # majority of) files that never mention any of these three annotations at all — a single
+        # linear scan is far cheaper than doing it per class/field for nothing. This was the main
+        # cause of the RUNBOOK-42 Part 8 runtime regression (49s -> 127s on the real mirror).
+        if not (_LOMBOK_GETTER_RE.search(text) or _CONFIG_PROPS_RE.search(text)):
+            continue
         for cmatch in _CLASS_DECL_RE.finditer(text):
             body_start = cmatch.end() - 1
             depth, i = 1, body_start + 1
@@ -356,18 +362,34 @@ def _looks_like_declaration(line, paren_pos):
     return rest.startswith("{")
 
 
-def _resolve_destination(arg, line, text, index):
+def _line_literal(line):
+    """The call-site-wide literal fallback (an HRN/queue name adjacent to, not inside, the arg that
+    names it). Computed ONCE per call site by the caller — it doesn't depend on which argument is
+    being tried, and re-running it per candidate arg was pure waste (RUNBOOK-42 Part 8's runtime
+    regression: `line` is typically much longer than any single `arg`)."""
+    for regex in (HRN_RE, QUEUE_APP_RE, QUEUE_MQ_RE):
+        found = regex.search(line)
+        if found:
+            name = found.group(0).strip().strip('".,;')
+            if len(name) >= 6:
+                return name, _kind(name), "literal", "high", name
+    return None
+
+
+def _resolve_destination(arg, line_literal, text, index):
     """Resolve a send's destination expression -> (destination, kind, routing_source, confidence,
     expr). Ladder: literal -> constant (in-file, else repo-wide) -> getter (resolved via the repo
     index) -> @Value field (resolved via yaml) -> unresolved. Unresolved is still a real producer
     signal and is KEPT as a candidate — a getter/@Value we recognise but can't value stays a
     ``builder``/``config`` candidate (better than ``runtime-unresolved``)."""
     for regex in (HRN_RE, QUEUE_APP_RE, QUEUE_MQ_RE):
-        found = regex.search(arg) or regex.search(line)
+        found = regex.search(arg)
         if found:
             name = found.group(0).strip().strip('".,;')
             if len(name) >= 6:
                 return name, _kind(name), "literal", "high", name
+    if line_literal:
+        return line_literal
     const = _CONST_REF_RE.search(arg)
     if const:
         name = const.group(1)
@@ -403,11 +425,14 @@ def _send_records(repo, rel, lineno, line, text, framework_vars, current_class, 
         if method in ("send", "publish") and not confirmed:
             continue  # generic send/publish with an unknown receiver -> too noisy to trust
         # The destination isn't always the first argument (e.g. `send(payload, eventConfig)`) — try
-        # each top-level arg in call order and take the first one that actually resolves, falling
-        # back to a recognised-but-unresolved candidate over a plain runtime-unresolved guess.
+        # each top-level arg in call order (capped at 3: recon never saw a destination past arg 1,
+        # and this bounds cost for wide builder calls) and take the first one that actually
+        # resolves, falling back to a recognised-but-unresolved candidate over a runtime-unresolved
+        # guess. The line-wide literal fallback is computed once, not per candidate arg.
+        line_literal = _line_literal(line)
         best = None
-        for candidate in _all_args(line[match.end():]):
-            result = _resolve_destination(candidate, line, text, index)
+        for candidate in _all_args(line[match.end():])[:3]:
+            result = _resolve_destination(candidate, line_literal, text, index)
             if result[0]:
                 best = result
                 break

@@ -351,6 +351,41 @@ class ProducerIntegrationTests(unittest.TestCase):
         self.assertTrue(any(r["routing_source"] == "constant" for r in paired))
         self.assertTrue(any(r["confidence"] == "high" for r in paired))
 
+    def test_usable_edges_metric_counts_source_scan_and_resolver_together(self):
+        # RUNBOOK-42 Part 8 (internal Codex, real mirror): stdout printed
+        # usable_topic_producer_edges=3 while the CSV actually had 13 usable edges, because the
+        # metric only counted producer_extract's OWN rows, not the pre-existing source-scan producer
+        # edges already in the CSV. Reproduce that shape: a producer_extract-found producer (SMS,
+        # via the wrapper fixture) plus a source-scan-only producer the resolver never sees at all
+        # (no wrapper class, no framework receiver, no trusted send call -> producer_extract finds
+        # nothing for it, but the plain marker+literal scan does).
+        import contextlib
+        import io
+        _LEGACY_TOPIC = "hrn.hase.wpb.notification.legacy-cm_push"
+        _LEGACY_JAVA = (
+            "public class LegacySender {\n"
+            "  // producer\n"
+            f'  void run() {{ String topic = "{_LEGACY_TOPIC}"; }}\n'
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "prod", "src", "main", "java", "SmsEventProducer.java"), _PRODUCER_JAVA)
+            _write(os.path.join(tmp, "legacy", "src", "main", "java", "LegacySender.java"), _LEGACY_JAVA)
+            self.assertEqual(pe.scan_repo("legacy", os.path.join(tmp, "legacy")), [])  # resolver sees nothing here
+            edges_out = os.path.join(tmp, "message_edges.csv")
+            channels_out = os.path.join(tmp, "message_channels.json")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mm.main(["--mirror", tmp, "--edges-out", edges_out,
+                         "--channels-out", channels_out, "--repo-tags", os.path.join(tmp, "none.json")])
+            output = buf.getvalue()
+        total = int(next(l for l in output.splitlines()
+                          if l.startswith("usable_topic_producer_edges ")).split()[1])
+        new_only = int(next(l for l in output.splitlines()
+                             if l.startswith("usable_topic_producer_edges_new")).split()[1])
+        self.assertGreater(total, new_only)  # the legacy source-scan edge must count toward the total
+        self.assertGreaterEqual(total, new_only + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

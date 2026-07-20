@@ -262,14 +262,23 @@ def main(argv=None):
     producer_repos = {row["producer_repo"] for row in producer_rows if row.get("producer_repo")}
     resolved_rows = [row for row in producer_rows if row.get("resolution_status") == "resolved"]
     resolved = len(resolved_rows)
-    # A "usable producer edge" answers who_produces(<topic>): it needs a resolved destination. Count
-    # distinct producer_repo+destination pairs so the row total (candidates) can't be mistaken for it.
-    usable_edges = {(row.get("producer_repo"), row.get("destination")) for row in resolved_rows}
     resolved_repos = {row.get("producer_repo") for row in resolved_rows}
+    # A "usable producer edge" answers who_produces(<topic>): a distinct producer_repo+destination
+    # pair with a real producer. RUNBOOK-42 Part 8 found this metric counting ONLY the new resolver's
+    # own rows (producer_rows) understated the true total by omitting the pre-existing source-scan
+    # edges (`edges`, routing_source="source-scan") that already fed who_produces before RUNBOOK-40 —
+    # the CSV had 13 total while stdout printed 3. Count across BOTH sources, matching the CSV.
+    usable_edges_new = {(row.get("producer_repo"), row.get("destination")) for row in resolved_rows}
+    usable_edges_total = {
+        (row.get("producer_repo"), row.get("destination"))
+        for row in edges + producer_rows
+        if row.get("producer_repo") and row.get("destination")
+    }
     print(f"{'producer_records_extracted':32} {len(producer_rows):6d}   (candidates, not edges)")
     print(f"{'producer_repos':32} {len(producer_repos):6d}")
     print(f"{'producer_edges_resolved_dest':32} {resolved:6d}")
-    print(f"{'usable_topic_producer_edges':32} {len(usable_edges):6d}   (who_produces answerable)")
+    print(f"{'usable_topic_producer_edges':32} {len(usable_edges_total):6d}   (who_produces answerable, all sources)")
+    print(f"{'usable_topic_producer_edges_new':32} {len(usable_edges_new):6d}   (from this resolver pass only)")
     print(f"{'producer_repos_with_resolved':32} {len(resolved_repos):6d}")
     print("\nby routing_source (resolved / total):")
     totals, res = Counter(), Counter()

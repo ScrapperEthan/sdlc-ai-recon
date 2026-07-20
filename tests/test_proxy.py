@@ -56,5 +56,36 @@ class ProxyFetchTests(unittest.TestCase):
         self.assertIn("retrieval_service.py", payload["hint"])
 
 
+def _handler(cookie=""):
+    """A Handler with no real socket -- __new__ skips BaseHTTPRequestHandler.__init__ (which needs a
+    live connection), and _resolve_uid only ever touches self.headers."""
+    handler = server.Handler.__new__(server.Handler)
+    handler.headers = {"Cookie": cookie} if cookie else {}
+    return handler
+
+
+class ResolveUidTests(unittest.TestCase):
+    """RUNBOOK-43: session/feedback isolation is keyed off an opaque per-browser id issued via
+    cookie, separate from the LLM-routing pairing token. Lock the issuance + reuse behavior."""
+
+    def test_first_visit_issues_a_new_uid(self):
+        handler = _handler()
+        handler._resolve_uid()
+        self.assertTrue(handler._uid)
+        self.assertEqual(handler._new_uid, handler._uid)  # _send must mint the Set-Cookie
+
+    def test_returning_visit_reuses_the_cookie_and_does_not_reissue(self):
+        handler = _handler(cookie="sdlc_uid=abc123; other=1")
+        handler._resolve_uid()
+        self.assertEqual(handler._uid, "abc123")
+        self.assertIsNone(handler._new_uid)  # already has one -> no Set-Cookie on this response
+
+    def test_two_visits_get_different_uids(self):
+        first, second = _handler(), _handler()
+        first._resolve_uid()
+        second._resolve_uid()
+        self.assertNotEqual(first._uid, second._uid)
+
+
 if __name__ == "__main__":
     unittest.main()

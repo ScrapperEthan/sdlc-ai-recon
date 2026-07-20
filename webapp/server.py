@@ -10,6 +10,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -45,6 +46,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if getattr(self, "_new_uid", None):
+            self.send_header("Set-Cookie", self._uid_cookie_header(self._new_uid))
         self.end_headers()
         self.wfile.write(data)
 
@@ -69,7 +72,25 @@ class Handler(BaseHTTPRequestHandler):
                 return value.strip()
         return ""
 
+    @staticmethod
+    def _uid_cookie_header(uid):
+        return f"sdlc_uid={uid}; Path=/; Max-Age=31536000; SameSite=Lax"
+
+    def _resolve_uid(self):
+        """Who owns this browser's sessions/feedback — separate from `_user_token` (which LLM to
+        call). No login: an opaque id issued once via cookie on first visit, just enough that one
+        tester can't list or read another tester's chat history and feedback. Sets `self._new_uid`
+        so `_send` mints the cookie on a first visit; already-cookied requests get None (no re-send)."""
+        cookie = self.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "sdlc_uid" and value.strip():
+                self._uid, self._new_uid = value.strip(), None
+                return
+        self._uid = self._new_uid = uuid.uuid4().hex
+
     def do_GET(self):
+        self._resolve_uid()
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             with open(INDEX, "rb") as f:
@@ -98,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self._send_json(404, {"error": "not found"})
         elif path == "/api/sessions":
-            self._send_json(200, {"sessions": session_store.list_sessions()})
+            self._send_json(200, {"sessions": session_store.list_sessions(self._uid)})
         elif path == "/api/index-status":
             status_path = os.path.join(rconfig.INDEX_DIR, "last_indexed.json")
             try:
@@ -114,15 +135,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/usage":
             self._send_json(200, session_store.usage_summary())
         elif path == "/api/feedback":
-            # Flat log of every 👍/👎 + comment, for later prompt/tool optimization.
-            self._send_json(200, {"feedback": session_store.list_feedback()})
+            # Flat log of every 👍/👎 + comment on the CALLER's OWN sessions (see session_store.list_feedback).
+            self._send_json(200, {"feedback": session_store.list_feedback(self._uid)})
         elif path == "/api/llm/me":
             # Which LLM endpoint this browser is bound to (its own, or the env default).
             self._send_json(200, llm_routes.describe(self._user_token()))
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
-                session = session_store.get_session(session_id)
+                session = session_store.get_session(session_id, self._uid)
             except KeyError:
                 self._send_json(404, {"error": f"Session not found: {session_id}"})
             else:
@@ -148,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
                 "retrieval_upstream": config.RETRIEVAL_UPSTREAM, "retrieval": retrieval}
 
     def do_POST(self):
+        self._resolve_uid()
         path = urlparse(self.path).path
         if path not in ("/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
                         "/api/llm/register"):
@@ -158,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             req = json.loads(self.rfile.read(length) or b"{}")
             if path == "/api/sessions":
-                session = session_store.create_session(req.get("title") or "New session")
+                session = session_store.create_session(req.get("title") or "New session", self._uid)
                 self._send_json(201, session)
                 return
 
@@ -182,6 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                         req.get("message_index"),
                         req.get("vote") or "",
                         req.get("comment") or "",
+                        self._uid,
                     )
                 except KeyError:
                     self._send_json(404, {"error": "session not found"})
@@ -199,12 +222,12 @@ class Handler(BaseHTTPRequestHandler):
             session_id = req.get("session_id")
             if session_id:
                 try:
-                    history = session_store.history_for_agent(session_id)
+                    history = session_store.history_for_agent(session_id, self._uid)
                 except KeyError:
                     self._send_json(404, {"error": f"Session not found: {session_id}"})
                     return
             else:
-                session_id = session_store.create_session()["id"]
+                session_id = session_store.create_session(owner=self._uid)["id"]
                 history = []
 
             # Bind this request to the caller's own LLM endpoint (their reverse-tunnel loopback
@@ -215,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/chat/stream":
                 otoken = config.set_llm_override(override)
                 try:
-                    self._send_chat_stream(session_id, question, history)
+                    self._send_chat_stream(session_id, question, history, self._uid)
                 finally:
                     config.reset_llm_override(otoken)
                 return
@@ -233,6 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                 result.get("usage"),
                 result.get("citations"),
                 result.get("views"),
+                owner=self._uid,
             )
             result["session"] = {
                 "id": session["id"],
@@ -248,12 +272,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send_json(500, {"error": str(e)})
 
-    def _send_chat_stream(self, session_id, question, history):
+    def _send_chat_stream(self, session_id, question, history, uid):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
+        if getattr(self, "_new_uid", None):
+            self.send_header("Set-Cookie", self._uid_cookie_header(self._new_uid))
         self.end_headers()
         self.close_connection = True
 
@@ -273,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                         event.get("usage"),
                         event.get("citations"),
                         event.get("views"),
+                        owner=uid,
                     )
                     event["session"] = {
                         "id": session["id"],

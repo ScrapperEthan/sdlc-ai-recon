@@ -90,21 +90,30 @@ def _session_detail(session):
     return detail
 
 
-def list_sessions():
+def _owned(session, owner):
+    """True if `session` belongs to `owner`. Sessions carry an `owner` (an opaque per-browser id set
+    by the server, see server.py `_resolve_uid` — there is no login, just enough to keep one tester's
+    chat history from another's). No owner match => treated as not-yours, same as not-found, so a
+    missing/wrong owner never distinguishes "exists but isn't yours" from "doesn't exist"."""
+    return bool(owner) and session.get("owner") == owner
+
+
+def list_sessions(owner):
     with _LOCK:
         data = _load_unlocked()
         sessions = sorted(
-            data["sessions"],
+            (s for s in data["sessions"] if _owned(s, owner)),
             key=lambda item: item.get("updated_at") or item.get("created_at") or "",
             reverse=True,
         )
         return [_session_summary(session) for session in sessions]
 
 
-def create_session(title="New session"):
+def create_session(title="New session", owner=""):
     now = _now()
     session = {
         "id": uuid.uuid4().hex,
+        "owner": owner,
         "title": title.strip() or "New session",
         "created_at": now,
         "updated_at": now,
@@ -117,16 +126,16 @@ def create_session(title="New session"):
     return _session_detail(session)
 
 
-def get_session(session_id):
+def get_session(session_id, owner):
     with _LOCK:
         session = _find_session(_load_unlocked(), session_id)
-        if session is None:
+        if session is None or not _owned(session, owner):
             raise KeyError(session_id)
         return _session_detail(session)
 
 
-def history_for_agent(session_id):
-    session = get_session(session_id)
+def history_for_agent(session_id, owner):
+    session = get_session(session_id, owner)
     return [
         {"role": message["role"], "content": message["content"]}
         for message in session["messages"]
@@ -134,7 +143,8 @@ def history_for_agent(session_id):
     ]
 
 
-def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None, views=None):
+def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None,
+                     views=None, owner=""):
     question = (question or "").strip()
     if not question:
         raise ValueError("Question is required")
@@ -145,7 +155,7 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
     with _LOCK:
         data = _load_unlocked()
         session = _find_session(data, session_id)
-        if session is None:
+        if session is None or not _owned(session, owner):
             raise KeyError(session_id)
 
         if not session.get("messages"):
@@ -173,7 +183,7 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
         return _session_detail(session)
 
 
-def set_feedback(session_id, message_index, vote, comment=""):
+def set_feedback(session_id, message_index, vote, comment="", owner=""):
     """Attach 👍/👎 feedback to one assistant message. `vote` is 'up', 'down', or '' to clear.
 
     Feedback lives ON the assistant message (so it reloads with the session and the UI can show the
@@ -185,7 +195,7 @@ def set_feedback(session_id, message_index, vote, comment=""):
     with _LOCK:
         data = _load_unlocked()
         session = _find_session(data, session_id)
-        if session is None:
+        if session is None or not _owned(session, owner):
             raise KeyError(session_id)
         messages = session.get("messages") or []
         if not isinstance(message_index, int) or not (0 <= message_index < len(messages)):
@@ -203,13 +213,17 @@ def set_feedback(session_id, message_index, vote, comment=""):
         return result
 
 
-def list_feedback():
-    """Flat, analysis-friendly view of every feedback entry: the vote/comment plus the question and
-    answer it refers to. This is the corpus future optimization reads (down-vote comments especially)."""
+def list_feedback(owner):
+    """Flat, analysis-friendly view of every feedback entry the caller's OWN sessions carry: the
+    vote/comment plus the question and answer it refers to. Scoped per-owner — this used to return
+    every user's Q&A unauthenticated; the corpus for cross-user prompt/tool tuning should be read
+    straight from the JSON store on the box, not this API, until there's a real admin role."""
     with _LOCK:
         data = _load_unlocked()
     out = []
     for session in data.get("sessions") or []:
+        if not _owned(session, owner):
+            continue
         messages = session.get("messages") or []
         for index, message in enumerate(messages):
             feedback = message.get("feedback")

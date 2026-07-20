@@ -1,7 +1,8 @@
 """Tool registry: OpenAI-style schemas + dispatch into the retrieval layer.
 Add a tool by adding a schema here and a branch in dispatch()."""
+import impact_report
 import outage_report
-from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus
+from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus, usecase_master
 
 # Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
 # (dependency closure), so the inline view's repo sample leads with what actually breaks.
@@ -87,10 +88,14 @@ TOOLS = [
             "Render the architecture diagram INLINE in your answer with the affected chain "
             "highlighted. Call this whenever the user asks what is affected / impacted / broken by a "
             "CHANNEL or VENDOR problem or outage (e.g. 'SMS channel is down', '短信受影响了', 'Sinch "
-            "出问题了'). `kind` is 'channel' or 'vendor'; `value` is the channel (sms/email/push/mms/"
-            "whatsapp/wechat/letter) or the vendor (sinch/csl/3hk/…). The user then SEES the "
-            "highlighted diagram in your reply — they never open a page or click a node themselves. "
-            "Still write the affected-path explanation in text too.",
+            "出问题了'), OR wants to see WHERE a business-upstream system or use case enters the "
+            "pipeline (e.g. 'PEGA 接进来的位置在哪', '这个 Use Case 的上游系统在架构图上是哪个'). "
+            "`kind` is 'channel', 'vendor', 'source-system', or 'use-case'; `value` is the channel "
+            "(sms/email/push/mms/whatsapp/wechat/letter), the vendor (sinch/csl/3hk/…), the upstream "
+            "system name (source-system), or a use_case_id (use-case, resolved to its declared "
+            "source_system). The user then SEES the highlighted diagram in your reply — they never "
+            "open a page or click a node themselves. Still write the affected-path explanation in "
+            "text too.",
             {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind", "value"]),
     _schema("show_impact",
             "Render the dependency blast-radius INLINE in your answer for a repo the user wants to change "
@@ -98,6 +103,21 @@ TOOLS = [
             "on X', 'is X risky to touch', '改 X 会连累谁' (X = a repo name). `repo` is the repo id. The user "
             "SEES the impact inline; also summarise the downstream/upstream counts in text.",
             {"repo": {"type": "string"}}, ["repo"]),
+    _schema("source_system_impact",
+            "Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which "
+            "Use Cases it feeds, which of those have a traced channel route vs are catalog-only "
+            "(business registration, no traced channel), the channel chain, upstream/downstream "
+            "repos, and the OWNERS to notify on change (change-notification ask). Call this for "
+            "'PEGA/上游系统 出问题会影响哪些 Use Case / 渠道 / repo', 'L400 接入了哪些流程', or "
+            "'改这个上游系统要通知谁'. `source_system` is the upstream system name (aliases folded "
+            "via source_system_aliases.json if configured). Tier 0 only: this does NOT know channel "
+            "priority or bounce-back fallback yet — always report the confidence_banner split.",
+            {"source_system": {"type": "string"}}, ["source_system"]),
+    _schema("list_source_systems",
+            "List distinct upstream business systems (source_system) with their use-case + routed "
+            "counts — the picker for source_system_impact. Call when the user asks 'what upstream "
+            "systems are there' or needs to disambiguate a name.",
+            {}),
     _schema("show_coverage",
             "Render the 392-repo estate overview INLINE, optionally filtered. Call this when the user asks "
             "to see the repos on a channel or matching a keyword ('show me the SMS repos', '有哪些 tracking "
@@ -174,6 +194,16 @@ def dispatch(name, a):
                                     "by_relation": {"dependency-downstream": len(downstream), "dependency-upstream": len(upstream)},
                                     "sample": sorted(downstream)[:6]}},
         }
+    if name == "source_system_impact":
+        value = (a.get("source_system") or "").strip()
+        if not value:
+            return {"ok": False, "error": "source_system is required"}
+        try:
+            return impact_report.build_report(f"source-system:{value}")
+        except (FileNotFoundError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+    if name == "list_source_systems":
+        return {"items": usecase_master.source_systems()}
     if name == "show_coverage":
         kind = (a.get("kind") or "").strip().lower()
         value = (a.get("value") or "").strip()

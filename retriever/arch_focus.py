@@ -7,19 +7,32 @@ a page or click a node themselves.
 """
 import json
 
-from . import config
+from . import config, usecase_master
 
 ROUTERS = ("decision-topics", "decision-job")
+# The business-source gutter's downstream chain when no precise adapter edge is known (Tier 1
+# will resolve the real source_system -> DSP/File/MQ/Kafka adapter split).
+EARLY_SPINE = ("ingress-api",) + ROUTERS
+
+
+def _load_catalog():
+    try:
+        with open(config.ARCH_NODES_JSON, encoding="utf-8-sig") as handle:
+            return json.load(handle)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
 
 
 def _load_nodes():
-    try:
-        with open(config.ARCH_NODES_JSON, encoding="utf-8-sig") as handle:
-            data = json.load(handle)
-    except (FileNotFoundError, OSError, ValueError):
-        return []
+    data = _load_catalog()
     nodes = data.get("nodes") if isinstance(data, dict) else data
     return [n for n in (nodes or []) if isinstance(n, dict) and n.get("id")]
+
+
+def _business_sources():
+    data = _load_catalog()
+    items = data.get("business_sources") if isinstance(data, dict) else None
+    return [b for b in (items or []) if isinstance(b, dict) and b.get("id")]
 
 
 def _channels(nodes):
@@ -58,13 +71,67 @@ def affected_nodes(nodes, kind, value):
     return hit
 
 
+def _business_source_for(value):
+    needle = (value or "").strip().lower()
+    for source in _business_sources():
+        if (source.get("source_system") or "").strip().lower() == needle:
+            return source
+        if (source.get("label") or "").strip().lower() == needle:
+            return source
+    return None
+
+
+def _focus_business_source(kind, value):
+    """kind='source-system' focuses that system directly; kind='use-case' resolves the id's
+    declared source_system via usecase_master.master_for first. Honesty note: this lights up the
+    use case's DECLARED upstream system (cited to the master row), not a discovered code edge —
+    the precise source_system -> ingress adapter split is Tier 1."""
+    resolved, note = value, None
+    if kind == "use-case":
+        master = usecase_master.master_for(value)
+        source_system = (master or {}).get("source_system") or ""
+        if not source_system:
+            return {"ok": False, "error": f"no declared source_system for use-case:{value}"}
+        resolved = source_system
+        note = f"resolved from use-case:{value} (master snapshot)"
+
+    match = _business_source_for(resolved)
+    if not match:
+        options = sorted({s.get("source_system") for s in _business_sources() if s.get("source_system")})
+        return {"ok": False, "error": f"unknown source-system: {resolved}", "source_systems": options}
+
+    hit = {match["id"], *EARLY_SPINE}
+    if match.get("edge_to"):
+        hit.add(match["edge_to"])
+    highlight = f"source-system:{resolved.lower()}"
+    summary = f"已在架构图左侧高亮业务上游「{resolved}」的声明入口（非发现的代码边，来自 Use Case 主数据）。"
+    result = {
+        "ok": True,
+        "view": "arch",
+        "highlight": highlight,
+        "url": f"/arch.html?embed=1&highlight={highlight}",
+        "kind": "source-system",
+        "value": resolved.lower(),
+        "affected_node_ids": sorted(hit),
+        "affected_node_count": len(hit),
+        "summary": summary,
+    }
+    if note:
+        result["note"] = note
+    return result
+
+
 def focus(kind, value):
     """Return a directive for the inline arch view, or ``ok: False`` with the valid options."""
     kind = (kind or "").strip().lower()
     value = (value or "").strip()
+
+    if kind in ("source-system", "use-case"):
+        return _focus_business_source(kind, value)
+
     nodes = _load_nodes()
     if kind not in ("channel", "vendor"):
-        return {"ok": False, "error": "kind must be 'channel' or 'vendor'",
+        return {"ok": False, "error": "kind must be 'channel', 'vendor', 'source-system' or 'use-case'",
                 "channels": _channels(nodes), "vendors": _vendors(nodes)}
     valid = _channels(nodes) if kind == "channel" else _vendors(nodes)
     if value.lower() not in valid:

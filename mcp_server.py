@@ -17,7 +17,8 @@ except ImportError:
         "let the agent call cli.py via shell."
     )
 
-from retriever import graph, messages, code, flow, unified_impact
+import impact_report
+from retriever import graph, messages, code, flow, unified_impact, usecase_master
 
 mcp = FastMCP("sdlc-retriever")
 
@@ -100,6 +101,23 @@ def unified_impact_query(seed: str, transitive: bool = False, bundle: str = "") 
 def call_graph(query: str) -> dict:
     """Raw `codegraph explore <symbol>`, routed to the bundle that defines the symbol."""
     return unified_impact.call_graph(query)
+
+
+@mcp.tool()
+def source_system_impact(source_system: str) -> dict:
+    """Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which Use
+    Cases it feeds (routed vs catalog-only/no traced channel), channel chain, upstream/downstream
+    repos, and the owners to notify on change. Tier 0: no channel priority/bounce-back yet."""
+    try:
+        return impact_report.build_report(f"source-system:{source_system}")
+    except (FileNotFoundError, ValueError) as error:
+        return {"ok": False, "error": str(error)}
+
+
+@mcp.tool()
+def list_source_systems() -> list:
+    """Distinct upstream business systems (source_system) with use-case + routed counts."""
+    return usecase_master.source_systems()
 
 
 if __name__ == "__main__":

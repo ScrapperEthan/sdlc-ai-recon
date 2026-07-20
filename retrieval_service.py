@@ -7,7 +7,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from retriever import code, flow, graph, messages, glossary, repo_tags, config as rconfig
+from retriever import code, flow, graph, messages, glossary, repo_tags, usecase_master, config as rconfig
 
 RETRIEVAL_HOST = os.environ.get("RETRIEVAL_HOST", "127.0.0.1")
 RETRIEVAL_PORT = int(os.environ.get("RETRIEVAL_PORT", "8848"))
@@ -84,6 +84,16 @@ def _repos_payload(qs):
     )
 
 
+def _source_system_impact_payload(qs):
+    value = _required(_str(qs, "source_system"), "source_system")
+    return impact_report.build_report(f"source-system:{value}")
+
+
+def _source_systems_payload():
+    items = usecase_master.source_systems()
+    return {"items": items, "count": len(items)}
+
+
 def _outage_impact_payload(qs):
     supplied = [(key, _str(qs, key).strip()) for key in ("channel", "vendor", "repo") if _str(qs, key).strip()]
     if len(supplied) != 1:
@@ -157,6 +167,8 @@ ROUTES = {
     "/impact-report": _impact_report_payload,
     "/repos": _repos_payload,
     "/outage-impact": _outage_impact_payload,
+    "/source-system-impact": _source_system_impact_payload,
+    "/source-systems": lambda qs: _source_systems_payload(),
 }
 
 

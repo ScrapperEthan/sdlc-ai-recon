@@ -6,7 +6,7 @@ import csv
 import os
 import re
 
-from retriever import config, flow, glossary, graph, messages, repo_tags
+from retriever import config, flow, glossary, graph, messages, repo_tags, usecase_master
 
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
 EDGE_FIELDS = ("producer_repo", "destination", "consumer_repo", "routing_source", "evidence")
@@ -20,7 +20,7 @@ def parse_target(raw):
         kind, value = text.split(":", 1)
         kind = kind.strip().lower()
         value = value.strip()
-        if kind in {"topic", "use-case"}:
+        if kind in {"topic", "use-case", "source-system"}:
             if not value:
                 raise ValueError("target is required")
             return kind, value
@@ -519,16 +519,18 @@ def build_usecase_report(use_case_id, tags):
     chain = channel_chain(tags, participants, topics, deduped)
 
     usecase_cites = matched_usecase_citations(use_case_id=use_case_id)
-    return {
-        "target": {
-            "input": f"use-case:{use_case_id}",
-            "kind": "use-case",
-            "value": use_case_id,
-            "description": use_case_id,
-            "channels": [item["channel"] for item in chain],
-            "matched_topics": topics,
-            "citations": usecase_cites,
-        },
+    master = usecase_master.master_for(use_case_id)
+    target = {
+        "input": f"use-case:{use_case_id}",
+        "kind": "use-case",
+        "value": use_case_id,
+        "description": use_case_id,
+        "channels": [item["channel"] for item in chain],
+        "matched_topics": topics,
+        "citations": usecase_cites,
+    }
+    report = {
+        "target": target,
         "upstream": upstream,
         "downstream": downstream,
         "async_routes": routes,
@@ -542,6 +544,117 @@ def build_usecase_report(use_case_id, tags):
             note_citations=usecase_cites[:1],
         ),
     }
+    # Additive + null-safe: no master row (or no snapshot at all) -> byte-identical to today.
+    if master:
+        target["description"] = f"{master['use_case_id']} — {master['name']}" if master["name"] else use_case_id
+        target["business"] = {
+            "source_system": master["source_system"],
+            "project": master["project"],
+            "work_stream": master["work_stream"],
+            "line_of_business": master["line_of_business"],
+            "business_category_code": master["business_category_code"],
+            "business_category_label": master["business_category_label"],
+            "country": master["country"],
+            "group_member": master["group_member"],
+            "app": master["app"],
+            "citation": master["citation"],
+        }
+        target["governance"] = {
+            "created_by": master["created_by"],
+            "created_time": master["created_time"],
+            "modified_by": master["modified_by"],
+            "last_modified_time": master["last_modified_time"],
+            "status": master["status"],
+            "stale": usecase_master.is_stale(master["last_modified_time"], master["created_time"]),
+            "citation": master["citation"],
+        }
+        consent = usecase_master.consent_preflight(use_case_id)
+        report["consent_preflight"] = consent
+        extra_cites = {master["citation"]}
+        extra_cites.update(check["citation"] for check in consent.get("checks") or [])
+        target["citations"] = sorted(set(target["citations"]) | extra_cites)
+    return report
+
+
+def build_source_system_report(value, tags):
+    """Aggregate a source_system's members: routed (traceable to channels) vs catalog-only
+    (business registration, no traced route). Never pads the blast radius with catalog-only
+    members — the confidence_banner says so explicitly."""
+    members = usecase_master.use_cases_for_source_system(value)
+    if not members.get("available") or not members.get("items"):
+        raise FileNotFoundError(f"unknown target: source-system:{value}")
+
+    items = members["items"]
+    routed_items = [item for item in items if item.get("has_route")]
+    catalog_items = [item for item in items if not item.get("has_route")]
+
+    route_rows = []
+    topics = []
+    seen_topics = set()
+    for item in routed_items:
+        usecase = messages.usecase_route(use_case_id=item["use_case_id"])
+        if not usecase.get("available"):
+            continue
+        for match in usecase.get("matches") or []:
+            topic = (match.get("topic") or "").strip()
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            topics.append(topic)
+            route_rows.extend(messages.who_produces(topic) + messages.who_consumes(topic))
+
+    deduped = []
+    seen = set()
+    for row in route_rows:
+        signature = route_signature(row)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(row)
+
+    routes = route_groups(deduped, tags)
+    participants = set()
+    for route in routes:
+        participants.update(route["producers"])
+        participants.update(route["consumers"])
+    upstream, downstream = aggregate_repo_relations(participants, exclude=participants)
+    chain = channel_chain(tags, participants, topics, deduped)
+    owners = usecase_master.owners_for(item["use_case_id"] for item in items)
+
+    total = len(items)
+    routed_count = len(routed_items)
+    catalog_only_count = total - routed_count
+
+    citations = set(item["citation"] for item in items if item.get("citation"))
+    for route in routes:
+        citations.update(route.get("citations") or [])
+    for item in upstream + downstream:
+        citations.update(item.get("citations") or [])
+    for item in chain:
+        citations.update(item.get("citations") or [])
+
+    return {
+        "target": {
+            "input": f"source-system:{value}",
+            "kind": "source-system",
+            "value": value,
+            "use_case_count": total,
+            "routed_count": routed_count,
+            "catalog_only_count": catalog_only_count,
+        },
+        "use_cases": {"routed": routed_items, "catalog_only": catalog_items},
+        "topics": topics,
+        "async_routes": routes,
+        "channel_chain": chain,
+        "upstream": upstream,
+        "downstream": downstream,
+        "owners": owners,
+        "confidence_banner": (
+            f"渠道影响仅覆盖 {routed_count}/{total} 个有路由快照的 Use Case；"
+            f"其余 {catalog_only_count} 个仅有业务登记，无法追踪到渠道。"
+        ),
+        "citations": sorted(citations),
+    }
 
 
 def build_report(target):
@@ -551,6 +664,8 @@ def build_report(target):
         report = build_repo_report(value, tags)
     elif kind == "topic":
         report = build_topic_report(value, tags)
+    elif kind == "source-system":
+        return build_source_system_report(value, tags)
     else:
         report = build_usecase_report(value, tags)
     report["citations"] = flatten_citations(report)
@@ -651,6 +766,55 @@ def render_markdown(report):
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_source_system_markdown(report):
+    target = report["target"]
+    lines = [
+        f"# Impact Report — {target['input']}",
+        "",
+        "## Target",
+        f"- source_system: `{target['value']}`",
+        f"- Use cases: {target['use_case_count']} total, {target['routed_count']} routed, "
+        f"{target['catalog_only_count']} catalog-only (no traced channel)",
+        "",
+        "## Confidence",
+        report["confidence_banner"],
+        "",
+        f"## Routed use cases ({len(report['use_cases']['routed'])})",
+    ]
+    lines.extend([
+        f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
+        f"citation: {item['citation']}"
+        for item in report["use_cases"]["routed"]
+    ] or ["- none"])
+    lines.extend(["", f"## Catalog-only use cases ({len(report['use_cases']['catalog_only'])}) — no traced channel"])
+    lines.extend([
+        f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
+        f"citation: {item['citation']}"
+        for item in report["use_cases"]["catalog_only"]
+    ] or ["- none"])
+    lines.extend(["", "## Topics"])
+    lines.extend([f"- {topic}" for topic in report["topics"]] or ["- none"])
+    lines.extend(["", "## Async Routes"])
+    lines.extend(render_routes(report["async_routes"]))
+    lines.extend(["", "## Channel Chain"])
+    lines.extend(render_channel_chain(report["channel_chain"]))
+    lines.extend(["", "## Upstream"])
+    lines.extend(render_repo_items(report["upstream"]))
+    lines.extend(["", "## Downstream"])
+    lines.extend(render_repo_items(report["downstream"]))
+    lines.extend(["", f"## Owners ({len(report['owners'])})"])
+    lines.extend([f"- {owner}" for owner in report["owners"]] or ["- none"])
+    lines.extend(["", "## Citations"])
+    lines.extend([f"- {citation}" for citation in report.get("citations") or []] or ["- none"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_report_markdown(report):
+    if report.get("target", {}).get("kind") == "source-system":
+        return render_source_system_markdown(report)
+    return render_markdown(report)
+
+
 def report_path(out, target_input):
     if out.lower().endswith(".md"):
         return out
@@ -662,7 +826,7 @@ def write_report(report, out):
     path = report_path(out, report["target"]["input"])
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write(render_markdown(report))
+        handle.write(render_report_markdown(report))
     return path
 
 
@@ -681,7 +845,7 @@ def main(argv=None):
         print(f"ERROR: {error}")
         return 1
 
-    print(render_markdown(report), end="")
+    print(render_report_markdown(report), end="")
     if args.out:
         path = write_report(report, args.out)
         print("")

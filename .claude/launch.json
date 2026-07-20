@@ -7,6 +7,12 @@
       "runtimeArgs": ["-m", "webapp.server"],
       "port": 8765,
       "env": { "LLM_MOCK": "1" }
+    },
+    {
+      "name": "retrieval-service",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["retrieval_service.py"],
+      "port": 8848
     }
   ]
 }

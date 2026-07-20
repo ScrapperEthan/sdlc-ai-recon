@@ -1,6 +1,7 @@
 import unittest
+from unittest import mock
 
-from retriever import arch_focus
+from retriever import arch_focus, usecase_master
 
 # A small catalog exercising the vendor-vs-channel rule (not the real static/arch_nodes.json).
 NODES = [
@@ -63,6 +64,38 @@ class FocusTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("channels", result)
         self.assertIn("vendors", result)
+
+
+class BusinessSourceFocusTests(unittest.TestCase):
+    """arch_focus's business-upstream gutter — seeded in the real static/arch_nodes.json (block 4)."""
+
+    def test_focus_source_system_hits_gutter_node_and_early_spine(self):
+        result = arch_focus.focus("source-system", "PEGA")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["kind"], "source-system")
+        self.assertIn("biz-pega", result["affected_node_ids"])
+        self.assertIn("ingress-api", result["affected_node_ids"])
+        self.assertIn("decision-topics", result["affected_node_ids"])
+        self.assertIn("decision-job", result["affected_node_ids"])
+
+    def test_focus_source_system_case_insensitive_and_unknown(self):
+        self.assertTrue(arch_focus.focus("source-system", "pega")["ok"])
+        result = arch_focus.focus("source-system", "does-not-exist")
+        self.assertFalse(result["ok"])
+        self.assertIn("source_systems", result)
+
+    def test_focus_use_case_resolves_via_master_snapshot(self):
+        with mock.patch.object(usecase_master, "master_for", return_value={"source_system": "PEGA"}):
+            result = arch_focus.focus("use-case", "UC123")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["value"], "pega")
+        self.assertIn("biz-pega", result["affected_node_ids"])
+        self.assertIn("resolved from use-case:UC123", result["note"])
+
+    def test_focus_use_case_without_declared_source_system_is_clean_error(self):
+        with mock.patch.object(usecase_master, "master_for", return_value=None):
+            result = arch_focus.focus("use-case", "UC999")
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":

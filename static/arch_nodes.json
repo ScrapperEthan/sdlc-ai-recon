@@ -106,5 +106,12 @@
     ["letter-iccm", "ext-iccm-otx"],
     ["whatsapp-haro", "ext-whatsapp"],
     ["wechat-gw", "ext-wechat"]
+  ],
+  "business_sources": [
+    {"id": "biz-pega", "label": "PEGA", "source_system": "PEGA", "edge_to": "ingress-api", "hidden_by_default": true},
+    {"id": "biz-mdc", "label": "MDC", "source_system": "MDC", "edge_to": "ingress-api", "hidden_by_default": true},
+    {"id": "biz-ealert", "label": "eAlert", "source_system": "eAlert", "edge_to": "ingress-api", "hidden_by_default": true},
+    {"id": "biz-hcc", "label": "HCC", "source_system": "HCC", "edge_to": "ingress-api", "hidden_by_default": true},
+    {"id": "biz-l400", "label": "L400", "source_system": "L400", "edge_to": "ingress-api", "hidden_by_default": true}
   ]
 }

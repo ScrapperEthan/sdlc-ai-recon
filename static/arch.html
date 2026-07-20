@@ -318,7 +318,7 @@
       wechat: "WeChat", letter: "Letter", mms: "MMS"
     };
 
-    const state = { catalog: null, archMap: { nodes: {} }, nodeById: {}, selected: null };
+    const state = { catalog: null, archMap: { nodes: {} }, nodeById: {}, selected: null, activeBusinessSource: null };
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -413,7 +413,11 @@
       const maxSlot = nodes.reduce((m, n) => Math.max(m, n.slot), 0);
       const width = PAD_X + maxCol * COL_W + NODE_W + PAD_X;
       const height = PAD_TOP + maxSlot * ROW_H + NODE_H + PAD_BOTTOM;
-      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      // The business-upstream gutter is hidden by default (per spec: don't clutter the overview
+      // with ~80 source systems) — it only occupies space when a source-system focus is active.
+      const gutterActive = !!state.activeBusinessSource;
+      const minX = gutterActive ? -COL_W : 0;
+      svg.setAttribute("viewBox", minX + " 0 " + (width - minX) + " " + height);
       while (svg.firstChild) svg.removeChild(svg.firstChild);
 
       // Column headers.
@@ -510,6 +514,39 @@
         g.addEventListener("click", () => selectNode(node.id));
         svg.appendChild(g);
       });
+
+      // Business-upstream gutter node (per-selection only — see gutterActive above). The label
+      // means "this use case/system's DECLARED upstream", cited to the master row — not a
+      // discovered code edge, so it's rendered distinctly (dashed, muted) from the real pipeline.
+      if (gutterActive) {
+        const biz = state.activeBusinessSource;
+        const bx = PAD_X - COL_W;
+        const by = PAD_TOP + 3.5 * ROW_H;
+        const g = el("g", { "data-node-id": biz.id, class: "node biz-source" });
+        g.appendChild(el("rect", {
+          class: "box", x: bx, y: by, width: NODE_W, height: NODE_H, rx: 12,
+          fill: "#eef3f9", stroke: "#5a6a82", "stroke-width": 1.6, "stroke-dasharray": "4 3"
+        }));
+        g.appendChild(el("text", {
+          x: bx + 14, y: by + 20, "font-size": 12.5, "font-weight": 700, fill: "#152033"
+        }, biz.label));
+        g.appendChild(el("text", {
+          x: bx + 14, y: by + 36, "font-size": 10, fill: "#6b7a92"
+        }, "业务上游 · 声明字段"));
+        svg.appendChild(g);
+
+        const target = state.nodeById[biz.edge_to || "ingress-api"];
+        if (target) {
+          const x1 = bx + NODE_W, y1 = by + NODE_H / 2;
+          const x2 = xOf(target), y2 = yOf(target) + NODE_H / 2;
+          const mid = (x1 + x2) / 2;
+          svg.appendChild(el("path", {
+            class: "edge", "data-from": biz.id, "data-to": biz.edge_to || "ingress-api",
+            d: "M " + x1 + " " + y1 + " C " + mid + " " + y1 + ", " + mid + " " + y2 + ", " + x2 + " " + y2,
+            fill: "none", stroke: "#9fb0c9", "stroke-width": 1.8, "stroke-dasharray": "5 5", opacity: 0.85
+          }));
+        }
+      }
     }
 
     function badgeChip(channel) {
@@ -652,6 +689,14 @@
       return { kind: raw.slice(0, idx).toLowerCase().trim(), value: raw.slice(idx + 1).trim() };
     }
 
+    // Business-upstream sources are a separate, hidden-by-default array (not part of catalog.nodes)
+    // — see retriever/arch_focus.py._business_source_for, which this mirrors.
+    function findBusinessSource(value) {
+      const v = (value || "").toLowerCase();
+      const sources = state.catalog.business_sources || [];
+      return sources.find((s) => (s.source_system || "").toLowerCase() === v || (s.label || "").toLowerCase() === v) || null;
+    }
+
     function computeHighlight(kind, value) {
       const v = (value || "").toLowerCase();
       const nodes = state.catalog.nodes || [];
@@ -673,8 +718,25 @@
         routers.forEach((id) => hit.add(id));
       } else if (kind === "repo") {
         nodes.forEach((n) => { if ((binding(n.id).repos || []).some((r) => r.toLowerCase() === v)) hit.add(n.id); });
+      } else if (kind === "source-system") {
+        const match = findBusinessSource(v);
+        if (match) {
+          hit.add(match.id);
+          hit.add(match.edge_to || "ingress-api");
+          routers.forEach((id) => hit.add(id));
+        }
       }
       return hit;
+    }
+
+    // Sets state.activeBusinessSource BEFORE the first renderDiagram() call, so the gutter node
+    // exists in the DOM by the time applyHighlight() runs (renderDiagram rebuilds from scratch).
+    function prepareHighlightState() {
+      state.activeBusinessSource = null;
+      const hl = parseHighlightParam(new URLSearchParams(location.search));
+      if (hl && hl.kind === "source-system" && hl.value) {
+        state.activeBusinessSource = findBusinessSource(hl.value);
+      }
     }
 
     function applyHighlight(hit) {
@@ -691,6 +753,9 @@
     }
 
     function clearHighlight() {
+      const hadGutter = !!state.activeBusinessSource;
+      state.activeBusinessSource = null;
+      if (hadGutter) renderDiagram();  // drop the gutter node/edge from the DOM entirely
       Array.from(document.querySelectorAll(".node.dim, .node.affected")).forEach((g) => g.classList.remove("dim", "affected"));
       Array.from(document.querySelectorAll(".edge-dim, .edge-affected")).forEach((p) => p.classList.remove("edge-dim", "edge-affected"));
       const banner = document.getElementById("hlBanner");
@@ -766,6 +831,7 @@
         (catalog.nodes || []).forEach((node) => { state.nodeById[node.id] = node; });
         renderStats();
         renderCoverage();
+        prepareHighlightState();
         renderDiagram();
         applyDeepLink();
         requestAnimationFrame(postEmbedHeight);

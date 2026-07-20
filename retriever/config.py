@@ -21,6 +21,10 @@ MESSAGE_CHANNELS_JSON = _p("SDLC_MSG_CHANNELS", "index", "message_channels.json"
 USECASE_SNAPSHOT_CSV = _p(
     "SDLC_USECASE_SNAPSHOT", "index", "tbl_event_router_usecase_topic.snapshot.csv"
 )
+# Use Case master data (Tier 0) — second snapshot on the same use_case_id primary key; supplies
+# identity/governance + the upstream source_system that the routing snapshot above doesn't carry.
+USECASE_MASTER_CSV = _p("SDLC_USECASE_MASTER", "index", "tbl_use_case.snapshot.csv")
+SOURCE_SYSTEM_ALIASES_JSON = _p("SDLC_SOURCE_SYSTEM_ALIASES", "index", "source_system_aliases.json")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

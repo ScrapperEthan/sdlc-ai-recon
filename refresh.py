@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from retriever import config
+from retriever import config, usecase_master
 
 
 def _now():
@@ -155,6 +155,26 @@ def write_summary(index_dir, recon_dir, generated_at, path):
     return text
 
 
+def write_usecase_quality(index_dir):
+    """Additive Tier 0 step: usecase_master.quality_report() -> index/reports/USECASE_QUALITY.{md,json}.
+    Missing master snapshot -> a clean 'absent' step (returncode 0), never a failure — same
+    honesty rule as every other snapshot-backed step here."""
+    report = usecase_master.quality_report()
+    reports_dir = os.path.join(index_dir, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    md_path = os.path.join(reports_dir, "USECASE_QUALITY.md")
+    json_path = os.path.join(reports_dir, "USECASE_QUALITY.json")
+    with open(md_path, "w", encoding="utf-8") as handle:
+        handle.write(usecase_master.render_quality_markdown(report))
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    if not report.get("available"):
+        return {"cmd": ["usecase_master.quality_report"], "returncode": 0,
+                "skipped": report.get("note") or "master snapshot absent"}
+    return {"cmd": ["usecase_master.quality_report"], "returncode": 0, "wrote": [md_path, json_path]}
+
+
 def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None):
     root = root or os.getcwd()
     mirror = mirror or config.MIRROR
@@ -257,6 +277,10 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
         report["steps"].append(
             {"cmd": ["make_arch_map.py"], "returncode": 0, "skipped": "missing static/arch_nodes.json"}
         )
+
+    # Use Case master data quality (Tier 0) — additive, box-local export; absent snapshot is a
+    # clean skip, not a failure.
+    report["steps"].append(write_usecase_quality(index_dir))
 
     summary_path = os.path.join(index_dir, "reports", "REFRESH-SUMMARY.md")
     try:

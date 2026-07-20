@@ -6,7 +6,7 @@ import os
 import re
 from collections import defaultdict
 
-from retriever import config, graph, messages, repo_tags
+from retriever import config, graph, messages, repo_tags, usecase_master
 
 
 CHANNELS = ("sms", "mms", "email", "letter", "whatsapp", "wechat", "push")
@@ -206,10 +206,19 @@ def affected_use_cases(topics):
             entry = grouped.setdefault(row["use_case"], {"use_case": row["use_case"], "topics": [], "citations": set()})
             entry["topics"].append(topic["topic"])
             entry["citations"].update(row["citations"])
-    return [
-        {"use_case": item["use_case"], "topics": sorted(set(item["topics"])), "citations": sorted(item["citations"])}
-        for item in sorted(grouped.values(), key=lambda item: item["use_case"].lower())
-    ]
+    items = []
+    for item in sorted(grouped.values(), key=lambda item: item["use_case"].lower()):
+        out = {"use_case": item["use_case"], "topics": sorted(set(item["topics"])),
+               "citations": sorted(item["citations"])}
+        # Additive + null-safe: no master row (or no snapshot at all) -> identical to today.
+        master = usecase_master.master_for(item["use_case"])
+        if master:
+            out["name"] = master["name"]
+            out["source_system"] = master["source_system"]
+            out["owner"] = master["modified_by"] or master["created_by"]
+            out["citations"] = sorted(set(out["citations"]) | {master["citation"]})
+        items.append(out)
+    return items
 
 
 def _clean_channels(values):

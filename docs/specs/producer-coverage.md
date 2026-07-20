@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · build v2 DONE (2026-07-18, RUNBOOK-42, Claude) · Part 5 re-verify DONE (2026-07-20, internal Codex — **FAILED gate**: v1/v2 `message_edges.csv` byte-identical on the real mirror, zero new resolutions) · build v3 DONE (2026-07-20, Claude — Lombok `@Getter`/`@Data`/`@ConfigurationProperties` synthesis + method-declaration guard + multi-arg destination search) · Part 8 re-verify DONE (2026-07-20, internal Codex — **GATE PASSED**, promoted to live index: 0→3 resolved, 10→13 usable edges, 0/3 false positives, 699 consumers unchanged; flagged a metric mislabel + a runtime regression) · **build v3.1 DONE (2026-07-20, Claude — fixed both, 18 producer tests / 167 total)** · light re-check = NEXT (internal Codex, confirm the metric now reads 13 and runtime is back near baseline — not a full re-verify, resolution logic is unchanged) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · build v2 DONE (2026-07-18, RUNBOOK-42, Claude) · Part 5 re-verify DONE (2026-07-20, internal Codex — **FAILED gate**: v1/v2 `message_edges.csv` byte-identical on the real mirror, zero new resolutions) · build v3 DONE (2026-07-20, Claude) · Part 8 re-verify DONE (2026-07-20, internal Codex — **GATE PASSED**, promoted to live index; flagged a metric mislabel + a runtime regression) · build v3.1 DONE (2026-07-20, Claude — fixed both, 18 producer tests / 167 total) · **Part 10 light re-check DONE (2026-07-20, internal Codex — CONFIRMED: `usable_topic_producer_edges` reads 13, runtime 47.8s (was 127s, baseline ~49s), 699 consumers/3 resolved unchanged, 18/18 tests, new CSV SHA-256-identical to the already-promoted live CSV). Workstream CLOSED for this phase.** **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem
@@ -338,10 +338,15 @@ run — asserts the total exceeds the resolver-only count). 18 producer tests / 
 **This round does NOT change resolution logic or the destination ladder** — only the stdout report
 and internal cost, so a full Part-8-style re-verify with the acceptance gate isn't needed again.
 
-**NEXT: a light re-check (internal Codex, real mirror, based on commit `5233d32` or later)** —
-confirm `usable_topic_producer_edges` now prints `13` (matching the CSV) and the run completes
-closer to the ~49s baseline than the ~127s this round showed. No new acceptance-gate check required
-since the underlying resolution logic didn't change.
+**Part 10 CONFIRMED (internal Codex, real mirror, 2026-07-20, commit `5bcdd7f`):** `usable_topic_producer_edges`
+prints 13; runtime 47.775s (was 127s, matches the ~49s baseline); consumer edges 699 / resolved
+destinations 3, both unchanged; 18/18 producer tests; the freshly-generated CSV is SHA-256-identical
+to the live CSV already promoted in Part 9 (confirms v3.1 changed only the report + internal cost,
+not the data). **Producer-coverage workstream is CLOSED for this phase** — identity accurate, real
+resolution improvement (10→13 usable edges) proven on the real mirror and promoted, both Part-9 flags
+fixed and reconfirmed. ~20 lower-yield gaps intentionally left unaddressed (JMS default-destination/
+raw `Destination` fields, nested/generated getters, one SNS-embedded destination) — only worth
+tackling if a future need re-opens this line of work.
 
 ## Guardrails
 

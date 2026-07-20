@@ -122,6 +122,30 @@ _IDENT_RE = re.compile(r'^(?:this\.)?([a-z]\w*)$')
 # A constant reference, bare (``SMS_TOPIC``) or qualified (``Topics.SMS_TOPIC``).
 _CONST_REF_RE = re.compile(r'(?:^|\.)([A-Z][A-Z0-9_]{3,})$')
 
+# Lombok @Getter/@Data classes/fields have NO getter body in source (generated at build time) — the
+# RUNBOOK-42 real-mirror re-verify found this is the dominant real-world shape (3/3 spot-checked
+# unresolved getters were plain Lombok fields) and v2 missed it entirely, producing zero new
+# resolutions on the real mirror despite passing on hand-written-getter fixtures.
+_CLASS_DECL_RE = re.compile(r'\bclass\s+(\w+)\b[^{]*\{')
+_LOMBOK_GETTER_RE = re.compile(r'@(?:Getter|Data)\b')
+_CONFIG_PROPS_RE = re.compile(r'@ConfigurationProperties\(\s*(?:prefix\s*=\s*)?"([^"]+)"')
+_FIELD_DEF_RE = re.compile(
+    r'(?:private|protected|public)\s+(?:static\s+)?(?:final\s+)?[\w][\w<>\[\],.\s]*?'
+    r'\s+([a-z]\w*)\s*(?:=\s*([^;]+))?;'
+)
+
+
+def _kebab(name):
+    """camelCase -> kebab-case, for Spring relaxed binding (``queueName`` -> ``queue-name``)."""
+    return re.sub(r'(?<!^)(?=[A-Z])', '-', name).lower()
+
+
+def _preceding_annotations(text, pos):
+    """The text between the previous top-level ``}``/``;`` and ``pos`` — the annotation/modifier run
+    immediately above a class or field declaration, without a real parser."""
+    prev_end = max(text.rfind("}", 0, pos), text.rfind(";", 0, pos))
+    return text[prev_end + 1:pos]
+
 
 class RepoIndex:
     """Per-repo symbol tables used to resolve a send's destination expression."""
@@ -233,6 +257,37 @@ def _build_index(java_texts, properties):
             ret = _RETURN_RE.search(body[:cut] if cut is not None else body[:600])
             if ret:
                 getter_returns.append((match.group(1), ret.group(1).strip()))
+    # Lombok @Getter/@Data classes/fields and @ConfigurationProperties-bound fields have no getter
+    # body to read (generated at build time) — synthesize the getter -> field mapping from the field
+    # declaration instead. A field's "return expression" is its initializer if it has one, else its
+    # own name (resolved like any other identifier: an @Value field, or a @ConfigurationProperties
+    # field bound below via relaxed camelCase -> kebab-case).
+    for text in java_texts:
+        for cmatch in _CLASS_DECL_RE.finditer(text):
+            body_start = cmatch.end() - 1
+            depth, i = 1, body_start + 1
+            while i < len(text) and depth > 0:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue  # unterminated class body on this pass -> skip rather than guess
+            body = text[body_start + 1:i - 1]
+            class_has_getter = bool(_LOMBOK_GETTER_RE.search(_preceding_annotations(text, cmatch.start())))
+            prefix_match = _CONFIG_PROPS_RE.search(_preceding_annotations(text, cmatch.start()))
+            config_prefix = prefix_match.group(1) if prefix_match else ""
+            for fmatch in _FIELD_DEF_RE.finditer(body):
+                name, init = fmatch.group(1), fmatch.group(2)
+                if config_prefix:
+                    index.value_fields.setdefault(
+                        name, _resolve_key(properties, f"{config_prefix}.{_kebab(name)}"))
+                field_has_getter = bool(_LOMBOK_GETTER_RE.search(_preceding_annotations(body, fmatch.start())))
+                if not (class_has_getter or field_has_getter):
+                    continue
+                getter_name = "get" + name[0].upper() + name[1:]
+                getter_returns.append((getter_name, init.strip() if init else name))
     for _ in range(2):  # fixpoint: a getter may return the value of another getter
         for method, expr in getter_returns:
             if method not in index.getters:
@@ -256,6 +311,49 @@ def _first_arg(after_paren):
             break
         out.append(ch)
     return "".join(out).strip()
+
+
+def _all_args(after_paren):
+    """All top-level argument substrings after a call's opening paren (mirrors ``_first_arg``)."""
+    depth, current, out = 0, [], []
+    for ch in after_paren:
+        if ch in "([{":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            out.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    out.append("".join(current).strip())
+    return out
+
+
+def _looks_like_declaration(line, paren_pos):
+    """True if the ``(`` at ``paren_pos`` closes into ``{`` (a method declaration, e.g. a wrapper's
+    own ``publishMessage(...)  {``) rather than into ``;``/an operator (a call). The real-mirror
+    re-verify found trusted method NAMES (``publishMessage`` etc.) being redeclared as a wrapper's own
+    method were being counted as call sites, since the confirmed-receiver guard only applies to the
+    generic ``send``/``publish`` names. Multi-line signatures (paren unterminated on this line) are
+    left alone rather than guessed at."""
+    depth, i, n = 1, paren_pos + 1, len(line)
+    while i < n and depth > 0:
+        if line[i] == "(":
+            depth += 1
+        elif line[i] == ")":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return False
+    rest = line[i:].lstrip()
+    if rest.startswith("throws"):
+        rest = re.sub(r'^throws\s+[\w.,\s<>]+', '', rest).lstrip()
+    return rest.startswith("{")
 
 
 def _resolve_destination(arg, line, text, index):
@@ -299,11 +397,23 @@ def _send_records(repo, rel, lineno, line, text, framework_vars, current_class, 
         receiver, method = match.group(1), match.group(2)
         if method not in SEND_METHODS:
             continue
+        if receiver is None and _looks_like_declaration(line, match.end() - 1):
+            continue  # a wrapper's own method DECLARATION (e.g. `void publishMessage(...) {`), not a call
         confirmed = bool(receiver) and receiver in framework_vars
         if method in ("send", "publish") and not confirmed:
             continue  # generic send/publish with an unknown receiver -> too noisy to trust
-        arg = _first_arg(line[match.end():])
-        dest, kind, source, base_conf, expr = _resolve_destination(arg, line, text, index)
+        # The destination isn't always the first argument (e.g. `send(payload, eventConfig)`) — try
+        # each top-level arg in call order and take the first one that actually resolves, falling
+        # back to a recognised-but-unresolved candidate over a plain runtime-unresolved guess.
+        best = None
+        for candidate in _all_args(line[match.end():]):
+            result = _resolve_destination(candidate, line, text, index)
+            if result[0]:
+                best = result
+                break
+            if best is None or (best[2] == "runtime-unresolved" and result[2] != "runtime-unresolved"):
+                best = result
+        dest, kind, source, base_conf, expr = best
         # Base confidence tracks how well the DESTINATION resolved (literal/constant high, builder/
         # config medium, unresolved low). A confirmed messaging receiver lifts it to high (it's
         # certainly a producer); a trusted producer method lifts an otherwise-unresolved send to

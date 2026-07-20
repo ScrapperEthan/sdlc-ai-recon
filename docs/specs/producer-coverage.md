@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · **build v2 DONE (2026-07-18, RUNBOOK-42, Claude — repo-scoped destination resolver in `producer_extract.py`, 13 producer tests / 117 total)** · re-verify = NEXT (internal Codex, real mirror — Part 5, with an acceptance gate) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · build v2 DONE (2026-07-18, RUNBOOK-42, Claude) · Part 5 re-verify DONE (2026-07-20, internal Codex — **FAILED gate**: v1/v2 `message_edges.csv` byte-identical on the real mirror, zero new resolutions) · **build v3 DONE (2026-07-20, Claude — Lombok `@Getter`/`@Data`/`@ConfigurationProperties` synthesis + method-declaration guard + multi-arg destination search, 17 producer tests / 156 total)** · re-verify = NEXT (internal Codex, real mirror — Part 8, same acceptance gate) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem
@@ -215,6 +215,78 @@ untouched) and relay:
 If the gate passes, promote the CSV; otherwise relay the failing spot-checks so Claude can extend the
 resolver (likely candidates: deeper nested getters, enum-backed topic registries, or a CodeGraph
 pass for cross-repo `getTopicName` chains the repo-local resolver can't reach).
+
+---
+
+## Part 6 — RESULT (internal Codex, real mirror, 2026-07-20) → GATE FAILED, root causes found
+
+Re-ran Part 5 on the full 457-dir mirror (`.tmp/runbook42-real/`, live index untouched, ~49s):
+
+- **v1 and v2 produced a byte-identical `message_edges.csv`** (SHA-256 match) — v2's resolver added
+  **zero** new resolutions on real code. `usable_topic_producer_edges` stayed at 10; all three
+  `routing_source` buckets were 0-resolved (`builder` 0/3, `runtime-unresolved` 0/76, `wrapper` 0/47).
+  No spot-check was possible — there was nothing new to check. Consumer edges held at 699 → 699 (no
+  regression); producer-identity false-positive rate on the 10 still-unresolved candidates spot-checked
+  was 0/10 (identity remains fine — this is purely a resolution-ladder gap).
+- **Root causes, found by manually tracing 3 real unresolved getters to their actual value:**
+  1. **Lombok.** All 3 traced getters (`getQueue() -> q_csl_tracking`, `-> q_htcl_tracking`,
+     `-> q_pfp_tracking`) were `@Getter`/`@ConfigurationProperties` fields with **no getter body in
+     source** — Lombok generates them at build time. v2's `_GETTER_DEF_RE` only matches an explicit
+     `get...() { ... return ...; }`, so it never saw these at all.
+  2. **44 wrapper-call misses**: the destination sits in a later argument (`send(payload,
+     eventConfig)`), not the first — v2's `_first_arg`-only extraction can't reach it.
+  3. **9 false records**: a wrapper's own method *declaration* reusing a trusted method name (e.g.
+     `public void publishMessage(String topic, byte[] payload) {`) was being counted as a call site,
+     since the confirmed-receiver guard only applies to the generic `send`/`publish` names, not the
+     trusted ones.
+  4. Remaining ~20 lower-yield gaps not addressed this round: JMS default-destination / raw
+     `Destination`-typed fields (19), nested/generated getters (3), an SNS request with an embedded
+     destination (1).
+
+**Verdict: do not promote v1/v2's CSV.** Producer identity is solid; the resolution ladder needs the
+Lombok gap closed before this workstream can move the needle.
+
+---
+
+## Part 7 — RESOLVE (build v3, RUNBOOK-42 cont'd, Claude — DONE 2026-07-20)
+
+Targets the three root causes above directly (the ~20 lower-yield cases in Part 6 item 4 are left for
+a future round):
+
+1. **Lombok `@Getter`/`@Data`/`@ConfigurationProperties` synthesis.** `_build_index` now walks each
+   class body (brace-matched) and, when the class or a field carries `@Getter`/`@Data`, synthesizes a
+   `getXxx` -> field mapping fed into the same getter-resolution fixpoint used for explicit-body
+   getters — no new resolution path, just a new source for it. A field's value resolves through
+   whichever ladder rung already applies to it: its own initializer, an `@Value` binding, or (new) a
+   `@ConfigurationProperties(prefix=...)` binding via `camelCase` -> `kebab-case` relaxed binding
+   against the repo's yaml/properties.
+2. **Method-declaration guard.** A bare (no-receiver) call to a trusted method name is now checked
+   against `_looks_like_declaration` — if the arg-list's closing paren is followed by `{` (a method
+   body), it's a declaration, not a call, and is skipped.
+3. **Multi-arg destination search.** `_send_records` now tries every top-level argument in call order
+   (via new `_all_args`) instead of only the first, taking the first one that actually resolves.
+
+4 new tests reproduce the shapes Codex traced by hand (Lombok+`@Value`, Lombok+`@ConfigurationProperties`,
+a redeclared trusted-method-name wrapper method, a second-argument destination) — 17 producer tests,
+156 total, all pass on synthetic fixtures (no real repo/topic names in-repo).
+
+---
+
+## Part 8 — RE-VERIFY (internal Codex, real mirror) — SAME ACCEPTANCE GATE AS PART 5
+
+Re-run `python make_message_map.py` over the full mirror (outputs under `.tmp/`, live index
+untouched) and relay the same four items as Part 5 (resolved-destination delta by `routing_source`,
+`usable_topic_producer_edges`, a 10-edge spot-check false-positive rate, consumer/identity
+regression check) against the **same acceptance gate**. Additionally:
+
+- Confirm the 3 getters Codex traced by hand in Part 6 (`q_csl_tracking`/`q_htcl_tracking`/
+  `q_pfp_tracking`, described generically — do not paste real repo names back into this file) now
+  resolve.
+- Confirm `message_edges.csv` is no longer byte-identical to the v1/v2 run.
+
+If the gate still fails, relay which of the four Part-6 root causes (Lombok, second-arg, false
+declarations) remain un-fixed vs. which of the ~20 lower-yield gaps (JMS default-destination, nested
+getters, SNS-embedded destination) are now the bottleneck, so the next round can be scoped precisely.
 
 ## Guardrails
 

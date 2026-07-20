@@ -338,7 +338,7 @@ run — asserts the total exceeds the resolver-only count). 18 producer tests / 
 **This round does NOT change resolution logic or the destination ladder** — only the stdout report
 and internal cost, so a full Part-8-style re-verify with the acceptance gate isn't needed again.
 
-**NEXT: a light re-check (internal Codex, real mirror, based on commit `dba4bfe` or later)** —
+**NEXT: a light re-check (internal Codex, real mirror, based on commit `5233d32` or later)** —
 confirm `usable_topic_producer_edges` now prints `13` (matching the CSV) and the run completes
 closer to the ~49s baseline than the ~127s this round showed. No new acceptance-gate check required
 since the underlying resolution logic didn't change.

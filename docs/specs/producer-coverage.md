@@ -1,6 +1,6 @@
 # Spec: Producer coverage for the async message map
 
-**Status:** recon DONE (2026-07-17, internal Codex) · **build DONE (2026-07-17, Claude — `producer_extract.py` + wired into `make_message_map.py`, 8 tests)** · verify = NEXT (internal Codex, real mirror — Part 3) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
+**Status:** recon DONE (2026-07-17) · build v1 DONE (2026-07-17, Claude) · Part 3 real-mirror verify DONE (2026-07-17, internal Codex — **NEEDS ITERATION**: producer *identity* accurate but 0/126 added records had a resolved destination) · **build v2 DONE (2026-07-18, RUNBOOK-42, Claude — repo-scoped destination resolver in `producer_extract.py`, 13 producer tests / 117 total)** · re-verify = NEXT (internal Codex, real mirror — Part 5, with an acceptance gate) · **Owner split:** recon = internal Codex (box), build = Claude (this repo), verify = internal Codex (box)
 **Motivates:** the flagship [impact-notification] use case — upstream tracing ("who PUBLISHES to this topic / feeds this channel") is currently blind.
 
 ## Problem
@@ -143,6 +143,78 @@ identity across bundles must be `repo+package+class+method`, not bare method nam
 4. Sanity: consumer edge count must not regress; total runtime acceptable.
 
 Relay the numbers + the spot-check table out to Claude; iterate Part 2 if precision is low.
+
+---
+
+## Part 3 — RESULT (internal Codex, real mirror, 2026-07-17) → NEEDS ITERATION
+
+Ran read-only over the full 457-dir HASE_MDC mirror (outputs under `.tmp/`, live index untouched):
+
+- **Producer identity is accurate.** Spot-check false-positive rate **0/10**; consumer coverage did
+  not regress (699 rows). Wrapper/signature recognition works.
+- **But destinations don't resolve.** 126 producer records added, **0 with a resolved destination**.
+  Routing source of the added rows: `runtime-unresolved` 76, `wrapper` 47, `builder` 3, resolved
+  literal/constant/config **0**. Usable `topic/queue -> producer` edges: **10 -> 10** (no change).
+- **Root cause = a data-flow gap, not identity.** The send arg is a chained config getter
+  (`config.getQueue()`), a nested getter into a YAML/property value, or an `EventConfig` /
+  `getTopicName()` whose value lives in another method — hops the v1 single-line ladder never crossed.
+
+Verdict: **do not promote the v1 CSV into the live index.** The 126 rows are useful producer
+*candidates*, not complete message edges; they can't answer `who_produces(<topic>)` yet.
+
+---
+
+## Part 4 — RESOLVE (build v2, RUNBOOK-42, Claude — DONE 2026-07-18)
+
+Addresses the Part-3 gap directly. Producer *identity* (wrapper + guarded send sites) was already
+right, so v2 leaves it alone and adds a **per-repo destination resolver** — `RepoIndex` in
+`producer_extract.py`, built once per repo from its `.java` + `.yml`/`.properties`, still stdlib and
+read-only:
+
+1. **First-arg extraction.** The send's first top-level argument is parsed (`_first_arg`) instead of
+   the old lone-trailing-identifier heuristic, so `send(dest, payload)` resolves on `dest`.
+2. **Cross-file constants.** `SMS_TOPIC` / `Topics.SMS_TOPIC` resolve against a repo-wide constant
+   table, not just same-file (recon bucket: constant/enum 9%).
+3. **`@Value` → yaml/properties.** `@Value("${notification.order.topic}")` fields resolve the key
+   through a stdlib yaml flattener + `.properties` reader (recon bucket: config/@Value/YAML 45%).
+4. **Getters → their value.** `eventConfig.getTopicName()` / `config.getQueue()` resolve by reading
+   the getter body and following its `return` (constant, `@Value` field, or another getter — 2-pass
+   fixpoint for nested getters) (recon bucket: builder/method-return 32%).
+5. **Candidates are still kept, not dropped.** A getter/`@Value` we recognise but can't value stays a
+   `builder`/`config` candidate with `resolution_status: unresolved` (better signal than
+   `runtime-unresolved`); truly opaque sends stay `runtime-unresolved`.
+6. **Metrics separate candidates from edges** (Part-3 recommendation 3/4). `make_message_map` stdout
+   now prints `producer_records_extracted` (candidates) vs `usable_topic_producer_edges`
+   (who_produces-answerable) plus a per-`routing_source` resolved/total breakdown, so a row count can
+   never be mistaken for edge coverage.
+
+Tests: 5 new resolution cases (`@Value`→yaml, getter→constant, chained config getter→properties,
+cross-file qualified constant, unresolved-config candidate) — 13 producer tests, 117 total, all pass
+on synthetic fixtures (no real repo names in-repo).
+
+---
+
+## Part 5 — RE-VERIFY (internal Codex, real mirror) — WITH AN ACCEPTANCE GATE
+
+Re-run `python make_message_map.py` over the full mirror (outputs under `.tmp/`, live index
+untouched) and relay:
+
+1. **Resolved-destination delta.** How many added records now have `resolution_status: resolved`,
+   broken down by `routing_source` (the new stdout breakdown gives this directly).
+2. **`usable_topic_producer_edges`** — the who_produces-answerable count. Must rise above 10.
+3. **Spot-check 10 newly-resolved edges** against their cited `path:line`: is the resolved
+   destination the real topic/queue that send publishes to? Report the resolution false-positive rate.
+4. **No regression:** consumer edges stay ~699; identity false-positive rate stays ~0.
+
+**Acceptance gate (Part-3 recommendation 5) — promote to the live index only if ALL hold:**
+- resolved-destination delta **> 0** (v1 was 0), and
+- `usable_topic_producer_edges` **> 10** (a measurable `who_produces(topic)` improvement), and
+- resolution spot-check false-positive rate is low (≤ ~1/10), and
+- consumer count does not regress.
+
+If the gate passes, promote the CSV; otherwise relay the failing spot-checks so Claude can extend the
+resolver (likely candidates: deeper nested getters, enum-backed topic registries, or a CodeGraph
+pass for cross-repo `getTopicName` chains the repo-local resolver can't reach).
 
 ## Guardrails
 

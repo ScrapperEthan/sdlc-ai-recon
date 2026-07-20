@@ -95,6 +95,125 @@ class ProducerExtractTests(unittest.TestCase):
         self.assertEqual(records, [])
 
 
+_ORDER_TOPIC = "hrn.hase.wpb.notification.order-cm_push"
+_ORDER_QUEUE = "hrn.hase.wpb.notification.order-otx_queue"
+
+# @Value field (-> yaml) and a getter (-> in-repo constant), the two dominant real-mirror cases.
+_ORDER_PRODUCER = (
+    "public class OrderEventProducer extends AbstractEventProducer {\n"
+    "  private KafkaTemplate kafkaTemplate;\n"
+    "  private EventConfig eventConfig;\n"
+    '  @Value("${notification.order.topic}") private String orderTopic;\n'
+    "  void a() { kafkaTemplate.send(orderTopic, event); }\n"
+    "  void b() { kafkaTemplate.send(eventConfig.getTopicName(), event); }\n"
+    "}\n"
+)
+_EVENT_CONFIG = (
+    "public class EventConfig {\n"
+    f'  private static final String ORDER_TOPIC = "{_ORDER_TOPIC}";\n'
+    "  public String getTopicName() { return ORDER_TOPIC; }\n"
+    "}\n"
+)
+_ORDER_YML = f"notification:\n  order:\n    topic: {_ORDER_TOPIC}\n"
+
+# A chained config getter: config.getQueue() -> getQueue() returns an @Value field -> .properties.
+_QUEUE_CONFIG = (
+    "public class QueueConfig {\n"
+    '  @Value("${orders.queue.name}") private String queueName;\n'
+    "  public String getQueue() { return queueName; }\n"
+    "}\n"
+)
+_QUEUE_SENDER = (
+    "public class OrderQueueSender {\n"
+    "  private JmsTemplate jmsTemplate;\n"
+    "  private QueueConfig config;\n"
+    "  void run() { jmsTemplate.convertAndSend(config.getQueue(), payload); }\n"
+    "}\n"
+)
+# A constant defined in a *different* file in the same repo (qualified reference).
+_TOPICS = f'public class Topics {{\n  public static final String PUSH_TOPIC = "{_ORDER_TOPIC}";\n}}\n'
+_PUSH_PRODUCER = (
+    "public class PushProducer extends AbstractEventProducer {\n"
+    "  private KafkaTemplate kafkaTemplate;\n"
+    "  void s() { kafkaTemplate.send(Topics.PUSH_TOPIC, event); }\n"
+    "}\n"
+)
+
+
+class ProducerResolutionTests(unittest.TestCase):
+    """RUNBOOK-42: the send arg is rarely a literal; resolve it via the per-repo index."""
+
+    def _scan(self, tmp, files):
+        for rel, text in files.items():
+            _write(os.path.join(tmp, "prod", rel), text)
+        return pe.scan_repo("prod", os.path.join(tmp, "prod"))
+
+    def _dest_for(self, records, symbol_substr):
+        hits = [r for r in records if symbol_substr in r.get("destination_expression", "")]
+        self.assertTrue(hits, f"no record whose expr contains {symbol_substr!r}")
+        return hits[0]
+
+    def test_value_field_resolves_through_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self._scan(tmp, {
+                "src/main/java/OrderEventProducer.java": _ORDER_PRODUCER,
+                "src/main/java/EventConfig.java": _EVENT_CONFIG,
+                "src/main/resources/application.yml": _ORDER_YML,
+            })
+        rec = self._dest_for(records, "orderTopic")
+        self.assertEqual(rec["destination"], _ORDER_TOPIC)
+        self.assertEqual(rec["routing_source"], "config")
+        self.assertEqual(rec["resolution_status"], "resolved")
+        self.assertEqual(rec["confidence"], "high")  # confirmed KafkaTemplate receiver
+
+    def test_getter_resolves_through_in_repo_constant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self._scan(tmp, {
+                "src/main/java/OrderEventProducer.java": _ORDER_PRODUCER,
+                "src/main/java/EventConfig.java": _EVENT_CONFIG,
+                "src/main/resources/application.yml": _ORDER_YML,
+            })
+        rec = self._dest_for(records, "getTopicName")
+        self.assertEqual(rec["destination"], _ORDER_TOPIC)
+        self.assertEqual(rec["routing_source"], "builder")
+        self.assertEqual(rec["resolution_status"], "resolved")
+
+    def test_chained_config_getter_resolves_through_properties(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self._scan(tmp, {
+                "src/main/java/QueueConfig.java": _QUEUE_CONFIG,
+                "src/main/java/OrderQueueSender.java": _QUEUE_SENDER,
+                "src/main/resources/application.properties": f"orders.queue.name={_ORDER_QUEUE}\n",
+            })
+        rec = self._dest_for(records, "getQueue")
+        self.assertEqual(rec["destination"], _ORDER_QUEUE)
+        self.assertEqual(rec["routing_source"], "builder")
+        self.assertEqual(rec["resolution_status"], "resolved")
+
+    def test_cross_file_qualified_constant_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self._scan(tmp, {
+                "src/main/java/PushProducer.java": _PUSH_PRODUCER,
+                "src/main/java/Topics.java": _TOPICS,
+            })
+        rec = self._dest_for(records, "PUSH_TOPIC")
+        self.assertEqual(rec["destination"], _ORDER_TOPIC)
+        self.assertEqual(rec["routing_source"], "constant")
+        self.assertEqual(rec["resolution_status"], "resolved")
+
+    def test_value_field_unresolved_without_yaml_stays_config_candidate(self):
+        # @Value key present but no yaml to resolve it -> kept as a config candidate, not dropped
+        # and not mislabeled runtime-unresolved.
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self._scan(tmp, {
+                "src/main/java/OrderEventProducer.java": _ORDER_PRODUCER,
+                "src/main/java/EventConfig.java": _EVENT_CONFIG,
+            })
+        rec = self._dest_for(records, "orderTopic")
+        self.assertEqual(rec["resolution_status"], "unresolved")
+        self.assertEqual(rec["routing_source"], "config")
+
+
 class ProducerIntegrationTests(unittest.TestCase):
     def test_main_appends_producer_rows_and_pairs_with_consumer(self):
         import csv

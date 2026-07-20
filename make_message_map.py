@@ -18,7 +18,7 @@ import csv
 import json
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from retriever import config
@@ -260,10 +260,26 @@ def main(argv=None):
     for label, count in rows:
         print(f"{label:32} {count:6d}")
     producer_repos = {row["producer_repo"] for row in producer_rows if row.get("producer_repo")}
-    resolved = sum(1 for row in producer_rows if row.get("resolution_status") == "resolved")
-    print(f"{'producer_edges_extracted':32} {len(producer_rows):6d}")
+    resolved_rows = [row for row in producer_rows if row.get("resolution_status") == "resolved"]
+    resolved = len(resolved_rows)
+    # A "usable producer edge" answers who_produces(<topic>): it needs a resolved destination. Count
+    # distinct producer_repo+destination pairs so the row total (candidates) can't be mistaken for it.
+    usable_edges = {(row.get("producer_repo"), row.get("destination")) for row in resolved_rows}
+    resolved_repos = {row.get("producer_repo") for row in resolved_rows}
+    print(f"{'producer_records_extracted':32} {len(producer_rows):6d}   (candidates, not edges)")
     print(f"{'producer_repos':32} {len(producer_repos):6d}")
     print(f"{'producer_edges_resolved_dest':32} {resolved:6d}")
+    print(f"{'usable_topic_producer_edges':32} {len(usable_edges):6d}   (who_produces answerable)")
+    print(f"{'producer_repos_with_resolved':32} {len(resolved_repos):6d}")
+    print("\nby routing_source (resolved / total):")
+    totals, res = Counter(), Counter()
+    for row in producer_rows:
+        src = row.get("routing_source") or "?"
+        totals[src] += 1
+        if row.get("resolution_status") == "resolved":
+            res[src] += 1
+    for src in sorted(totals):
+        print(f"  {src:26} {res[src]:6d} / {totals[src]:<6d}")
     print(f"\nWrote {args.edges_out}\nWrote {args.channels_out}")
     return 0
 

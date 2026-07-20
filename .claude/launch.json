@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webapp-mock",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "webapp.server"],
+      "port": 8765,
+      "env": { "LLM_MOCK": "1" }
+    }
+  ]
+}

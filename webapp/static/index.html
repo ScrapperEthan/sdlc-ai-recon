@@ -57,6 +57,10 @@
       var(--sidebar);
     color: var(--sidebar-ink);
     border-right: 1px solid rgba(255, 255, 255, .12);
+    position: sticky;
+    top: 0;
+    max-height: 100vh;
+    overflow-y: auto;
   }
 
   .brand {
@@ -103,6 +107,126 @@
     font-weight: 700;
     letter-spacing: .08em;
     text-transform: uppercase;
+  }
+
+  /* Operating Mode / Retrieval Tools are reference info, not the main task — collapsed by default
+     (native <details>, no JS needed) so the sessions list above gets the sidebar's room. */
+  details.sidebar-section summary.sidebar-title {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0;
+  }
+  details.sidebar-section summary.sidebar-title::-webkit-details-marker { display: none; }
+  details.sidebar-section summary.sidebar-title::after {
+    content: '▸';
+    font-size: 11px;
+    color: var(--sidebar-muted);
+    transition: transform .15s ease;
+  }
+  details.sidebar-section[open] summary.sidebar-title::after { transform: rotate(90deg); }
+  details.sidebar-section .scope-list,
+  details.sidebar-section .tool-list {
+    margin-top: 10px;
+  }
+  /* .scope-list/.tool-list set display:grid unconditionally below (shared with any future non-
+     collapsible use); a closed <details> only hides direct children via the UA stylesheet, which
+     that unconditional display:grid on this SAME element then overrides. Force it back off. */
+  details.sidebar-section:not([open]) .scope-list,
+  details.sidebar-section:not([open]) .tool-list {
+    display: none;
+  }
+
+  .sidebar-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0 0 10px;
+  }
+  .sidebar-title-row .sidebar-title { margin: 0; }
+
+  .sidebar-new-session {
+    padding: 4px 11px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .12);
+    color: var(--sidebar-ink);
+    border: 1px solid rgba(255, 255, 255, .2);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .sidebar-new-session:hover:not(:disabled),
+  .sidebar-new-session:focus-visible:not(:disabled) {
+    background: rgba(255, 255, 255, .2);
+    border-color: rgba(255, 255, 255, .32);
+    outline: 0;
+  }
+  .sidebar-new-session:disabled { opacity: .5; cursor: progress; }
+
+  .sessions-section {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .session-list.is-busy { pointer-events: none; opacity: .6; }
+
+  .session-list-empty {
+    margin: 0;
+    padding: 10px 2px;
+    color: var(--sidebar-muted);
+    font-size: 13px;
+  }
+
+  .session-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 9px 11px;
+    border-radius: 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--sidebar-ink);
+    text-align: left;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .session-item:hover:not(:disabled) { background: rgba(255, 255, 255, .08); }
+  .session-item:focus-visible { outline: 2px solid rgba(255, 255, 255, .4); outline-offset: 1px; }
+  .session-item.active {
+    background: rgba(255, 255, 255, .14);
+    border-color: rgba(255, 255, 255, .22);
+  }
+
+  .session-item-title {
+    font-size: 13.5px;
+    font-weight: 650;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-item-meta {
+    font-size: 11.5px;
+    color: var(--sidebar-muted);
+  }
+
+  .sidebar-session-meta {
+    margin: 10px 2px 0;
+    color: var(--sidebar-muted);
+    font-size: 11.5px;
   }
 
   .scope-list,
@@ -195,89 +319,35 @@
     outline: 0;
   }
 
+  /* LLM connection is an actionable, operationally-important status (shared capacity vs your own
+     endpoint), not a passive badge like "No repo writes" — give it a visually distinct treatment. */
+  #llm-button {
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    border-color: #bcd2fb;
+    font-weight: 750;
+  }
+  #llm-button::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  #llm-button:hover,
+  #llm-button:focus-visible {
+    background: #dfeaff;
+    border-color: var(--accent);
+  }
+
   .workspace {
     min-height: 0;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto;
     gap: 14px;
     padding: 24px 28px 20px;
-  }
-
-  .session-toolbar {
-    max-width: 980px;
-    width: 100%;
-    margin: 0 auto;
-    display: flex;
-    align-items: end;
-    gap: 12px;
-  }
-
-  .session-picker {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .session-picker label {
-    display: block;
-    margin: 0 0 7px 2px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-  }
-
-  .session-picker select {
-    width: 100%;
-    height: 46px;
-    color: var(--ink);
-    background: rgba(255, 255, 255, .92);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 0 14px;
-    outline: 0;
-  }
-
-  .session-picker select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
-  }
-
-  .session-actions {
-    display: grid;
-    gap: 8px;
-  }
-
-  .secondary-button {
-    min-width: 132px;
-    height: 46px;
-    padding: 0 16px;
-    color: var(--accent-strong);
-    background: #f8fbff;
-    border: 1px solid #cddcf8;
-    border-radius: 12px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: border-color .16s ease, background .16s ease, transform .16s ease;
-  }
-
-  .secondary-button:hover:not(:disabled),
-  .secondary-button:focus-visible:not(:disabled) {
-    background: #eef4ff;
-    border-color: #9bb7ea;
-    outline: 0;
-    transform: translateY(-1px);
-  }
-
-  .secondary-button:disabled {
-    opacity: .58;
-    cursor: progress;
-  }
-
-  .session-meta {
-    margin: 0;
-    color: var(--muted);
-    font-size: 12px;
   }
 
   #log {
@@ -646,8 +716,6 @@
       justify-content: flex-start;
       width: 100%;
     }
-    .session-toolbar { flex-direction: column; align-items: stretch; }
-    .secondary-button { width: 100%; }
   }
 
   /* citations: make repo/path:line references pop as evidence */
@@ -896,24 +964,32 @@
         </span>
       </div>
 
-      <section class="sidebar-section">
-        <p class="sidebar-title">Operating Mode</p>
+      <section class="sidebar-section sessions-section" aria-label="Saved sessions">
+        <div class="sidebar-title-row">
+          <p class="sidebar-title">Sessions</p>
+          <button id="new-session" class="sidebar-new-session" type="button">+ New</button>
+        </div>
+        <div id="session-list" class="session-list" role="list"></div>
+        <p id="session-meta" class="sidebar-session-meta">Sessions are saved locally in JSON for internal testing.</p>
+      </section>
+
+      <details class="sidebar-section">
+        <summary class="sidebar-title">Operating Mode</summary>
         <ul class="scope-list">
           <li><strong>Repository access</strong><span class="status-pill">Read-only</span></li>
           <li><strong>Evidence style</strong><span>repo/path:line</span></li>
-          <li><strong>Primary users</strong><span>Engineers</span></li>
         </ul>
-      </section>
+      </details>
 
-      <section class="sidebar-section">
-        <p class="sidebar-title">Retrieval Tools</p>
+      <details class="sidebar-section">
+        <summary class="sidebar-title">Retrieval Tools</summary>
         <ul class="tool-list">
           <li title="Which repos are affected if you change a given repo"><strong>Impact</strong><span>what a change breaks</span></li>
           <li title="Which service publishes a message to a queue/topic, and which service consumes it"><strong>Message routing</strong><span>who sends &amp; receives</span></li>
           <li title="Search the actual source code and return exact file:line"><strong>Code search</strong><span>find &amp; cite source</span></li>
           <li title="Synchronous call paths — which method calls which"><strong>Call graph</strong><span>who calls what</span></li>
         </ul>
-      </section>
+      </details>
     </aside>
 
     <main class="main">
@@ -932,19 +1008,6 @@
       </header>
 
       <section class="workspace">
-        <div class="session-toolbar" aria-label="Saved sessions">
-          <div class="session-picker">
-            <label for="session-select">Session</label>
-            <select id="session-select">
-              <option value="">No saved sessions yet</option>
-            </select>
-          </div>
-          <div class="session-actions">
-            <button id="new-session" class="secondary-button" type="button">New session</button>
-            <p id="session-meta" class="session-meta">Sessions are saved locally in JSON for internal testing.</p>
-          </div>
-        </div>
-
         <div id="log" aria-live="polite">
           <div id="empty" class="empty-state">
             <div>
@@ -1027,7 +1090,7 @@
 <script>
 const log = document.getElementById('log'), q = document.getElementById('q'),
       f = document.getElementById('f'), send = document.getElementById('send'),
-      sessionSelect = document.getElementById('session-select'),
+      sessionListEl = document.getElementById('session-list'),
       newSessionButton = document.getElementById('new-session'),
       sessionMeta = document.getElementById('session-meta'),
       indexStatus = document.getElementById('index-status'),
@@ -1054,36 +1117,43 @@ function setSessionMeta(text) {
 
 function setBusy(isBusy) {
   send.disabled = isBusy;
-  sessionSelect.disabled = isBusy;
+  sessionListEl.classList.toggle('is-busy', isBusy);
   newSessionButton.disabled = isBusy;
   f.setAttribute('aria-busy', String(isBusy));
 }
 
-function sessionOptionLabel(session) {
-  const count = Number(session.message_count || 0);
-  const suffix = count ? ` (${count} message${count === 1 ? '' : 's'})` : '';
-  return `${session.title || 'New session'}${suffix}`;
-}
+function renderSessionList(selectedId = '') {
+  sessionListEl.innerHTML = '';
 
-function updateSessionSelect(selectedId = '') {
-  sessionSelect.innerHTML = '';
-
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = sessions.length ? 'Select a session' : 'No saved sessions yet';
-  placeholder.disabled = sessions.length > 0;
-  placeholder.selected = !selectedId;
-  sessionSelect.appendChild(placeholder);
+  if (!sessions.length) {
+    const emptyNote = document.createElement('p');
+    emptyNote.className = 'session-list-empty';
+    emptyNote.textContent = 'No saved sessions yet';
+    sessionListEl.appendChild(emptyNote);
+    return;
+  }
 
   sessions.forEach((session) => {
-    const option = document.createElement('option');
-    option.value = session.id;
-    option.textContent = sessionOptionLabel(session);
-    option.selected = session.id === selectedId;
-    sessionSelect.appendChild(option);
-  });
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'session-item' + (session.id === selectedId ? ' active' : '');
+    item.dataset.sessionId = session.id;
+    item.setAttribute('role', 'listitem');
+    if (session.id === selectedId) item.setAttribute('aria-current', 'true');
 
-  sessionSelect.value = selectedId || '';
+    const title = document.createElement('span');
+    title.className = 'session-item-title';
+    title.textContent = session.title || 'New session';
+
+    const count = Number(session.message_count || 0);
+    const meta = document.createElement('span');
+    meta.className = 'session-item-meta';
+    meta.textContent = count ? `${count} message${count === 1 ? '' : 's'}` : 'empty';
+
+    item.appendChild(title);
+    item.appendChild(meta);
+    sessionListEl.appendChild(item);
+  });
 }
 
 function syncHistory(messages) {
@@ -1167,7 +1237,7 @@ async function refreshSessions(preferredId = currentSessionId) {
     : (sessions[0] && sessions[0].id) || '';
 
   currentSessionId = nextId || null;
-  updateSessionSelect(currentSessionId);
+  renderSessionList(currentSessionId);
   updateSessionMetaFromSession(sessions.find((session) => session.id === currentSessionId));
   return sessions;
 }
@@ -1178,7 +1248,7 @@ async function loadSession(sessionId) {
     resetLog(true);
     syncHistory([]);
     updateSessionMetaFromSession(null);
-    updateSessionSelect('');
+    renderSessionList('');
     return;
   }
 
@@ -2011,11 +2081,12 @@ llmButton.addEventListener('click', () => {
 });
 document.getElementById('llm-connect').addEventListener('click', connectLlm);
 
-sessionSelect.addEventListener('change', async () => {
-  if (sessionSelect.value === currentSessionId) return;
+sessionListEl.addEventListener('click', async (event) => {
+  const item = event.target.closest('.session-item');
+  if (!item || item.dataset.sessionId === currentSessionId) return;
   setBusy(true);
   try {
-    await loadSession(sessionSelect.value);
+    await loadSession(item.dataset.sessionId);
   } catch (error) {
     setSessionMeta(`Failed to load session: ${error.message}`);
   } finally {

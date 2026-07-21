@@ -223,3 +223,38 @@ The analysis §12 MDC **runtime** risks (UseCaseService `findById` no status fil
 rule_text null guard; null-priority comparator NPE; PUSH+INBOX no director; entity schema drift) are for
 the MDC/runtime owner. We make the analysis **see and report** them; we do **not** modify product runtime
 code.
+
+## Round A — post-verification follow-ups (RUNBOOK-45 Part A, box run on real UAT, build `143e6b5`)
+
+Part A **PASSED on real UAT**: env=UAT; `status`→`status`; **cross-env route join refused** (no
+297/56/2513); PEGA `configured=479` (not ~87); canonicalization / active-filter / endpoint-resolver /
+pagination all correct; illegal cats 33+37; insight-consent Y=3; CSV SHA-256 matches source; no person
+names exposed (owner detail kept in a gitignored `*.local.md`). The data layer is verified. Four fixes
+remain before Round A is "done":
+
+1. **Test isolation (P0 — CI correctness).** With `SDLC_USECASE_DATASET` set to the real UAT dataset,
+   14/243 tests fail (`test_usecase_master` 8, `test_source_system_report` 4,
+   `test_refresh_usecase_quality` 2): the fixtures patch the legacy snapshot path, but the ambient env var
+   wins, so tests read the real 2,810-row data (expect PEGA=2, get 479). **Not a data bug.** Every test
+   that builds a fixture dataset must pin its own env — `unittest.mock.patch.dict(os.environ, {...})` over
+   `SDLC_USECASE_DATASET` (and/or legacy `USECASE_MASTER_CSV`), restored in tearDown. Then **re-run WITH
+   the env var set and confirm 243/243**, to prove no real regression hid among the 14.
+
+2. **`junk_work_stream` over-flags (quality accuracy).** UAT flags 2,405/2,810 (85%) because the heuristic
+   treats `value.isdigit()` as junk. If `work_stream_name` is legitimately a numeric project id this is a
+   false positive. Separate sentinel junk (`invalid/test/n-a/…`) from numeric ids; stop counting pure
+   numerics as junk unless a Part-B owner confirms they are meaningless. (Also a Part-B question.)
+
+3. **CLI markdown drops the endpoint repo names (the upstream win).** Structured output carries repo +
+   confidence, but the markdown renderer prints only `entrypoint_traceable=True`. Render the resolved
+   endpoint repo(s) + confidence in the use-case / source-system markdown — that repo name is the payload.
+
+4. **CLI has no `offset/limit`.** Pagination only reached `webapp.tools.source_system_impact`; a direct
+   `impact_report.py source-system:MDC` dumps all ~880. Add the same default top-N cap (+ an "N of M"
+   note) to the CLI path.
+
+Minor (optional): the global quality funnel reports `configured/expression_ready` over all master rows
+(2,784 / 2,637); the readiness story reads better scoped to the 2,697 Active (as analysis §5.2 did).
+
+**Still outstanding: RUNBOOK-45 Part B** — the business/data + runtime owner questions were not part of
+this box run; they remain open and steer Round B (rule_text grammar especially).

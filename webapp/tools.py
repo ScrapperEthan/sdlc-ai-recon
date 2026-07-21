@@ -79,9 +79,19 @@ TOOLS = [
             "from the `amet-mdc-*` repo family) that feeds ~880 use cases. This tool answers the "
             "REPO/code question ('what repos/APIs does MDC have', 'where does MDC code live'). If the "
             "question is instead 'MDC 出问题影响哪些 use case / 渠道' or 'MDC 改动要通知谁' (business-"
-            "impact / who-to-notify), use `source_system_impact` instead, not this tool.",
+            "impact / who-to-notify), use `source_system_impact` instead, not this tool. "
+            "For 'list the FULL MDC repo list / MDC 完整仓库清单 (including mc-hk-hase-*)', call "
+            "`list_repos(group='mdc')` instead of `query`/`system` — it returns the UNION of the "
+            "`amet-mdc-*` name family and the business-sheet `mdc_common` tag in one shot, with a hard "
+            "`count` and a per-repo `via` (`amet-mdc-prefix` or `mdc_common`) showing why each repo is "
+            "in the group. mc-hk-hase-* members only ever get in via `mdc_common` (the MDC business "
+            "sheet's MDC-Common flag) — NEVER via the name, since they don't contain 'mdc' and their "
+            "`system` tag is 'hase', not 'amet-mdc'. **Copy `count` verbatim into your answer — never "
+            "count or subset the `repos` list yourself.** `mdc_common=true` (without `group`) filters "
+            "the plain query/system/etc. path down to just the business-sheet-flagged repos.",
             {"query": {"type": "string"}, "mode": {"type": "string"},
-             "channel": {"type": "string"}, "system": {"type": "string"}}),
+             "channel": {"type": "string"}, "system": {"type": "string"},
+             "group": {"type": "string"}, "mdc_common": {"type": "boolean"}}),
     _schema("search_code", "Search the read-only mirror; returns 'path:line:text'. Pass `repos` "
             "(a list of exact repo ids, e.g. from `list_repos`) to scope the search to just those "
             "repos instead of scanning the whole ~390-repo mirror — much faster and avoids noise "
@@ -173,11 +183,14 @@ def dispatch(name, a):
         return msg.reverse_lookup_use_cases(a["topic"], a.get("exact", True), a.get("limit", 50))
     if name == "list_repos":
         try:
+            if (a.get("group") or "").strip().lower() == "mdc":
+                return repo_tags.mdc_repos()
             return repo_tags.filter_repos(
                 channel=a.get("channel") or None,
                 mode=a.get("mode") or None,
                 system=a.get("system") or None,
                 query=a.get("query") or None,
+                mdc_common=a.get("mdc_common"),
             )
         except FileNotFoundError:
             return {"ok": False, "error": "repo_tags.json not built; run make_repo_tags.py"}

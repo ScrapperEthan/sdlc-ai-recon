@@ -45,12 +45,32 @@ class SourceSystemToolTests(unittest.TestCase):
         sentinel = {"filters": {"query": "mdc"}, "count": 1, "repos": ["amet-mdc-hsbc-batch-email-job"]}
         with mock.patch.object(tools.repo_tags, "filter_repos", return_value=sentinel) as filt:
             result = tools.dispatch("list_repos", {"query": "mdc", "mode": "api"})
-        filt.assert_called_once_with(channel=None, mode="api", system=None, query="mdc")
+        filt.assert_called_once_with(channel=None, mode="api", system=None, query="mdc", mdc_common=None)
         self.assertEqual(result, sentinel)
 
     def test_list_repos_missing_repo_tags_json_is_clean_error_not_a_crash(self):
         with mock.patch.object(tools.repo_tags, "filter_repos", side_effect=FileNotFoundError("no repo_tags.json")):
             result = tools.dispatch("list_repos", {"query": "mdc"})
+        self.assertFalse(result["ok"])
+        self.assertIn("repo_tags.json", result["error"])
+
+    def test_list_repos_group_mdc_delegates_to_mdc_repos(self):
+        # group="mdc" bypasses filter_repos entirely — it needs the amet-mdc-prefix UNION mdc_common
+        # union that plain query/system filtering can't express (mc-hk-hase-* repos have neither).
+        sentinel = {"group": "mdc", "count": 2, "repos": [
+            {"repo": "amet-mdc-hsbc-batch-email-job", "via": ["amet-mdc-prefix"]},
+            {"repo": "mc-hk-hase-sms-job", "via": ["mdc_common"]},
+        ], "by_source": {"amet-mdc": 1, "mdc_common": 1}}
+        with mock.patch.object(tools.repo_tags, "mdc_repos", return_value=sentinel) as mdc, \
+                mock.patch.object(tools.repo_tags, "filter_repos") as filt:
+            result = tools.dispatch("list_repos", {"group": "mdc"})
+        mdc.assert_called_once_with()
+        filt.assert_not_called()
+        self.assertEqual(result, sentinel)
+
+    def test_list_repos_group_mdc_missing_repo_tags_json_is_clean_error_not_a_crash(self):
+        with mock.patch.object(tools.repo_tags, "mdc_repos", side_effect=FileNotFoundError("no repo_tags.json")):
+            result = tools.dispatch("list_repos", {"group": "MDC"})
         self.assertFalse(result["ok"])
         self.assertIn("repo_tags.json", result["error"])
 

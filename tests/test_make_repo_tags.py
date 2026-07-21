@@ -45,6 +45,31 @@ ROUTE_TAGS = {
 }
 
 
+MDC_GROUP_TAGS = {
+    # amet-mdc-* member via the name-derived `system` tag.
+    "amet-mdc-hsbc-batch-email-job": {
+        "system": "amet-mdc",
+        "channel": ["email"],
+        "mode": "batch",
+    },
+    # mc-hk-hase-* repo that is an MDC member ONLY via the business-sheet mdc_common flag — its
+    # name has no "mdc" in it and its system tag is "hase", not "amet-mdc".
+    "mc-hk-hase-sms-job": {
+        "system": "hase",
+        "channel": ["sms"],
+        "mode": "realtime",
+        "mdc_common": True,
+    },
+    # An ordinary hase repo with no MDC signal at all — must be excluded from both mdc_common
+    # filtering and mdc_repos().
+    "mc-hk-hase-other-job": {
+        "system": "hase",
+        "channel": ["push"],
+        "mode": "realtime",
+    },
+}
+
+
 MDC_HEADERS = [
     "Repository", "MDC Common", "SMS", "EMAIL", "PUSH", "WhatsAPP", "Letter", "Wechat",
     "Others", "Remark", "Batch/Realtime(B/R)", "Maraketing/Servicing(M/S)",
@@ -365,6 +390,44 @@ class MakeRepoTagsTests(unittest.TestCase):
             result = repo_tags.filter_repos(system="hase", path=tags_path)
             self.assertEqual(result["repos"], ["mc-hk-hase-svc-rt-alert-sms-api"])
             self.assertEqual(result["filters"]["query"], "")
+
+    def test_filter_repos_mdc_common_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump(MDC_GROUP_TAGS, handle)
+
+            result = repo_tags.filter_repos(mdc_common=True, path=tags_path)
+            self.assertEqual(result["repos"], ["mc-hk-hase-sms-job"])
+            self.assertEqual(result["count"], 1)
+            self.assertTrue(result["filters"]["mdc_common"])
+
+            # Back-compat: mdc_common=None (the default) filters nothing.
+            unfiltered = repo_tags.filter_repos(path=tags_path)
+            self.assertEqual(len(unfiltered["repos"]), 3)
+            self.assertFalse(unfiltered["filters"]["mdc_common"])
+
+    def test_mdc_repos_union_of_prefix_and_business_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump(MDC_GROUP_TAGS, handle)
+
+            result = repo_tags.mdc_repos(path=tags_path)
+            self.assertEqual(result["group"], "mdc")
+            self.assertEqual(result["count"], 2)
+            by_repo = {item["repo"]: item["via"] for item in result["repos"]}
+            self.assertEqual(by_repo["amet-mdc-hsbc-batch-email-job"], ["amet-mdc-prefix"])
+            self.assertEqual(by_repo["mc-hk-hase-sms-job"], ["mdc_common"])
+            self.assertNotIn("mc-hk-hase-other-job", by_repo)
+            self.assertEqual(result["by_source"], {"amet-mdc": 1, "mdc_common": 1})
+
+    def test_mdc_repos_missing_file_raises_not_swallowed(self):
+        # mdc_repos uses missing_ok=False like filter_repos; the tools.dispatch layer (not this
+        # function) is responsible for turning that into a clean {"ok": False} error.
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                repo_tags.mdc_repos(path=os.path.join(tmp, "missing.json"))
 
     def test_repos_route_filters_and_missing_file_404(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -64,7 +64,7 @@ def channels_for_repo(repo, tags=None):
 
 
 def filter_repos(channel=None, mode=None, system=None, bundle=None, query=None,
-                  path="index/repo_tags.json"):
+                  mdc_common=None, path="index/repo_tags.json"):
     payload = load(path=path, missing_ok=False)
     want_channel = (channel or "").strip().lower()
     want_mode = (mode or "").strip().lower()
@@ -85,6 +85,8 @@ def filter_repos(channel=None, mode=None, system=None, bundle=None, query=None,
             continue
         if want_query and want_query not in repo.lower():
             continue
+        if mdc_common and not meta.get("mdc_common"):
+            continue
         repos.append(repo)
 
     return {
@@ -94,7 +96,32 @@ def filter_repos(channel=None, mode=None, system=None, bundle=None, query=None,
             "system": system or "",
             "bundle": bundle or "",
             "query": query or "",
+            "mdc_common": bool(mdc_common),
         },
         "count": len(repos),
         "repos": repos,
+    }
+
+
+def mdc_repos(path="index/repo_tags.json"):
+    """The MDC system's repo footprint: amet-mdc-* (name-derived) UNION mdc_common (business sheet).
+    Each repo is labeled with why it's included, so mc-hk-hase-* members are traceable to the sheet."""
+    payload = load(path=path, missing_ok=False)
+    out = []
+    for repo, meta in sorted(payload.items()):
+        via = []
+        if (meta.get("system") or "").lower() == "amet-mdc":
+            via.append("amet-mdc-prefix")
+        if meta.get("mdc_common"):
+            via.append("mdc_common")
+        if via:
+            out.append({"repo": repo, "via": via})
+    return {
+        "group": "mdc",
+        "count": len(out),
+        "repos": out,
+        "by_source": {
+            "amet-mdc": sum(1 for r in out if "amet-mdc-prefix" in r["via"]),
+            "mdc_common": sum(1 for r in out if "mdc_common" in r["via"]),
+        },
     }

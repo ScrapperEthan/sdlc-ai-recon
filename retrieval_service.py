@@ -86,10 +86,17 @@ def _repos_payload(qs):
 
 def _source_system_impact_payload(qs):
     value = _required(_str(qs, "source_system"), "source_system")
-    return impact_report.build_report(f"source-system:{value}")
+    include_inactive = _str(qs, "include_inactive").lower() in {"1", "true"}
+    return impact_report.build_report(
+        f"source-system:{value}",
+        include_inactive=include_inactive,
+        offset=_int(qs, "offset", 0),
+        limit=_int(qs, "limit", 50),
+    )
 
 
 def _source_systems_payload():
+    # Canonicalized (case/format variants folded, raw_variants listed) — see usecase_catalog.py.
     items = usecase_master.source_systems()
     return {"items": items, "count": len(items)}
 

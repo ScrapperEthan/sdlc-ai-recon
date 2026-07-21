@@ -21,8 +21,20 @@ class SourceSystemToolTests(unittest.TestCase):
         sentinel = {"target": {"kind": "source-system"}}
         with mock.patch.object(tools.impact_report, "build_report", return_value=sentinel) as build:
             result = tools.dispatch("source_system_impact", {"source_system": "PEGA"})
-        build.assert_called_once_with("source-system:PEGA")
+        # Default pagination (top-50 + include_inactive=False) so MDC-scale sources don't overflow
+        # the LLM context by default (B8) — the funnel counts stay full regardless.
+        build.assert_called_once_with(
+            "source-system:PEGA", include_inactive=False, offset=0, limit=50)
         self.assertEqual(result, sentinel)
+
+    def test_pagination_args_pass_through(self):
+        sentinel = {"target": {"kind": "source-system"}}
+        with mock.patch.object(tools.impact_report, "build_report", return_value=sentinel) as build:
+            tools.dispatch("source_system_impact", {
+                "source_system": "MDC", "include_inactive": True, "offset": 50, "limit": 25,
+            })
+        build.assert_called_once_with(
+            "source-system:MDC", include_inactive=True, offset=50, limit=25)
 
     def test_list_source_systems_delegates(self):
         with mock.patch.object(tools.usecase_master, "source_systems", return_value=[{"source_system": "PEGA"}]):

@@ -215,7 +215,14 @@ def affected_use_cases(topics):
         if master:
             out["name"] = master["name"]
             out["source_system"] = master["source_system"]
-            out["owner"] = master["modified_by"] or master["created_by"]
+            # Layered owners (defect #7): prefer a real Ext business owner; fall back to the
+            # master's created_by/modified_by (maintenance fields) when Ext is absent — same
+            # priority as usecase_master.owners_for(), so "owner" here never means "who last
+            # touched the config row" when a real business owner is on file.
+            owners = usecase_master.owners_for([item["use_case"]])
+            out["owner"] = (owners["business_owners"][0] if owners["business_owners"]
+                            else (master["modified_by"] or master["created_by"]))
+            out["owners"] = owners
             out["citations"] = sorted(set(out["citations"]) | {master["citation"]})
         items.append(out)
     return items

@@ -78,26 +78,41 @@ class SourceSystemReportTests(_FixtureMixin, unittest.TestCase):
     def test_parse_target_recognizes_source_system(self):
         self.assertEqual(impact_report.parse_target("source-system:PEGA"), ("source-system", "PEGA"))
 
-    def test_source_system_report_splits_routed_and_catalog_only(self):
+    def test_source_system_report_coverage_funnel_and_layered_owners(self):
+        # This fixture has no tbl_use_case_channel_rule/tbl_use_case_ext (legacy back-compat
+        # dataset — pre-Round-A exports only ever had tbl_use_case), so both members are
+        # catalog_only under the new coverage funnel (B6), which REPLACES the old routed-vs-
+        # catalog-only split that read has_route off the dev/SCT snapshot regardless of which
+        # environment the active dataset actually declared (defect #2). has_route/async routes
+        # still populate here because this fixture's route snapshot IS same-environment (legacy
+        # mode has exactly one file in play, never a cross-environment join).
         with tempfile.TemporaryDirectory() as tmp:
             recon_dir, index_dir = self._write_fixture_root(tmp)
             with ExitStack() as stack:
                 self._patch_config(stack, tmp, recon_dir, index_dir)
                 report = impact_report.build_report("source-system:PEGA")
 
-        self.assertEqual(report["target"]["use_case_count"], 2)
-        self.assertEqual(report["target"]["routed_count"], 1)
-        self.assertEqual(report["target"]["catalog_only_count"], 1)
-        routed_ids = {item["use_case_id"] for item in report["use_cases"]["routed"]}
-        catalog_ids = {item["use_case_id"] for item in report["use_cases"]["catalog_only"]}
-        self.assertEqual(routed_ids, {"UC001"})
-        self.assertEqual(catalog_ids, {"UC002"})
-        self.assertIn("1/2", report["confidence_banner"])
-        self.assertEqual(report["owners"], ["alice", "bob"])
+        target = report["target"]
+        self.assertEqual(target["use_case_count"], 2)
+        self.assertEqual(target["active_count"], 2)
+        self.assertEqual(target["inactive_count"], 0)
+        self.assertEqual(target["coverage"]["configured"], 0)
+        self.assertEqual(target["coverage"]["catalog_only"], 2)
+        self.assertTrue(target["route_dimension"]["available"])
+        ids = {item["use_case_id"] for item in report["use_cases"]["items"]}
+        self.assertEqual(ids, {"UC001", "UC002"})
+        has_route = {item["use_case_id"]: item["has_route"] for item in report["use_cases"]["items"]}
+        self.assertTrue(has_route["UC001"])
+        self.assertFalse(has_route["UC002"])
+        self.assertIn("catalog_only", report["confidence_banner"])
+        # No Ext table -> only config_maintainers (created_by/modified_by) populate (defect #7).
+        self.assertEqual(report["owners"], {
+            "business_owners": [], "cost_governance": [], "config_maintainers": ["alice", "bob"],
+        })
         self.assertIn("sms", [item["channel"] for item in report["channel_chain"]])
         self.assertTrue(report["citations"])
         # every use-case item is individually cited
-        for item in report["use_cases"]["routed"] + report["use_cases"]["catalog_only"]:
+        for item in report["use_cases"]["items"]:
             self.assertTrue(item["citation"])
 
     def test_unknown_source_system_is_a_clean_error_not_a_stack_trace(self):
@@ -119,8 +134,8 @@ class SourceSystemReportTests(_FixtureMixin, unittest.TestCase):
                 self._patch_config(stack, tmp, recon_dir, index_dir)
                 report = impact_report.build_report("source-system:PEGA")
                 text = impact_report.render_report_markdown(report)
-        self.assertIn("Routed use cases", text)
-        self.assertIn("Catalog-only use cases", text)
+        self.assertIn("Coverage funnel", text)
+        self.assertIn("Use cases (", text)
         self.assertIn("UC001", text)
         self.assertIn("UC002", text)
 

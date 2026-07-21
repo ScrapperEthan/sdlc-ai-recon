@@ -105,14 +105,30 @@ class UsecaseMasterTests(unittest.TestCase):
         self.assertIn("NOT the channel list", um.consent_preflight.__doc__)
 
     def test_owners_for_dedupes_across_ids(self):
-        self.assertEqual(um.owners_for(["UC001", "UC002"]), ["alice", "bob"])
+        # No tbl_use_case_ext in this fixture -> only config_maintainers (created_by/modified_by)
+        # populate; business_owners/cost_governance stay empty rather than crashing (defect #7).
+        self.assertEqual(
+            um.owners_for(["UC001", "UC002"]),
+            {"business_owners": [], "cost_governance": [], "config_maintainers": ["alice", "bob"]},
+        )
 
-    def test_quality_report_join_coverage(self):
+    def test_quality_report_coverage_funnel_and_active_inactive(self):
+        # No channel_rule/ext tables in this fixture -> every UC is catalog_only; all 3 rows are
+        # status=Y so active=3/inactive=0. Replaces the old join_coverage (routed vs master) block,
+        # which computed off the dev/SCT route snapshot regardless of the active dataset's own
+        # environment — that shape is gone (Round A coverage funnel replaces it, B10).
         report = um.quality_report()
-        join = report["join_coverage"]
-        self.assertEqual(join["master_and_routing"], 1)   # UC001
-        self.assertEqual(join["routing_only_orphans"], 0)
-        self.assertEqual(join["master_only_no_route"], 2)  # UC002, UC003
+        self.assertEqual(report["coverage_funnel"]["configured"], 0)
+        self.assertEqual(report["coverage_funnel"]["catalog_only"], 3)
+        self.assertEqual(report["active_inactive"], {
+            "active": 3, "inactive": 0,
+            "examples": {"active": ["UC001", "UC002", "UC003"], "inactive": []},
+        })
+
+    def test_quality_report_column_bindings_present(self):
+        report = um.quality_report()
+        self.assertEqual(report["column_bindings"]["bound"]["status"], "status")
+        self.assertEqual(report["column_bindings"]["ambiguous"], {})
 
 
 if __name__ == "__main__":

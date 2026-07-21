@@ -105,18 +105,23 @@ TOOLS = [
             {"repo": {"type": "string"}}, ["repo"]),
     _schema("source_system_impact",
             "Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which "
-            "Use Cases it feeds, which of those have a traced channel route vs are catalog-only "
-            "(business registration, no traced channel), the channel chain, upstream/downstream "
-            "repos, and the OWNERS to notify on change (change-notification ask). Call this for "
+            "Use Cases it feeds, the Round A coverage funnel (configured/expression_ready/"
+            "entrypoint_traceable/catalog_only — STAGES, never claim 'reaches the customer'), the "
+            "channel chain, upstream/downstream repos, and the layered OWNERS to notify on change "
+            "(business_owners > cost_governance > config_maintainers). Call this for "
             "'PEGA/上游系统 出问题会影响哪些 Use Case / 渠道 / repo', 'L400 接入了哪些流程', or "
-            "'改这个上游系统要通知谁'. `source_system` is the upstream system name (aliases folded "
-            "via source_system_aliases.json if configured). Tier 0 only: this does NOT know channel "
-            "priority or bounce-back fallback yet — always report the confidence_banner split.",
-            {"source_system": {"type": "string"}}, ["source_system"]),
+            "'改这个上游系统要通知谁'. `source_system` is the upstream system name (canonicalized; "
+            "aliases folded via source_system_aliases.json if configured). Disabled use cases are "
+            "excluded unless `include_inactive` is set. The `items` list defaults to the first 50 "
+            "members (MDC ≈ 880 would otherwise overflow context) — use `offset`/`limit` to page "
+            "through the rest; the coverage funnel counts are always the FULL total, never truncated.",
+            {"source_system": {"type": "string"}, "include_inactive": {"type": "boolean"},
+             "offset": {"type": "integer"}, "limit": {"type": "integer"}}, ["source_system"]),
     _schema("list_source_systems",
-            "List distinct upstream business systems (source_system) with their use-case + routed "
-            "counts — the picker for source_system_impact. Call when the user asks 'what upstream "
-            "systems are there' or needs to disambiguate a name.",
+            "List distinct CANONICALIZED upstream business systems (source_system) — folds case/"
+            "format variants (eAlert/e-Alert/…) into one entry with raw_variants listed — plus "
+            "use-case/active/inactive counts. The picker for source_system_impact. Call when the "
+            "user asks 'what upstream systems are there' or needs to disambiguate a name.",
             {}),
     _schema("show_coverage",
             "Render the 392-repo estate overview INLINE, optionally filtered. Call this when the user asks "
@@ -199,7 +204,12 @@ def dispatch(name, a):
         if not value:
             return {"ok": False, "error": "source_system is required"}
         try:
-            return impact_report.build_report(f"source-system:{value}")
+            return impact_report.build_report(
+                f"source-system:{value}",
+                include_inactive=bool(a.get("include_inactive", False)),
+                offset=int(a.get("offset") or 0),
+                limit=int(a.get("limit") or 50),
+            )
         except (FileNotFoundError, ValueError) as error:
             return {"ok": False, "error": str(error)}
     if name == "list_source_systems":

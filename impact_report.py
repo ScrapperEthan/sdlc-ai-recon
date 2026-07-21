@@ -572,36 +572,59 @@ def build_usecase_report(use_case_id, tags):
         report["consent_preflight"] = consent
         extra_cites = {master["citation"]}
         extra_cites.update(check["citation"] for check in consent.get("checks") or [])
+        # Round A fact-only channels (tbl_use_case_channel_rule.channel) + declared endpoint repos
+        # (tbl_use_case_ext.endpoint) — additive; absent tables leave the report unchanged.
+        key = use_case_id.strip().lower()
+        rules = usecase_master.rules_by_use_case_id().get(key) or []
+        ext = usecase_master.ext_by_use_case_id().get(key)
+        if rules:
+            target["channels_declared"] = usecase_master.channels_for_use_case(use_case_id)
+            report["channel_rules"] = rules
+            extra_cites.update(rule["citation"] for rule in rules if rule.get("citation"))
+        if ext:
+            report["ext"] = ext
+            if ext.get("citation"):
+                extra_cites.add(ext["citation"])
+            endpoint_repos = usecase_master.resolve_endpoint(ext.get("endpoint") or "")
+            if endpoint_repos:
+                report["endpoint_repos"] = endpoint_repos
         target["citations"] = sorted(set(target["citations"]) | extra_cites)
     return report
 
 
-def build_source_system_report(value, tags):
-    """Aggregate a source_system's members: routed (traceable to channels) vs catalog-only
-    (business registration, no traced route). Never pads the blast radius with catalog-only
-    members — the confidence_banner says so explicitly."""
-    members = usecase_master.use_cases_for_source_system(value)
+def build_source_system_report(value, tags, include_inactive=False, offset=0, limit=None):
+    """Aggregate a source_system's members using the Round A coverage funnel — configured
+    (>=1 channel rule) / expression_ready (non-blank rule_text) / entrypoint_traceable (endpoint
+    resolves to a known repo) / catalog_only (no rule, no ext) — REPLACING the old routed-vs-
+    catalog-only split, which computed "traced channel" from the dev/SCT route snapshot even when
+    the active dataset is UAT (defect #2). The confidence banner always says which stages a number
+    covers; never presents `configured` as "reaches the customer"."""
+    members = usecase_master.use_cases_for_source_system(
+        value, include_inactive=include_inactive, offset=offset, limit=limit)
     if not members.get("available") or not members.get("items"):
         raise FileNotFoundError(f"unknown target: source-system:{value}")
 
     items = members["items"]
-    routed_items = [item for item in items if item.get("has_route")]
-    catalog_items = [item for item in items if not item.get("has_route")]
+    coverage = usecase_master.source_system_coverage(value)
+    route = usecase_master.route_dimension()
 
     route_rows = []
     topics = []
     seen_topics = set()
-    for item in routed_items:
-        usecase = messages.usecase_route(use_case_id=item["use_case_id"])
-        if not usecase.get("available"):
-            continue
-        for match in usecase.get("matches") or []:
-            topic = (match.get("topic") or "").strip()
-            if not topic or topic in seen_topics:
+    if route["available"]:
+        for item in items:
+            if not item.get("has_route"):
                 continue
-            seen_topics.add(topic)
-            topics.append(topic)
-            route_rows.extend(messages.who_produces(topic) + messages.who_consumes(topic))
+            usecase = messages.usecase_route(use_case_id=item["use_case_id"])
+            if not usecase.get("available"):
+                continue
+            for match in usecase.get("matches") or []:
+                topic = (match.get("topic") or "").strip()
+                if not topic or topic in seen_topics:
+                    continue
+                seen_topics.add(topic)
+                topics.append(topic)
+                route_rows.extend(messages.who_produces(topic) + messages.who_consumes(topic))
 
     deduped = []
     seen = set()
@@ -614,50 +637,61 @@ def build_source_system_report(value, tags):
 
     routes = route_groups(deduped, tags)
     participants = set()
-    for route in routes:
-        participants.update(route["producers"])
-        participants.update(route["consumers"])
+    for route_item in routes:
+        participants.update(route_item["producers"])
+        participants.update(route_item["consumers"])
     upstream, downstream = aggregate_repo_relations(participants, exclude=participants)
     chain = channel_chain(tags, participants, topics, deduped)
     owners = usecase_master.owners_for(item["use_case_id"] for item in items)
 
-    total = len(items)
-    routed_count = len(routed_items)
-    catalog_only_count = total - routed_count
-
     citations = set(item["citation"] for item in items if item.get("citation"))
-    for route in routes:
-        citations.update(route.get("citations") or [])
+    for route_item in routes:
+        citations.update(route_item.get("citations") or [])
     for item in upstream + downstream:
         citations.update(item.get("citations") or [])
     for item in chain:
         citations.update(item.get("citations") or [])
+
+    banner = (
+        f"渠道规则覆盖 {coverage['configured']}/{coverage['total']} 个 Use Case（configured）；"
+        f"其中 {coverage['expression_ready']} 个有可用路由表达式（expression_ready）、"
+        f"{coverage['entrypoint_traceable']} 个可追踪到入口 repo（entrypoint_traceable）；"
+        f"{coverage['catalog_only']} 个仅有业务登记、无渠道规则也无扩展信息（catalog_only）。"
+    )
+    if not route["available"]:
+        banner += f" 路由维度不可用（{route['reason']}）——以上覆盖来自渠道规则/扩展表，不是路由快照。"
 
     return {
         "target": {
             "input": f"source-system:{value}",
             "kind": "source-system",
             "value": value,
-            "use_case_count": total,
-            "routed_count": routed_count,
-            "catalog_only_count": catalog_only_count,
+            "canonical": coverage["canonical"],
+            "display_name": coverage["display_name"],
+            "use_case_count": coverage["total"],
+            "active_count": coverage["active"],
+            "inactive_count": coverage["total"] - coverage["active"],
+            "coverage": {k: coverage[k] for k in
+                         ("configured", "expression_ready", "entrypoint_traceable", "catalog_only")},
+            "route_dimension": route,
         },
-        "use_cases": {"routed": routed_items, "catalog_only": catalog_items},
+        "use_cases": {
+            "items": items, "total": members["total"], "active_count": members["active_count"],
+            "inactive_count": members["inactive_count"], "returned": members["returned"],
+            "truncated": members["truncated"],
+        },
         "topics": topics,
         "async_routes": routes,
         "channel_chain": chain,
         "upstream": upstream,
         "downstream": downstream,
         "owners": owners,
-        "confidence_banner": (
-            f"渠道影响仅覆盖 {routed_count}/{total} 个有路由快照的 Use Case；"
-            f"其余 {catalog_only_count} 个仅有业务登记，无法追踪到渠道。"
-        ),
+        "confidence_banner": banner,
         "citations": sorted(citations),
     }
 
 
-def build_report(target):
+def build_report(target, include_inactive=False, offset=0, limit=None):
     tags = repo_tags.load(missing_ok=True)
     kind, value = parse_target(target)
     if kind == "repo":
@@ -665,7 +699,8 @@ def build_report(target):
     elif kind == "topic":
         report = build_topic_report(value, tags)
     elif kind == "source-system":
-        return build_source_system_report(value, tags)
+        return build_source_system_report(
+            value, tags, include_inactive=include_inactive, offset=offset, limit=limit)
     else:
         report = build_usecase_report(value, tags)
     report["citations"] = flatten_citations(report)
@@ -768,29 +803,34 @@ def render_markdown(report):
 
 def render_source_system_markdown(report):
     target = report["target"]
+    coverage = target["coverage"]
     lines = [
         f"# Impact Report — {target['input']}",
         "",
         "## Target",
-        f"- source_system: `{target['value']}`",
-        f"- Use cases: {target['use_case_count']} total, {target['routed_count']} routed, "
-        f"{target['catalog_only_count']} catalog-only (no traced channel)",
+        f"- source_system: `{target['value']}` (canonical: `{target['canonical']}`, "
+        f"display: {target['display_name']})",
+        f"- Use cases: {target['use_case_count']} total, {target['active_count']} active, "
+        f"{target['inactive_count']} inactive",
+        f"- Coverage funnel: configured {coverage['configured']}, "
+        f"expression_ready {coverage['expression_ready']}, "
+        f"entrypoint_traceable {coverage['entrypoint_traceable']}, "
+        f"catalog_only {coverage['catalog_only']}",
+        f"- Route dimension: {'available' if target['route_dimension']['available'] else 'unavailable'}"
+        + (f" ({target['route_dimension']['reason']})" if target['route_dimension'].get('reason') else ""),
         "",
         "## Confidence",
         report["confidence_banner"],
         "",
-        f"## Routed use cases ({len(report['use_cases']['routed'])})",
+        f"## Use cases ({report['use_cases']['returned']}/{report['use_cases']['total']}"
+        + (", truncated" if report['use_cases']['truncated'] else "") + ")",
     ]
     lines.extend([
         f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
+        f"active={item['active']} configured={item['configured']} "
+        f"expression_ready={item['expression_ready']} entrypoint_traceable={item['entrypoint_traceable']}; "
         f"citation: {item['citation']}"
-        for item in report["use_cases"]["routed"]
-    ] or ["- none"])
-    lines.extend(["", f"## Catalog-only use cases ({len(report['use_cases']['catalog_only'])}) — no traced channel"])
-    lines.extend([
-        f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
-        f"citation: {item['citation']}"
-        for item in report["use_cases"]["catalog_only"]
+        for item in report["use_cases"]["items"]
     ] or ["- none"])
     lines.extend(["", "## Topics"])
     lines.extend([f"- {topic}" for topic in report["topics"]] or ["- none"])
@@ -802,8 +842,15 @@ def render_source_system_markdown(report):
     lines.extend(render_repo_items(report["upstream"]))
     lines.extend(["", "## Downstream"])
     lines.extend(render_repo_items(report["downstream"]))
-    lines.extend(["", f"## Owners ({len(report['owners'])})"])
-    lines.extend([f"- {owner}" for owner in report["owners"]] or ["- none"])
+    owners = report["owners"]
+    lines.extend(["", f"## Owners ({sum(len(v) for v in owners.values())})"])
+    for group_key, group_label in (
+        ("business_owners", "Business owners"),
+        ("cost_governance", "Cost / governance sign-off"),
+        ("config_maintainers", "Config maintainers (created_by/modified_by)"),
+    ):
+        lines.append(f"### {group_label}")
+        lines.extend([f"- {name}" for name in owners.get(group_key) or []] or ["- none"])
     lines.extend(["", "## Citations"])
     lines.extend([f"- {citation}" for citation in report.get("citations") or []] or ["- none"])
     return "\n".join(lines).rstrip() + "\n"

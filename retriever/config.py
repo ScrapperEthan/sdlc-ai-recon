@@ -25,6 +25,11 @@ USECASE_SNAPSHOT_CSV = _p(
 # identity/governance + the upstream source_system that the routing snapshot above doesn't carry.
 USECASE_MASTER_CSV = _p("SDLC_USECASE_MASTER", "index", "tbl_use_case.snapshot.csv")
 SOURCE_SYSTEM_ALIASES_JSON = _p("SDLC_SOURCE_SYSTEM_ALIASES", "index", "source_system_aliases.json")
+# Round A (UAT catalog): manifest-driven, environment-aware dataset directory. A single "active"
+# dataset carries all three UAT tables (tbl_use_case / tbl_use_case_channel_rule / tbl_use_case_ext)
+# plus an optional same-environment route snapshot. Legacy single-file USECASE_MASTER_CSV above stays
+# as a back-compat fallback when no manifest dir exists (see usecase_catalog.active_dataset()).
+USECASE_DATASET_DIR = _p("SDLC_USECASE_DATASET", "index", "usecase-snapshots", "active")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

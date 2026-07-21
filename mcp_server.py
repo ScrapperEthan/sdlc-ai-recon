@@ -104,19 +104,27 @@ def call_graph(query: str) -> dict:
 
 
 @mcp.tool()
-def source_system_impact(source_system: str) -> dict:
+def source_system_impact(source_system: str, include_inactive: bool = False,
+                          offset: int = 0, limit: int = 50) -> dict:
     """Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which Use
-    Cases it feeds (routed vs catalog-only/no traced channel), channel chain, upstream/downstream
-    repos, and the owners to notify on change. Tier 0: no channel priority/bounce-back yet."""
+    Cases it feeds, the Round A coverage funnel (configured/expression_ready/entrypoint_traceable/
+    catalog_only — stages, never "reaches the customer"), channel chain, upstream/downstream repos,
+    and the layered owners to notify on change. Disabled use cases excluded unless
+    include_inactive; `items` defaults to the first `limit` (50) members — the funnel counts are
+    always the full total, never truncated."""
     try:
-        return impact_report.build_report(f"source-system:{source_system}")
+        return impact_report.build_report(
+            f"source-system:{source_system}",
+            include_inactive=include_inactive, offset=offset, limit=limit,
+        )
     except (FileNotFoundError, ValueError) as error:
         return {"ok": False, "error": str(error)}
 
 
 @mcp.tool()
 def list_source_systems() -> list:
-    """Distinct upstream business systems (source_system) with use-case + routed counts."""
+    """Distinct CANONICALIZED upstream business systems (source_system) — case/format variants
+    folded into one entry with raw_variants listed — with use-case/active/inactive counts."""
     return usecase_master.source_systems()
 
 

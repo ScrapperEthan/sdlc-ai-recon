@@ -2,7 +2,7 @@
 Add a tool by adding a schema here and a branch in dispatch()."""
 import impact_report
 import outage_report
-from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus, usecase_master
+from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus, usecase_master, repo_tags
 
 # Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
 # (dependency closure), so the inline view's repo sample leads with what actually breaks.
@@ -63,9 +63,32 @@ TOOLS = [
             "exist' when you mean 'none in this snapshot'.",
             {"topic": {"type": "string"}, "exact": {"type": "boolean"}, "limit": {"type": "integer"}},
             ["topic"]),
-    _schema("search_code", "Search the read-only mirror; returns 'path:line:text'.",
+    _schema("list_repos",
+            "REPO DIRECTORY lookup (not code search). Call this for 'what repos does X have', "
+            "'what APIs does X expose', 'what tracking repos are there' — X being a repo-name "
+            "family/keyword like 'mdc', 'sms', 'tracking'. `query` is a case-insensitive SUBSTRING "
+            "match against repo names — pass the user's word as-is (e.g. query='mdc' matches the "
+            "`amet-mdc-*` repo family). `mode` filters by role: 'api' (HTTP-facing ingress services — "
+            "this is where REST endpoints live), 'job' (batch/scheduled), 'core' (business logic "
+            "libraries pulled in by an api/job shell), or 'lib' (shared library). `channel` and "
+            "`system` filter on the same tag dimensions. Recommended recipe for 'what APIs does MDC "
+            "have': call `list_repos(query='mdc', mode='api')` FIRST to get the exact repo list, THEN "
+            "`search_code` (scoped to those repos via its `repos` param) for `@PostMapping`/"
+            "`@GetMapping` inside them — do NOT guess repo names by grepping the whole mirror. "
+            "IMPORTANT NAME COLLISION: 'MDC' is ALSO an upstream business `source_system` (distinct "
+            "from the `amet-mdc-*` repo family) that feeds ~880 use cases. This tool answers the "
+            "REPO/code question ('what repos/APIs does MDC have', 'where does MDC code live'). If the "
+            "question is instead 'MDC 出问题影响哪些 use case / 渠道' or 'MDC 改动要通知谁' (business-"
+            "impact / who-to-notify), use `source_system_impact` instead, not this tool.",
+            {"query": {"type": "string"}, "mode": {"type": "string"},
+             "channel": {"type": "string"}, "system": {"type": "string"}}),
+    _schema("search_code", "Search the read-only mirror; returns 'path:line:text'. Pass `repos` "
+            "(a list of exact repo ids, e.g. from `list_repos`) to scope the search to just those "
+            "repos instead of scanning the whole ~390-repo mirror — much faster and avoids noise "
+            "from unrelated repos with similar code.",
             {"pattern": {"type": "string"}, "glob": {"type": "string"},
-             "max_results": {"type": "integer"}}, ["pattern"]),
+             "max_results": {"type": "integer"},
+             "repos": {"type": "array", "items": {"type": "string"}}}, ["pattern"]),
     _schema("read_file", "Read line-numbered source (path relative to mirror/).",
             {"path": {"type": "string"}, "start": {"type": "integer"},
              "end": {"type": "integer"}}, ["path"]),
@@ -148,8 +171,19 @@ def dispatch(name, a):
         return msg.usecase_route(a.get("use_case_id") or None, a.get("topic") or None)
     if name == "use_cases_for_topic":
         return msg.reverse_lookup_use_cases(a["topic"], a.get("exact", True), a.get("limit", 50))
+    if name == "list_repos":
+        try:
+            return repo_tags.filter_repos(
+                channel=a.get("channel") or None,
+                mode=a.get("mode") or None,
+                system=a.get("system") or None,
+                query=a.get("query") or None,
+            )
+        except FileNotFoundError:
+            return {"ok": False, "error": "repo_tags.json not built; run make_repo_tags.py"}
     if name == "search_code":
-        return code.search_code(a["pattern"], a.get("glob", "*.java"), a.get("max_results", 50))
+        return code.search_code(a["pattern"], a.get("glob", "*.java"), a.get("max_results", 50),
+                                 a.get("repos"))
     if name == "read_file":
         return code.read_file(a["path"], a.get("start", 1), a.get("end"))
     if name == "trace":

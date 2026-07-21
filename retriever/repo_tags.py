@@ -63,12 +63,14 @@ def channels_for_repo(repo, tags=None):
     return list(for_repo(repo, tags).get("channel") or [])
 
 
-def filter_repos(channel=None, mode=None, system=None, bundle=None, path="index/repo_tags.json"):
+def filter_repos(channel=None, mode=None, system=None, bundle=None, query=None,
+                  path="index/repo_tags.json"):
     payload = load(path=path, missing_ok=False)
     want_channel = (channel or "").strip().lower()
     want_mode = (mode or "").strip().lower()
     want_system = (system or "").strip().lower()
     want_bundle = (bundle or "").strip().lower()
+    want_query = (query or "").strip().lower()
 
     repos = []
     for repo, meta in sorted(payload.items()):
@@ -81,6 +83,8 @@ def filter_repos(channel=None, mode=None, system=None, bundle=None, path="index/
             continue
         if want_bundle and meta.get("bundle", "").lower() != want_bundle:
             continue
+        if want_query and want_query not in repo.lower():
+            continue
         repos.append(repo)
 
     return {
@@ -89,6 +93,7 @@ def filter_repos(channel=None, mode=None, system=None, bundle=None, path="index/
             "mode": mode or "",
             "system": system or "",
             "bundle": bundle or "",
+            "query": query or "",
         },
         "count": len(repos),
         "repos": repos,

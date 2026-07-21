@@ -80,14 +80,22 @@ def _resolve_inside_mirror(relpath):
     raise FileNotFoundError(relpath)
 
 
-def search_code(pattern, glob="*.java", max_results=50):
-    """Return matching lines as 'path:line:text'."""
+def search_code(pattern, glob="*.java", max_results=50, repos=None):
+    """Return matching lines as 'path:line:text'. Pass `repos` (repo ids under the mirror) to
+    scope the search to just those repos instead of the whole mirror."""
+    roots = [config.MIRROR]
+    if repos:
+        safe = [os.path.realpath(os.path.join(config.MIRROR, r)) for r in repos]
+        safe = [p for p in safe if _inside_mirror(p) and os.path.isdir(p)]
+        if safe:
+            roots = safe
+
     rg = shutil.which("rg")
     if rg:
         cmd = [rg, "-n", "--no-heading", "-S"]
         if glob:
             cmd += ["-g", glob]
-        cmd += [pattern, config.MIRROR]
+        cmd += [pattern] + roots
         try:
             out = subprocess.run(cmd, capture_output=True, text=True,
                                  encoding='utf-8', errors='replace',
@@ -105,25 +113,28 @@ def search_code(pattern, glob="*.java", max_results=50):
     rx = re.compile(pattern)
     results = []
     deadline = time.monotonic() + _SEARCH_DEADLINE
-    for dp, dn, fn in os.walk(config.MIRROR):
-        dn[:] = [d for d in dn if d not in _SKIP]
+    for root in roots:
         if time.monotonic() > deadline:
             break
-        for name in fn:
-            if glob and not fnmatch.fnmatch(name, glob):
-                continue
-            path = os.path.join(dp, name)
-            try:
-                with open(path, encoding='utf-8', errors='replace') as fh:
-                    for i, line in enumerate(fh, 1):
-                        if rx.search(line):
-                            results.append(f"{path}:{i}:{line.rstrip()}")
-                            if len(results) >= max_results:
-                                return results
-            except (OSError, UnicodeError):
-                continue
-        if time.monotonic() > deadline:
-            break
+        for dp, dn, fn in os.walk(root):
+            dn[:] = [d for d in dn if d not in _SKIP]
+            if time.monotonic() > deadline:
+                break
+            for name in fn:
+                if glob and not fnmatch.fnmatch(name, glob):
+                    continue
+                path = os.path.join(dp, name)
+                try:
+                    with open(path, encoding='utf-8', errors='replace') as fh:
+                        for i, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                results.append(f"{path}:{i}:{line.rstrip()}")
+                                if len(results) >= max_results:
+                                    return results
+                except (OSError, UnicodeError):
+                    continue
+            if time.monotonic() > deadline:
+                break
     return results
 
 

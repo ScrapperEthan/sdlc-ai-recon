@@ -41,6 +41,19 @@ class SourceSystemToolTests(unittest.TestCase):
             result = tools.dispatch("list_source_systems", {})
         self.assertEqual(result, {"items": [{"source_system": "PEGA"}]})
 
+    def test_list_repos_delegates_to_repo_tags_filter_repos(self):
+        sentinel = {"filters": {"query": "mdc"}, "count": 1, "repos": ["amet-mdc-hsbc-batch-email-job"]}
+        with mock.patch.object(tools.repo_tags, "filter_repos", return_value=sentinel) as filt:
+            result = tools.dispatch("list_repos", {"query": "mdc", "mode": "api"})
+        filt.assert_called_once_with(channel=None, mode="api", system=None, query="mdc")
+        self.assertEqual(result, sentinel)
+
+    def test_list_repos_missing_repo_tags_json_is_clean_error_not_a_crash(self):
+        with mock.patch.object(tools.repo_tags, "filter_repos", side_effect=FileNotFoundError("no repo_tags.json")):
+            result = tools.dispatch("list_repos", {"query": "mdc"})
+        self.assertFalse(result["ok"])
+        self.assertIn("repo_tags.json", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

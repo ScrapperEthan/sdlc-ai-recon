@@ -14,6 +14,7 @@ import enrich_repo_tags
 import make_repo_tags
 import retrieval_service
 from retriever import config as rconfig
+from retriever import repo_tags
 
 
 EDGES = """from_repo,to_repo
@@ -319,6 +320,51 @@ class MakeRepoTagsTests(unittest.TestCase):
             ]), 0)
             self.assertTrue(os.path.exists(report_md))
             self.assertTrue(os.path.exists(report_json))
+
+    def test_filter_repos_query_is_case_insensitive_substring_on_repo_name(self):
+        # "MDC" is both a repo-name family (amet-mdc-*) and an upstream source_system; filter_repos'
+        # `system` field is exact-match ("amet-mdc"), so a user typing the bare word "mdc" needs the
+        # substring `query` fallback to find the repo by NAME, not by its tagged system value.
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump(ROUTE_TAGS, handle)
+
+            result = repo_tags.filter_repos(query="MDC", path=tags_path)
+            self.assertEqual(result["repos"], ["amet-mdc-hsbc-batch-email-job"])
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["filters"]["query"], "MDC")
+
+            # A substring that matches nothing real returns an empty (not erroring) result.
+            empty = repo_tags.filter_repos(query="does-not-exist", path=tags_path)
+            self.assertEqual(empty["repos"], [])
+            self.assertEqual(empty["count"], 0)
+
+    def test_filter_repos_query_combined_with_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump(ROUTE_TAGS, handle)
+
+            # query + matching mode narrows to the one repo.
+            batch = repo_tags.filter_repos(query="mdc", mode="batch", path=tags_path)
+            self.assertEqual(batch["repos"], ["amet-mdc-hsbc-batch-email-job"])
+
+            # query + a mode that repo doesn't have narrows to nothing.
+            realtime = repo_tags.filter_repos(query="mdc", mode="realtime", path=tags_path)
+            self.assertEqual(realtime["repos"], [])
+
+    def test_filter_repos_without_query_is_unaffected(self):
+        # Back-compat: existing callers (retrieval_service._repos_payload) don't pass `query` —
+        # behavior must be identical to before this parameter existed.
+        with tempfile.TemporaryDirectory() as tmp:
+            tags_path = os.path.join(tmp, "repo_tags.json")
+            with open(tags_path, "w", encoding="utf-8") as handle:
+                json.dump(ROUTE_TAGS, handle)
+
+            result = repo_tags.filter_repos(system="hase", path=tags_path)
+            self.assertEqual(result["repos"], ["mc-hk-hase-svc-rt-alert-sms-api"])
+            self.assertEqual(result["filters"]["query"], "")
 
     def test_repos_route_filters_and_missing_file_404(self):
         with tempfile.TemporaryDirectory() as tmp:

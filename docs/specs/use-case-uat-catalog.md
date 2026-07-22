@@ -258,3 +258,66 @@ Minor (optional): the global quality funnel reports `configured/expression_ready
 
 **Still outstanding: RUNBOOK-45 Part B** — the business/data + runtime owner questions were not part of
 this box run; they remain open and steer Round B (rule_text grammar especially).
+
+## RUNBOOK-45 Part B — evidence audit results (box run 2026-07-22, HEAD `9d3f081`, local-only/no push)
+
+The locally-executable half of Part B (source + data evidence) is done; **formal owner sign-off and ticket
+IDs are NOT obtained** (correctly not fabricated). This section is the pushable system-of-record for the
+box's local report. Distilled:
+
+**Resolved enough to design Round B around**
+- **`source_system` = free text.** `UseCase.sourceSystem` + Portal DTOs are plain `String`; no enum/CMDB
+  validation in code → keep Round A's deterministic canonicalization + alias registry; `MDC Test` (13 rows)
+  stays separate. Whether an external EIM/CMDB registry exists is still an owner question.
+- **rule_text operators confirmed:** non-blank 2,640; no-operator 1,977; `>` 310; `&` 193; `|` 52; mixed
+  108. `TWOWAYSMS` ×14, `INAPP` ×5. → tokenizer + AST structure is buildable.
+- **`endpoint` `->` is MIXED (3 semantics), not a call chain:** only 310 rows have `->`, 17 distinct
+  patterns — 25 pure version-migration, 64 repo→version→target, 210 repo→target-layer/version-tag, only 11
+  real multi-repo call chains. → keep Round A's conservative "declared entrypoint repo(s) + confidence"
+  resolver; do NOT build a `->` call-chain interpreter.
+- **`delivery_mode` dual-represented:** Ext is String (REALTIME/BATCH/TIMECRITICAL = 1452/1060/79, blank
+  69); message entity is Integer (DeliveryModeEnum 1/2/3). → Round A's string handling is correct.
+
+**Round B design pivot — rule_text is NOT a single-truth parser.** For `I0141`/`I0142` the rule_text
+`LETTER > (EMAIL & SMS)` **disagrees with** the channel_rule priority order (LETTER=1, EMAIL=2, SMS=3)
+**and** the Portal composer output (`LETTER > EMAIL > SMS`). The current runtime parser is itself buggy
+(Decision parser yields `[LETTER, SMS]`; bounceback gets no `next` after EMAIL/SMS; `contains("\\|")`
+matches a literal backslash). **So Round B must NOT hardcode "& = parallel, > = fallback" as truth, and
+must NOT treat the buggy runtime as ground truth.** Build: (1) structural tokenizer + AST (operator tree,
+no operational meaning asserted); (2) a **three-way consistency validator** — rule_text channel set vs
+`channel_rule.channel` set vs priority order vs composer output — that **flags disagreement** (I0141/I0142
+is the canonical case); (3) the operational meaning of `>`/`&`/`|`/precedence as an **owner-confirmed
+config**, default "flag, don't guess." Better deliverable than one interpreter, and it does not stall on
+the owner answer.
+
+**New quality findings to fold into the Round B consistency report:** orphan channel-rule UCs `C5501`,
+`W9992`; orphan Ext UCs `A2040`,`C1501`,`C5501`,`M1780`; 26 active UC with no channel rule (13 also blank
+rule_text); 154 master missing Ext (99 active, 55 inactive). Headline for the estate: after dedup, **251
+master UC (138 active + 113 inactive) hit ≥1 config/runtime risk** — a risk set, not confirmed prod
+failures.
+
+**ID corrections to RUNBOOK-45 (photo-reconstruction drift):** null-priority + blank-rule_text ids are
+**W-prefixed** — null priority `W8765/W9992/W9994/W9996` (W9992 is an orphan rule, no master); blank
+rule_text `W0002/W0011/W0081/W8765/W9994/W9996`; PUSH+INBOX active
+`A0027/M0016/M0018/M0019/M0020/M0022/M0023`.
+
+**MDC/runtime owner tickets to FILE (Codex drafted; NOT this repo's to fix), all gated on the last:**
+- `[MDC][P0] Enforce status=Y in UseCaseService and invalidate disabled cache` — findById / Redis / local
+  cache have no status filter; 113 inactive UC still carry status=Y rules.
+- `[MDC][P0] Guard missing UseCaseExt and null/blank rule_text` — MessageDirectorService.java:83-91 NPE /
+  empty-channel; 99 active missing Ext, 6 blank rule_text.
+- `[MDC][P0] Make channel priority sorting null-safe and clean orphan rules` — UseCaseService.java:192-206
+  comparator has no null handling.
+- `[MDC][P0/P1] Resolve PUSH+INBOX` — 7 active UC; DB `PUSH+INBOX` / enum `PUSH_INBOX`, no Director →
+  `matchDirector()` throws TechnicalException; placeholder vs missing runtime code?
+- `[MDC][P0] Publish UAT deployment provenance (image digest / tag / Git SHA BOM)` — **GATING:** index is
+  456 repos / 31 CodeGraph bundles with known commits and source SHA-256 matches the mirror, but there is
+  **no UAT deployment manifest**, so all the above are POTENTIAL (conditional on UAT running the indexed
+  versions), not confirmed.
+
+**Still blocking, for the business/data owner:** official names + final topic for `business_category` **33**
+(`B0001`; L400 / LETTER / OTX_BAT_LETTER) and **37** (`I0135-I0140`; MDC / EMAIL / INT_EMAIL) — the runtime
+`UseCaseConfigValidationHandler` rejects unknown categories, so these 7 active UC may be config-rejected;
+the **formal rule_text grammar + intended I0141/I0142 semantics**; whether an external CMDB registry exists;
+approval to export the 5 code-confirmed tables (`tbl_use_case_router`, `_aem_template`,
+`_department_mapping`, `_ext_2way`, `tbl_event_router_usecase_topic`) from the **same UAT snapshot**.

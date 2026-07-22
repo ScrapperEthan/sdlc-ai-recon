@@ -222,8 +222,16 @@ def dispatch(name, a):
         return msg.reverse_lookup_use_cases(a["topic"], a.get("exact", True), a.get("limit", 50))
     if name == "list_repos":
         try:
-            if (a.get("group") or "").strip().lower() == "mdc":
-                return repo_tags.mdc_repos()
+            group = (a.get("group") or "").strip().lower()
+            if group:
+                if group == "mdc":
+                    return repo_tags.mdc_repos()
+                # An unregistered group used to fall through to an unfiltered filter_repos and
+                # SILENTLY return all 392 repos (RUNBOOK-48 D1). Reject it explicitly instead.
+                return {"ok": False, "error": f"unknown group: {a.get('group')}",
+                        "allowed_groups": ["mdc"],
+                        "hint": "omit group and use query=<substring> to search repo names, "
+                                "e.g. query='campaign'"}
             return repo_tags.filter_repos(
                 channel=a.get("channel") or None,
                 mode=a.get("mode") or None,

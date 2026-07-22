@@ -146,7 +146,13 @@ def to_edges(repos):
     rows = []
     for destination, group in sorted(by_dest.items()):
         producers = group["produce"] or [""]
-        consumers = group["consume"] + group["reference"] or [""]
+        # Only a REAL consumer (consumerInformationList/@JmsListener/consumerGroup — the "consume"
+        # role) becomes a consumer edge. A "reference" is a bare constant/name mention whose
+        # direction is unknown (e.g. an outbound API declaring the topic constant it PUBLISHES to);
+        # folding it into consumers mislabeled producers as consumers (RUNBOOK-48 T3/T5). The
+        # repo->topic association is still preserved in message_channels.json (role="reference") —
+        # we just refuse to assert a directed consumer edge we cannot prove.
+        consumers = group["consume"] or [""]
         for producer in producers:
             for consumer in consumers:
                 if producer or consumer:
@@ -192,11 +198,13 @@ def write_csv(rows, path):
 
 
 def _consumer_map(repos):
-    """destination -> repos that consume it, from the existing config scan (for producer pairing)."""
+    """destination -> repos that CONSUME it (role == "consume" only), for pairing with
+    producer_extract producers. A "reference" (constant-only mention, direction unknown) is NOT a
+    consumer — folding it in mislabeled producers as consumers (RUNBOOK-48 T3/T5)."""
     out = defaultdict(list)
     for repo, destinations in repos.items():
         for name, meta in destinations.items():
-            if meta["role"] in ("consume", "reference"):
+            if meta["role"] == "consume":
                 out[name].append(repo)
     return out
 

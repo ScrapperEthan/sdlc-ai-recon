@@ -74,6 +74,34 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(len(paired), 1)
             self.assertEqual(paired[0]["destination"], "hrn.x.notification.cm_sms")
 
+    def test_reference_role_is_not_emitted_as_a_consumer(self):
+        # A repo that merely REFERENCES a topic constant (direction unknown) must never be labeled a
+        # consumer — the RUNBOOK-48 T3/T5 direction bug (an outbound API that PUBLISHES to a topic was
+        # mislabeled as consuming it). The real consumer (consumerInformationList -> role=consume) must
+        # still appear.
+        repos = {
+            "amet-mdc-hsbc-cm-outbound-api": {  # declares the constant to PUBLISH to it
+                "hrn.x.notification.marketing-cm_sms": {
+                    "kind": "topic", "role": "reference", "channel": "sms",
+                    "evidence": "amet-mdc-hsbc-cm-outbound-api/.../CmOutboundResource.java:84",
+                },
+            },
+            "amet-mdc-hsbc-cm-outbound-job": {  # the real consumer
+                "hrn.x.notification.marketing-cm_sms": {
+                    "kind": "topic", "role": "consume", "channel": "sms",
+                    "evidence": "amet-mdc-hsbc-cm-outbound-job/.../application.yml:44",
+                },
+            },
+        }
+        edges = mm.to_edges(repos)
+        consumers = {e["consumer_repo"] for e in edges if e["consumer_repo"]}
+        self.assertIn("amet-mdc-hsbc-cm-outbound-job", consumers)
+        self.assertNotIn("amet-mdc-hsbc-cm-outbound-api", consumers)
+        # _consumer_map (used to pair producer_extract producers) must agree: no reference-as-consumer
+        cmap = mm._consumer_map(repos)
+        self.assertNotIn("amet-mdc-hsbc-cm-outbound-api",
+                         cmap.get("hrn.x.notification.marketing-cm_sms", []))
+
     def test_coverage_counts_newly_covered_channel_unknown_repos(self):
         channels = {"libx": {"channels": ["sms"], "destinations": []}}
         tags = {"libx": {"channel": []}}  # name-unknown, now covered by messaging

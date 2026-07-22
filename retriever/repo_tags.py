@@ -105,7 +105,9 @@ def filter_repos(channel=None, mode=None, system=None, bundle=None, query=None,
 
 def mdc_repos(path="index/repo_tags.json"):
     """The MDC system's repo footprint: amet-mdc-* (name-derived) UNION mdc_common (business sheet).
-    Each repo is labeled with why it's included, so mc-hk-hase-* members are traceable to the sheet."""
+    Each repo is labeled with why it's included (``via``), so mc-hk-hase-* members are traceable to
+    the sheet, and carries its ``mode``/``channel`` tags so a "MDC jobs" / "MDC SMS repos" question
+    can filter the group on VERIFIABLE metadata instead of guessing from names (RUNBOOK-48 Q16/Q17)."""
     payload = load(path=path, missing_ok=False)
     out = []
     for repo, meta in sorted(payload.items()):
@@ -115,7 +117,12 @@ def mdc_repos(path="index/repo_tags.json"):
         if meta.get("mdc_common"):
             via.append("mdc_common")
         if via:
-            out.append({"repo": repo, "via": via})
+            out.append({
+                "repo": repo,
+                "via": via,
+                "mode": meta.get("mode") or "",
+                "channel": list(meta.get("channel") or []),
+            })
     return {
         "group": "mdc",
         "count": len(out),

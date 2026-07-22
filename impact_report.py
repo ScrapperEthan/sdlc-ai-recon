@@ -658,7 +658,11 @@ def build_source_system_report(value, tags, include_inactive=False, offset=0, li
         participants.update(route_item["consumers"])
     upstream, downstream = aggregate_repo_relations(participants, exclude=participants)
     chain = channel_chain(tags, participants, topics, deduped)
-    owners = usecase_master.owners_for(item["use_case_id"] for item in items)
+    # Owners must aggregate over EVERY matched use case, not just the current page — otherwise a
+    # paginated call (e.g. limit=1) silently drops real business owners (RUNBOOK-47 Q11). Re-fetch
+    # the full member set (unpaginated) for the owner roll-up; the displayed `items` stay paginated.
+    owner_members = usecase_master.use_cases_for_source_system(value, include_inactive=include_inactive)
+    owners = usecase_master.owners_for(m["use_case_id"] for m in owner_members.get("items", []))
 
     citations = set(item["citation"] for item in items if item.get("citation"))
     for route_item in routes:

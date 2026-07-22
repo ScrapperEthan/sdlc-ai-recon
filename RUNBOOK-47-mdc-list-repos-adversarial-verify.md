@@ -9,15 +9,20 @@
 > (esp. the "copy `count` verbatim" discipline backfiring into refusing to dig deeper when a user
 > explicitly demands completeness).
 >
-> **Companion spreadsheet:** `mdc_list_repos_test_questions.xlsx` was handed to the boss directly (not
-> committed — it's a personal review/tracking artifact, not code). This runbook carries the SAME 27
-> questions as an executable markdown table so you don't need to open the xlsx — treat this file as
-> authoritative if the two ever drift.
+> **Companion spreadsheet:** `RUNBOOK-47-test-questions.xlsx` (committed at repo root) is a fill-in
+> tracker with the same 27 questions. This runbook carries the SAME questions as an executable markdown
+> table so you don't need to open the xlsx — treat this file as authoritative if the two ever drift.
 >
 > **The most important deliverable in this runbook is Part C (U7).** It is the only question in the
 > whole set that can actually PROVE OR DISPROVE whether the 45-count is missing any real MDC-connected
 > `mc-hk-hase-*` repo. Everything else is chat-level behavior verification; Part C is a deterministic
 > script run directly against `internal_edges.csv` + `message_edges.csv` on the real mirror.
+>
+> **PREREQUISITE — point the loader at the UAT Use Case dataset before Part A #10-12.** The
+> source_system cases need an active dataset; `index/usecase-snapshots/active` does not exist by
+> default, so set (PowerShell): `$env:SDLC_USECASE_DATASET="index/usecase-snapshots/uat/20260720-1730"`
+> (same dataset as RUNBOOK-45) and restart the app. Without it, #10-12 come back unavailable or wrongly
+> degraded, and a FAIL there would be a setup artifact, not a real finding.
 >
 > **Data security:** as always — `repo_tags.json`, the MDC sheet, and any generated `index/*.json` stay
 > gitignored, never committed/pushed. Send back counts, repo-id lists (repo ids are not sensitive), and
@@ -101,17 +106,20 @@ for repo in amet_mdc:
             dep_connected_hase.add(other)
 
 # --- message-graph closure: mc-hk-hase repos sharing a topic/destination with an amet-mdc repo ---
+# NOTE: routes_for_repo / who_consumes / who_produces all return a LIST of edge dicts
+# (keys: producer_repo, destination, consumer_repo, routing_source, evidence) — NOT a dict.
+# See retriever/messages.py:24-41. Iterate the lists directly; do NOT call .get() on them.
 msg_connected_hase = set()
 for repo in amet_mdc:
-    routes = messages.routes_for_repo(repo)
-    destinations = {r.get("destination") for r in (routes.get("routes") or routes.get("items") or []) if r.get("destination")}
-    for dest in destinations:
-        for side, fn in (("consumers", messages.who_consumes), ("producers", messages.who_produces)):
-            peers = fn(dest)
-            for p in (peers.get("repos") or peers.get("items") or []):
-                name = p if isinstance(p, str) else p.get("repo")
-                if name and name.lower().startswith("mc-hk-hase"):
-                    msg_connected_hase.add(name)
+    for edge in messages.routes_for_repo(repo):          # list of edge dicts
+        dest = edge.get("destination")
+        if not dest:
+            continue
+        for fn in (messages.who_consumes, messages.who_produces):
+            for peer_edge in fn(dest):                    # list of edge dicts
+                for name in (peer_edge.get("consumer_repo"), peer_edge.get("producer_repo")):
+                    if name and name.lower().startswith("mc-hk-hase"):
+                        msg_connected_hase.add(name)
 
 graph_connected = dep_connected_hase | msg_connected_hase
 missing_from_sheet = sorted(graph_connected - mdc_hase)
@@ -126,10 +134,9 @@ print("\n*** mc-hk-hase repos in the 24-sheet set with NO dep/message graph link
 print(len(sheet_only_no_graph_link), sheet_only_no_graph_link)
 ```
 
-> Adjust the `routes.get(...)`/`peers.get(...)` key names above to whatever `routes_for_repo` /
-> `who_consumes` / `who_produces` actually return on this checkout if they've drifted — read
-> `retriever/messages.py` first and fix the field names before running; the shape matters more than
-> the exact snippet.
+> The script above is corrected to the real return shapes (lists of edge dicts). If `retriever/messages.py`
+> has drifted on your checkout, re-check the field names before running — but do NOT reintroduce `.get()`
+> calls on the list returns.
 
 ## Interpreting the result
 

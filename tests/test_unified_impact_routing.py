@@ -81,11 +81,81 @@ class BundleRootForTests(unittest.TestCase):
     def test_call_graph_falls_back_cleanly_without_codegraph(self):
         with mock.patch.object(unified_impact.shutil, "which", return_value=None), mock.patch.object(
             unified_impact.code, "search_code", return_value=["hit-1"]
+        ), mock.patch.object(
+            unified_impact, "_index_freshness", return_value=("2026-07-01T00:00:00Z", None, False)
         ):
             result = unified_impact._call_graph("Seed", cwd="/some/root")
             self.assertFalse(result["available"])
             self.assertEqual(result["bundle_root"], "/some/root")
             self.assertEqual(result["fallback_hits"], ["hit-1"])
+            self.assertEqual(result["caveat"], unified_impact.CALL_GRAPH_CAVEAT)
+            self.assertEqual(result["index_built_at"], "2026-07-01T00:00:00Z")
+            self.assertIsNone(result["indexes_refreshed_at"])
+            self.assertFalse(result["possibly_stale"])
+
+    def test_call_graph_success_keeps_existing_fields_and_adds_trust_signals(self):
+        completed = mock.Mock(returncode=0, stdout="callers", stderr="")
+        with mock.patch.object(unified_impact.shutil, "which", return_value="codegraph"), \
+             mock.patch.object(unified_impact.subprocess, "run", return_value=completed), \
+             mock.patch.object(
+                 unified_impact,
+                 "_index_freshness",
+                 return_value=("2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z", False),
+             ):
+            result = unified_impact._call_graph("Seed", cwd="/some/root")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["bundle_root"], "/some/root")
+        self.assertEqual(result["output"], "callers")
+        self.assertEqual(result["fallback_hits"], [])
+        self.assertEqual(result["caveat"], unified_impact.CALL_GRAPH_CAVEAT)
+        self.assertEqual(result["index_built_at"], "2026-07-01T00:00:00Z")
+        self.assertEqual(result["indexes_refreshed_at"], "2026-07-01T00:00:00Z")
+        self.assertFalse(result["possibly_stale"])
+
+    def test_call_graph_exception_adds_trust_signals(self):
+        with mock.patch.object(unified_impact.shutil, "which", return_value="codegraph"), \
+             mock.patch.object(unified_impact.subprocess, "run", side_effect=RuntimeError("boom")), \
+             mock.patch.object(unified_impact.code, "search_code", return_value=["hit-1"]), \
+             mock.patch.object(
+                 unified_impact,
+                 "_index_freshness",
+                 return_value=(None, "2026-07-01T00:00:00Z", False),
+             ):
+            result = unified_impact._call_graph("Seed", cwd="/some/root")
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["bundle_root"], "/some/root")
+        self.assertEqual(result["error"], "boom")
+        self.assertEqual(result["fallback_hits"], ["hit-1"])
+        self.assertEqual(result["caveat"], unified_impact.CALL_GRAPH_CAVEAT)
+        self.assertIsNone(result["index_built_at"])
+        self.assertEqual(result["indexes_refreshed_at"], "2026-07-01T00:00:00Z")
+        self.assertFalse(result["possibly_stale"])
+
+
+class IndexFreshnessTests(unittest.TestCase):
+    def test_uses_real_mtimes_and_marks_newer_derived_indexes_possibly_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = os.path.join(tmp, ".codegraph", "codegraph.db")
+            os.makedirs(os.path.dirname(database))
+            with open(database, "w", encoding="utf-8"):
+                pass
+            built_epoch = 1_700_000_000
+            os.utime(database, (built_epoch, built_epoch))
+            indexed = os.path.join(tmp, "index", "last_indexed.json")
+            _write_json(indexed, {"generated_at": "2023-11-14T22:13:21Z"})
+            with mock.patch.object(config, "INDEX_DIR", os.path.dirname(indexed)):
+                self.assertEqual(
+                    unified_impact._index_freshness(tmp),
+                    ("2023-11-14T22:13:20Z", "2023-11-14T22:13:21Z", True),
+                )
+
+    def test_returns_unknown_timestamps_without_guessing_staleness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "INDEX_DIR", tmp):
+                self.assertEqual(unified_impact._index_freshness(None), (None, None, False))
 
 
 class QueryDepResolutionTests(unittest.TestCase):
@@ -115,6 +185,28 @@ class QueryDepResolutionTests(unittest.TestCase):
         self.assertEqual(out["dependency_edges"]["depended_on_by"], ["repoB"])
         self.assertEqual(out["message_edges"]["peers"], [{"peer_repo": "repoB"}])
 
+    def test_symbol_collision_reports_all_defining_repos_without_changing_first_match_routing(self):
+        hits = [
+            os.path.join(config.MIRROR, "repoA", "src", "Foo.java") + ":3:class Foo {",
+            os.path.join(config.MIRROR, "repoB", "src", "Foo.java") + ":4:class Foo {",
+            os.path.join(config.MIRROR, "repoA", "other", "Foo.java") + ":5:class Foo {",
+        ]
+        with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA", "repoB"}), \
+             mock.patch.object(unified_impact.code, "search_code", return_value=hits), \
+             mock.patch.object(unified_impact, "bundle_root_for", return_value=None), \
+             mock.patch.object(unified_impact, "_call_graph", return_value={"available": False}), \
+             mock.patch.object(
+                 unified_impact.graph,
+                 "impact",
+                 return_value={"mode": "direct", "depended_on_by": [], "depends_on": []},
+             ), \
+             mock.patch.object(unified_impact, "_message_peers", return_value=[]):
+            out = unified_impact.query("Foo")
+
+        self.assertEqual(out["resolved_repo"], "repoA")
+        self.assertEqual(out["routing_ambiguity"]["defining_repos"], ["repoA", "repoB"])
+        self.assertEqual(out["routing_ambiguity"]["chosen"], "repoA")
+
     def test_repo_seed_is_used_directly_without_resolution(self):
         with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA"}), \
              mock.patch.object(unified_impact, "bundle_root_for", return_value=None), \
@@ -129,6 +221,7 @@ class QueryDepResolutionTests(unittest.TestCase):
         impact.assert_called_once_with("repoA", transitive=False)
         self.assertIsNone(out["resolved_repo"])
         self.assertNotIn("resolution", out)
+        self.assertNotIn("routing_ambiguity", out)
 
     def test_unresolvable_symbol_is_left_as_is(self):
         with mock.patch.object(unified_impact, "_known_repos", return_value={"repoA"}), \

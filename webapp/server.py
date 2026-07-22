@@ -323,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
     mode = "MOCK (no model)" if config.LLM_MOCK else f"model={config.LLM_MODEL} @ {config.LLM_BASE_URL}"
-    print(f"HASE assistant: http://{config.HOST}:{config.PORT}   [{mode}]")
+    print(f"MDC assistant: http://{config.HOST}:{config.PORT}   [{mode}]")
     print(f"  single entry — proxying arch/impact/coverage + data from {config.RETRIEVAL_UPSTREAM}")
     print("Ctrl+C to stop.")
     try:

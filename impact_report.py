@@ -6,7 +6,8 @@ import csv
 import os
 import re
 
-from retriever import config, flow, glossary, graph, messages, repo_tags, usecase_master
+from retriever import (config, flow, glossary, graph, messages, repo_tags, rule_text,
+                        usecase_consistency, usecase_master)
 
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
 EDGE_FIELDS = ("producer_repo", "destination", "consumer_repo", "routing_source", "evidence")
@@ -588,6 +589,21 @@ def build_usecase_report(use_case_id, tags):
             endpoint_repos = usecase_master.resolve_endpoint(ext.get("endpoint") or "")
             if endpoint_repos:
                 report["endpoint_repos"] = endpoint_repos
+            # Round B1: structural rule_text AST — NEVER asserts initial/fallback meaning (operator
+            # semantics are owner-gated; see rule_text.interpret()). Only when Ext actually exists.
+            rule_text_raw = ext.get("rule_text") or ""
+            if rule_text_raw.strip():
+                ast = rule_text.parse(rule_text_raw)
+                report["rule_text_ast"] = ast
+                semantics = rule_text.interpret(ast)
+                if semantics.get("available"):
+                    report["rule_text_interpretation"] = semantics
+        # Round B3: multi-source consistency findings (rule_text vs channel_rule) — only meaningful
+        # once at least one of rules/ext exists; empty list otherwise (catalog_only use case).
+        validation = usecase_consistency.check_use_case(use_case_id)
+        if validation:
+            report["validation_findings"] = validation
+            extra_cites.update(c for f in validation for c in f.get("citations") or [])
         target["citations"] = sorted(set(target["citations"]) | extra_cites)
     return report
 
@@ -771,6 +787,49 @@ def render_risk_callouts(items):
     return lines
 
 
+def render_endpoint_repos(segments):
+    """RUNBOOK-45 Part A follow-up #3: the structured `endpoint_repos` (resolved repo + confidence
+    from tbl_use_case_ext.endpoint) was computed but never rendered in markdown — only a bare
+    entrypoint_traceable=True/False. The repo NAME is the upstream payload; show it."""
+    if not segments:
+        return ["- none declared"]
+    lines = []
+    for seg in segments:
+        repo = seg.get("repo") or "(unresolved)"
+        bits = [f"- {repo}", f"confidence: {seg['confidence']}"]
+        if seg.get("raw") and seg.get("raw") != repo:
+            bits.append(f"raw: {seg['raw']}")
+        lines.append(" | ".join(bits))
+    return lines
+
+
+def render_rule_text_ast(ast):
+    """Round B1: structural decision tree only — NEVER prints an asserted fallback/parallel meaning
+    while ast['semantics'] == 'unconfirmed' (the default until an owner fills in
+    index/rule_text_semantics.json). Shows the operator string as-is (>/&/|) with an explicit badge."""
+    lines = [f"- expression: `{ast['normalized_expression']}`", f"- mode: {ast['mode']}"]
+    if ast["semantics"] == "unconfirmed":
+        lines.append("- semantics: **unconfirmed** — operator meaning (>/&/|) pending owner "
+                      "confirmation; shown as structure only, NOT an asserted fallback/parallel order")
+    if ast["parse_warnings"]:
+        lines.append("- parse warnings:")
+        lines.extend(f"  - {w['type']}: {w.get('detail') or w.get('token') or w.get('channel') or ''}"
+                      for w in ast["parse_warnings"])
+    return lines
+
+
+def render_validation_findings(findings):
+    if not findings:
+        return ["- none"]
+    lines = []
+    for item in findings:
+        bits = [f"- [{item['severity']}] {item['check']}", item["message"]]
+        if item.get("citations"):
+            bits.append("citations: " + ", ".join(item["citations"]))
+        lines.append(" | ".join(bits))
+    return lines
+
+
 def render_markdown(report):
     target = report["target"]
     lines = [
@@ -785,6 +844,15 @@ def render_markdown(report):
         lines.append("- Matched topics: " + ", ".join(target["matched_topics"]))
     if target.get("citations"):
         lines.append("- Citations: " + ", ".join(target["citations"]))
+    if report.get("endpoint_repos"):
+        lines.extend(["", "## Endpoint Repos (declared source_system entrypoint)"])
+        lines.extend(render_endpoint_repos(report["endpoint_repos"]))
+    if report.get("rule_text_ast"):
+        lines.extend(["", "## Channel Decision Expression (rule_text)"])
+        lines.extend(render_rule_text_ast(report["rule_text_ast"]))
+    if "validation_findings" in report:
+        lines.extend(["", "## Validation Findings"])
+        lines.extend(render_validation_findings(report["validation_findings"]))
 
     lines.extend(["", "## Upstream (what it depends on)"])
     lines.extend(render_repo_items(report["upstream"]))
@@ -825,13 +893,18 @@ def render_source_system_markdown(report):
         f"## Use cases ({report['use_cases']['returned']}/{report['use_cases']['total']}"
         + (", truncated" if report['use_cases']['truncated'] else "") + ")",
     ]
-    lines.extend([
-        f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
-        f"active={item['active']} configured={item['configured']} "
-        f"expression_ready={item['expression_ready']} entrypoint_traceable={item['entrypoint_traceable']}; "
-        f"citation: {item['citation']}"
-        for item in report["use_cases"]["items"]
-    ] or ["- none"])
+    for item in report["use_cases"]["items"]:
+        resolved_repos = [seg["repo"] for seg in (item.get("endpoint_repos") or []) if seg.get("repo")]
+        endpoint_bit = ("endpoint_repos=" + ", ".join(resolved_repos)) if resolved_repos else (
+            "entrypoint_traceable=False")
+        lines.append(
+            f"- `{item['use_case_id']}` — {item['name'] or 'unnamed'} ({item['project'] or 'no project'}); "
+            f"active={item['active']} configured={item['configured']} "
+            f"expression_ready={item['expression_ready']} {endpoint_bit}; "
+            f"citation: {item['citation']}"
+        )
+    if not report["use_cases"]["items"]:
+        lines.append("- none")
     lines.extend(["", "## Topics"])
     lines.extend([f"- {topic}" for topic in report["topics"]] or ["- none"])
     lines.extend(["", "## Async Routes"])
@@ -877,17 +950,36 @@ def write_report(report, out):
     return path
 
 
+SOURCE_SYSTEM_DEFAULT_LIMIT = 50  # matches webapp.tools.source_system_impact's default cap
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target")
     parser.add_argument("--out", default=os.path.join(config.INDEX_DIR, "reports"))
+    parser.add_argument("--include-inactive", action="store_true",
+                         help="source-system: targets only; disabled use cases excluded by default")
+    parser.add_argument("--offset", type=int, default=0,
+                         help="source-system: targets only; paginate past --limit")
+    parser.add_argument("--limit", type=int, default=None,
+                         help=f"source-system: targets only; defaults to {SOURCE_SYSTEM_DEFAULT_LIMIT} "
+                              "(RUNBOOK-45 follow-up #4 — a direct CLI call used to dump the full "
+                              "member list, e.g. ~880 for MDC; pass 0 for unlimited)")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
+    # Only source-system targets page; other kinds ignore include_inactive/offset/limit. Apply the
+    # same default cap the webapp uses so a direct CLI call never dumps the full member list.
+    limit = args.limit
+    if limit is None and args.target.strip().lower().startswith("source-system:"):
+        limit = SOURCE_SYSTEM_DEFAULT_LIMIT
+    elif limit == 0:
+        limit = None
     try:
-        report = build_report(args.target)
+        report = build_report(args.target, include_inactive=args.include_inactive,
+                               offset=args.offset, limit=limit)
     except (FileNotFoundError, ValueError) as error:
         print(f"ERROR: {error}")
         return 1

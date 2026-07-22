@@ -43,6 +43,12 @@ class UsecaseMasterTests(unittest.TestCase):
 
         self._patches = [
             mock.patch.object(config, "ROOT", root),
+            # No manifest dir here -> forces active_dataset() to fall through to the legacy
+            # USECASE_MASTER_CSV path below. Without this, an ambient SDLC_USECASE_DATASET env
+            # var (e.g. on a box with a real UAT dataset configured) would make active_dataset()
+            # find that manifest FIRST and this fixture's rows would never be read (RUNBOOK-45
+            # Part A follow-up #1 — this is what caused 14/243 to fail against real UAT data).
+            mock.patch.object(config, "USECASE_DATASET_DIR", os.path.join(root, "no-manifest-here")),
             mock.patch.object(config, "USECASE_MASTER_CSV", master_path),
             mock.patch.object(config, "USECASE_SNAPSHOT_CSV", routing_path),
             mock.patch.object(config, "SOURCE_SYSTEM_ALIASES_JSON", aliases_path),

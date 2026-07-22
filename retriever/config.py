@@ -30,6 +30,9 @@ SOURCE_SYSTEM_ALIASES_JSON = _p("SDLC_SOURCE_SYSTEM_ALIASES", "index", "source_s
 # plus an optional same-environment route snapshot. Legacy single-file USECASE_MASTER_CSV above stays
 # as a back-compat fallback when no manifest dir exists (see usecase_catalog.active_dataset()).
 USECASE_DATASET_DIR = _p("SDLC_USECASE_DATASET", "index", "usecase-snapshots", "active")
+# Round B2: owner-confirmed rule_text operator semantics. Missing/default -> every operator
+# "unconfirmed" (see retriever/rule_text.py) — the single seam an owner answer plugs into.
+RULE_TEXT_SEMANTICS_JSON = _p("SDLC_RULE_TEXT_SEMANTICS", "index", "rule_text_semantics.json")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

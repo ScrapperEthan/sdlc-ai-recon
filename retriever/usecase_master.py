@@ -17,6 +17,7 @@ from .usecase_catalog import (  # noqa: F401
     resolve_endpoint,
     route_dimension,
     rules_by_use_case_id,
+    search_usecases,
     snapshot_manifest,
     source_system_coverage,
     source_systems,

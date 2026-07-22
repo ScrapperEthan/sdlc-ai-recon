@@ -1,5 +1,5 @@
 """
-Thin web Q&A app for the HASE assistant.
+Thin web Q&A app for the MDC assistant.
 
 Pipeline:  browser -> server.py -> agent.py (tool loop) -> llm.py (the model)
                                               agent.py -> tools.py -> retriever/

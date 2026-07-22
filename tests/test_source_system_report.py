@@ -11,6 +11,40 @@ import impact_report
 import outage_report
 from retriever import config as rconfig
 
+
+def _write_csv(path, header, rows):
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(",".join(header) + "\n")
+        for row in rows:
+            handle.write(",".join(row) + "\n")
+
+
+def _write_manifest_dataset(base_dir, environment="UAT", snapshot_id="20260722",
+                             master=None, rule=None, ext=None, route=None):
+    """Round A manifest-driven dataset (config.USECASE_DATASET_DIR), distinct from the legacy
+    single-file USECASE_MASTER_CSV fixture used elsewhere in this file — needed here because
+    endpoint-repo resolution (follow-up #3) requires a tbl_use_case_ext table."""
+    dataset_dir = os.path.join(base_dir, "index", "usecase-snapshots", "active")
+    os.makedirs(dataset_dir, exist_ok=True)
+    tables = {}
+    for name, payload, filename in (
+        ("tbl_use_case", master, "tbl_use_case.snapshot.csv"),
+        ("tbl_use_case_channel_rule", rule, "tbl_use_case_channel_rule.snapshot.csv"),
+        ("tbl_use_case_ext", ext, "tbl_use_case_ext.snapshot.csv"),
+        ("tbl_event_router_usecase_topic", route, "tbl_event_router_usecase_topic.snapshot.csv"),
+    ):
+        if not payload:
+            continue
+        header, rows = payload
+        path = os.path.join(dataset_dir, filename)
+        _write_csv(path, header, rows)
+        tables[name] = {"file": filename, "row_count": len(rows)}
+    manifest = {"environment": environment, "snapshot_id": snapshot_id,
+                "exported_at": "2026-07-22T00:00:00+08:00", "tables": tables}
+    with open(os.path.join(dataset_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+    return dataset_dir
+
 MASTER_HEADER = (
     "use_case_id,use_case_name,project_name,source_system,work_stream_name,line_of_business,"
     "business_category,country_code,group_member,app_name,created_by,created_time,modified_by,"
@@ -68,6 +102,11 @@ class _FixtureMixin:
         ))
         master_path = (os.path.join(index_dir, "tbl_use_case.snapshot.csv") if with_master
                        else os.path.join(index_dir, "absent.csv"))
+        # No manifest dir in this fixture -> active_dataset() must fall through to the legacy
+        # USECASE_MASTER_CSV path patched below, not an ambient SDLC_USECASE_DATASET pointing at
+        # a real box dataset (RUNBOOK-45 Part A follow-up #1: test isolation).
+        stack.enter_context(mock.patch.object(
+            rconfig, "USECASE_DATASET_DIR", os.path.join(root, "no-manifest-here")))
         stack.enter_context(mock.patch.object(rconfig, "USECASE_MASTER_CSV", master_path))
         stack.enter_context(mock.patch.object(rconfig, "SOURCE_SYSTEM_ALIASES_JSON", os.path.join(index_dir, "absent-aliases.json")))
         stack.enter_context(mock.patch.object(rconfig, "REPO_TAGS_JSON", os.path.join(index_dir, "repo_tags.json")))
@@ -196,6 +235,172 @@ class UsecaseEnrichmentRegressionTests(_FixtureMixin, unittest.TestCase):
         self.assertNotIn("name", item)
         self.assertNotIn("source_system", item)
         self.assertNotIn("owner", item)
+
+
+class EndpointRepoMarkdownTests(unittest.TestCase):
+    """RUNBOOK-45 Part A follow-up #3: the CLI markdown dropped the resolved endpoint repo name(s)
+    and only printed a bare entrypoint_traceable=True/False — the repo name is the upstream payload."""
+
+    def _dataset(self, tmp):
+        master = (["use_case_id", "use_case_name", "source_system", "status"],
+                   [["UC001", "Alpha Case", "PEGA", "Y"]])
+        ext = (["use_case_id", "endpoint"],
+               [["UC001", "mc-hk-hase-pega-adapter-job"]])
+        return _write_manifest_dataset(tmp, master=master, ext=ext)
+
+    def test_usecase_markdown_shows_resolved_repo_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            repos_txt = os.path.join(tmp, "repos.txt")
+            with open(repos_txt, "w", encoding="utf-8") as handle:
+                handle.write("mc-hk-hase-pega-adapter-job\n")
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(rconfig, "ROOT", tmp), \
+                 mock.patch.object(rconfig, "REPOS_TXT", repos_txt), \
+                 mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(tmp, "absent-route.csv")):
+                report = impact_report.build_report("use-case:UC001")
+                markdown = impact_report.render_report_markdown(report)
+
+        self.assertEqual(report["endpoint_repos"][0]["repo"], "mc-hk-hase-pega-adapter-job")
+        self.assertIn("mc-hk-hase-pega-adapter-job", markdown)
+        self.assertIn("Endpoint Repos", markdown)
+
+    def test_source_system_markdown_shows_resolved_repo_name_per_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            repos_txt = os.path.join(tmp, "repos.txt")
+            with open(repos_txt, "w", encoding="utf-8") as handle:
+                handle.write("mc-hk-hase-pega-adapter-job\n")
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(rconfig, "ROOT", tmp), \
+                 mock.patch.object(rconfig, "REPOS_TXT", repos_txt), \
+                 mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(tmp, "absent-route.csv")):
+                report = impact_report.build_report("source-system:PEGA")
+                markdown = impact_report.render_report_markdown(report)
+
+        self.assertIn("mc-hk-hase-pega-adapter-job", markdown)
+        self.assertNotIn("entrypoint_traceable=True", markdown)  # bare bool no longer printed
+
+
+class RuleTextAstAndValidationWiringTests(unittest.TestCase):
+    """Round B1/B3 wired into the existing use-case report: rule_text AST + consistency findings,
+    additive and null-safe (byte-identical to today when Ext/rules are absent)."""
+
+    def test_rule_text_ast_and_validation_populate_when_ext_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            master = (["use_case_id", "use_case_name", "status"], [["I0141", "Case", "Y"]])
+            rule = (["use_case_id", "channel", "priority", "route", "router",
+                     "traffic_percentage", "tag", "sender", "send_policy", "status"], [
+                ["I0141", "LETTER", "1", "R", "RT", "100", "T", "SYS", "IMMEDIATE", "Y"],
+                ["I0141", "EMAIL", "2", "R", "RT", "100", "T", "SYS", "IMMEDIATE", "Y"],
+                ["I0141", "SMS", "3", "R", "RT", "100", "T", "SYS", "IMMEDIATE", "Y"],
+            ])
+            ext = (["use_case_id", "rule_text"], [["I0141", "LETTER > (EMAIL & SMS)"]])
+            dataset_dir = _write_manifest_dataset(tmp, master=master, rule=rule, ext=ext)
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(rconfig, "ROOT", tmp), \
+                 mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(tmp, "absent.csv")):
+                report = impact_report.build_report("use-case:I0141")
+                markdown = impact_report.render_report_markdown(report)
+
+        self.assertEqual(report["rule_text_ast"]["mode"], "MIXED")
+        self.assertEqual(report["rule_text_ast"]["semantics"], "unconfirmed")
+        self.assertNotIn("rule_text_interpretation", report)  # unconfirmed by default -> no assertion
+        findings = {f["check"] for f in report["validation_findings"]}
+        self.assertIn("expression_vs_priority", findings)  # the I0141 canonical mismatch
+        self.assertIn("Channel Decision Expression", markdown)
+        self.assertIn("semantics: **unconfirmed**", markdown)
+        self.assertIn("Validation Findings", markdown)
+        self.assertIn("expression_vs_priority", markdown)
+
+    def test_absent_master_still_byte_identical_no_new_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", os.path.join(tmp, "no-manifest")), \
+                 mock.patch.object(rconfig, "USECASE_MASTER_CSV", os.path.join(tmp, "absent.csv")), \
+                 mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(tmp, "absent2.csv")), \
+                 mock.patch.object(rconfig, "ROOT", tmp):
+                report = impact_report.build_report("use-case:UC999")
+        self.assertNotIn("rule_text_ast", report)
+        self.assertNotIn("rule_text_interpretation", report)
+        self.assertNotIn("validation_findings", report)
+
+
+class SourceSystemCliPagingTests(unittest.TestCase):
+    """RUNBOOK-45 Part A follow-up #4: a direct CLI call to a source-system target used to dump
+    every member (e.g. ~880 for MDC) because parse_args never exposed offset/limit."""
+
+    def _dataset(self, tmp, count=60):
+        header = ["use_case_id", "use_case_name", "source_system", "status"]
+        rows = [[f"UC{i:03d}", f"Case {i}", "PEGA", "Y"] for i in range(count)]
+        return _write_manifest_dataset(tmp, master=(header, rows))
+
+    def _run(self, tmp, dataset_dir, argv):
+        stdout = io.StringIO()
+        with mock.patch.object(rconfig, "USECASE_DATASET_DIR", dataset_dir), \
+             mock.patch.object(rconfig, "ROOT", tmp), \
+             mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(tmp, "absent-route.csv")), \
+             contextlib.redirect_stdout(stdout):
+            exit_code = impact_report.main(argv)
+        return exit_code, stdout.getvalue()
+
+    def test_default_caps_at_50_not_a_full_dump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp, count=60)
+            exit_code, out = self._run(tmp, dataset_dir, ["source-system:PEGA", "--out", ""])
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("Use cases (60/60)", out)  # not a full unlabelled dump
+        self.assertIn("Use cases (50/60, truncated)", out)
+
+    def test_explicit_limit_overrides_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp, count=60)
+            exit_code, out = self._run(
+                tmp, dataset_dir, ["source-system:PEGA", "--limit", "5", "--out", ""])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Use cases (5/60, truncated)", out)
+
+    def test_limit_zero_means_unlimited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp, count=60)
+            exit_code, out = self._run(
+                tmp, dataset_dir, ["source-system:PEGA", "--limit", "0", "--out", ""])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Use cases (60/60)", out)
+        self.assertNotIn("truncated", out)
+
+    def test_include_inactive_and_offset_flow_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp, count=10)
+            exit_code, out = self._run(
+                tmp, dataset_dir,
+                ["source-system:PEGA", "--offset", "5", "--limit", "3", "--include-inactive", "--out", ""])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Use cases (3/10, truncated)", out)
+
+    def test_non_source_system_target_unaffected_by_paging_defaults(self):
+        # Non-source-system CLI calls must not be capped/broken by the new offset/limit plumbing.
+        with tempfile.TemporaryDirectory() as tmp:
+            recon_dir = os.path.join(tmp, "recon_out")
+            index_dir = os.path.join(tmp, "index")
+            os.makedirs(recon_dir, exist_ok=True)
+            os.makedirs(index_dir, exist_ok=True)
+            with open(os.path.join(recon_dir, "internal_edges.csv"), "w", encoding="utf-8", newline="") as h:
+                h.write("from_repo,to_repo\nsvc-a,svc-b\n")
+            with mock.patch.object(rconfig, "ROOT", tmp), \
+                 mock.patch.object(rconfig, "RECON_DIR", recon_dir), \
+                 mock.patch.object(rconfig, "INDEX_DIR", index_dir), \
+                 mock.patch.object(rconfig, "EDGES_CSV", os.path.join(recon_dir, "internal_edges.csv")), \
+                 mock.patch.object(rconfig, "MESSAGE_EDGES_CSV", os.path.join(index_dir, "absent.csv")), \
+                 mock.patch.object(rconfig, "USECASE_DATASET_DIR", os.path.join(index_dir, "no-manifest")), \
+                 mock.patch.object(rconfig, "USECASE_MASTER_CSV", os.path.join(index_dir, "absent.csv")), \
+                 mock.patch.object(rconfig, "USECASE_SNAPSHOT_CSV", os.path.join(index_dir, "absent.csv")), \
+                 mock.patch.object(rconfig, "REPO_TAGS_JSON", os.path.join(index_dir, "absent.json")), \
+                 mock.patch.object(rconfig, "GLOSSARY_JSON", os.path.join(index_dir, "absent.json")):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = impact_report.main(["svc-a", "--out", ""])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Impact Report", stdout.getvalue())
 
 
 if __name__ == "__main__":

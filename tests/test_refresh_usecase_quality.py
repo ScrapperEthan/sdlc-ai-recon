@@ -21,7 +21,11 @@ class UsecaseQualityStepTests(unittest.TestCase):
                 handle.write(MASTER_HEADER)
                 handle.write(MASTER_ROWS)
 
-            with mock.patch.object(rconfig, "USECASE_MASTER_CSV", master_path):
+            # No manifest dir here -> forces the legacy USECASE_MASTER_CSV fallback rather than an
+            # ambient SDLC_USECASE_DATASET pointing at a real box dataset (RUNBOOK-45 Part A
+            # follow-up #1: test isolation).
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", os.path.join(index_dir, "no-manifest-here")), \
+                 mock.patch.object(rconfig, "USECASE_MASTER_CSV", master_path):
                 step = refresh.write_usecase_quality(index_dir)
 
             self.assertEqual(step["returncode"], 0)
@@ -40,7 +44,8 @@ class UsecaseQualityStepTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             index_dir = os.path.join(tmp, "index")
             os.makedirs(index_dir, exist_ok=True)
-            with mock.patch.object(rconfig, "USECASE_MASTER_CSV", os.path.join(index_dir, "absent.csv")):
+            with mock.patch.object(rconfig, "USECASE_DATASET_DIR", os.path.join(index_dir, "no-manifest-here")), \
+                 mock.patch.object(rconfig, "USECASE_MASTER_CSV", os.path.join(index_dir, "absent.csv")):
                 step = refresh.write_usecase_quality(index_dir)
             self.assertEqual(step["returncode"], 0)
             self.assertIn("skipped", step)

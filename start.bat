@@ -1,5 +1,5 @@
 @echo off
-REM One-command launch for the HASE assistant.
+REM One-command launch for the MDC assistant.
 REM
 REM Starts BOTH pieces but you only ever open ONE url: the chat (single entry) reverse-proxies the
 REM arch/impact/coverage pages and their data endpoints from the retrieval service, which stays on
@@ -18,14 +18,14 @@ if "%RETRIEVAL_UPSTREAM_URL%"=="" set RETRIEVAL_UPSTREAM_URL=http://127.0.0.1:%R
 if "%SDLC_PORT%"=="" set SDLC_PORT=8765
 
 echo Starting retrieval service (internal) on %RETRIEVAL_HOST%:%RETRIEVAL_PORT% ...
-start "HASE retrieval (internal)" cmd /c "python retrieval_service.py"
+start "MDC retrieval (internal)" cmd /c "python retrieval_service.py"
 
 echo Waiting for the retrieval service to come up ...
 timeout /t 2 /nobreak >nul
 
 echo.
 echo ============================================================
-echo   HASE assistant is the single entry:  http://127.0.0.1:%SDLC_PORT%
+echo   MDC assistant is the single entry:  http://127.0.0.1:%SDLC_PORT%
 echo   (arch / impact / coverage load same-origin via the chat)
 echo ============================================================
 echo.

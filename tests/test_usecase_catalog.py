@@ -465,6 +465,145 @@ class QualityReportFullDatasetTests(unittest.TestCase):
         self.assertIn("Coverage funnel", markdown)
         self.assertIn("Route dimension", markdown)
 
+    def test_numeric_work_stream_is_not_counted_as_junk(self):
+        # RUNBOOK-45 Part A follow-up #2: the old rule treated any pure-numeric work_stream_name as
+        # junk, over-flagging 2,405/2,810 (85%) on real UAT because it's plausibly a real project id.
+        master = (
+            ["use_case_id", "work_stream_name", "status"],
+            [
+                ["UC001", "12345", "Y"],       # numeric -> NOT junk
+                ["UC002", "invalid", "Y"],     # sentinel junk
+                ["UC003", "streamC", "Y"],     # legit non-numeric, not junk
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = _write_manifest_dataset(tmp, environment="UAT", master=master)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                report = uc.quality_report()
+
+        self.assertEqual(report["junk_work_stream"]["count"], 1)
+        self.assertEqual(report["junk_work_stream"]["values"], ["invalid"])
+        self.assertNotIn("UC001", report["junk_work_stream"]["examples"])
+        self.assertEqual(report["numeric_work_stream"]["count"], 1)
+        self.assertIn("UC001", report["numeric_work_stream"]["examples"])
+        markdown = uc.render_quality_markdown(report)
+        self.assertIn("Numeric work_stream_name values (NOT counted as junk)", markdown)
+
+
+class SearchUsecasesTests(unittest.TestCase):
+    """Round B4 — the Use Case Catalog backend (retriever/usecase_catalog.search_usecases)."""
+
+    def _dataset(self, tmp):
+        master = (
+            ["use_case_id", "use_case_name", "project_name", "source_system",
+             "business_category", "country_code", "status"],
+            [
+                ["UC001", "Alpha Alert", "ProjA", "PEGA", "11", "HK", "Y"],
+                ["UC002", "Beta Batch", "ProjB", "PEGA", "6", "HK", "Y"],
+                ["UC003", "Gamma Case", "ProjC", "MDC", "11", "CN", "Y"],
+                ["UC004", "Delta Disabled", "ProjD", "PEGA", "11", "HK", "N"],
+            ],
+        )
+        rule = (["use_case_id", "channel", "priority", "route", "router",
+                 "traffic_percentage", "tag", "sender", "send_policy", "status"], [
+            ["UC001", "SMS", "1", "R", "RT", "100", "T", "SYS", "IMMEDIATE", "Y"],
+        ])
+        ext = (["use_case_id", "rule_text", "service_line", "delivery_mode", "endpoint"], [
+            ["UC001", "SMS", "1", "REALTIME", "svc-a"],
+        ])
+        return _write_manifest_dataset(tmp, environment="UAT", master=master, rule=rule, ext=ext)
+
+    def test_missing_dataset_is_clean_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "USECASE_DATASET_DIR", os.path.join(tmp, "no-manifest")), \
+                 mock.patch.object(config, "USECASE_MASTER_CSV", os.path.join(tmp, "absent.csv")):
+                result = uc.search_usecases()
+        self.assertFalse(result["available"])
+        self.assertEqual(result["items"], [])
+
+    def test_default_active_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases()
+        ids = {item["use_case_id"] for item in result["items"]}
+        self.assertEqual(ids, {"UC001", "UC002", "UC003"})  # UC004 disabled, excluded by default
+        self.assertEqual(result["total"], 3)
+
+    def test_include_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases(include_inactive=True)
+        ids = {item["use_case_id"] for item in result["items"]}
+        self.assertEqual(ids, {"UC001", "UC002", "UC003", "UC004"})
+
+    def test_query_substring_matches_id_name_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases(query="alert")
+        self.assertEqual({item["use_case_id"] for item in result["items"]}, {"UC001"})
+
+    def test_source_system_filter_uses_canonicalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases(source_system="pega")  # lowercase, still matches PEGA
+        self.assertEqual({item["use_case_id"] for item in result["items"]}, {"UC001", "UC002"})
+
+    def test_business_category_and_country_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases(business_category_code="11", country="HK")
+        self.assertEqual({item["use_case_id"] for item in result["items"]}, {"UC001"})
+
+    def test_channel_filter_uses_channel_rule_fact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                result = uc.search_usecases(channel="sms")
+        self.assertEqual({item["use_case_id"] for item in result["items"]}, {"UC001"})
+
+    def test_item_shape_carries_coverage_flags_and_endpoint_repos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            repos_txt = os.path.join(tmp, "repos.txt")
+            with open(repos_txt, "w", encoding="utf-8") as handle:
+                handle.write("svc-a\n")
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp), \
+                 mock.patch.object(config, "REPOS_TXT", repos_txt):
+                result = uc.search_usecases(query="UC001")
+        item = result["items"][0]
+        self.assertTrue(item["configured"])
+        self.assertTrue(item["expression_ready"])
+        self.assertTrue(item["entrypoint_traceable"])
+        self.assertEqual(item["endpoint_repos"][0]["repo"], "svc-a")
+        self.assertEqual(item["business_category_label"], "HASE_WPB_SERVICING_REALTIME_HIGHRISK")
+        self.assertTrue(item["citation"])
+
+    def test_pagination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = self._dataset(tmp)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                page1 = uc.search_usecases(limit=2)
+                page2 = uc.search_usecases(offset=2, limit=2)
+        self.assertEqual(page1["total"], 3)
+        self.assertEqual(page1["returned"], 2)
+        self.assertTrue(page1["truncated"])
+        self.assertEqual(page2["returned"], 1)
+        self.assertFalse(page2["truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

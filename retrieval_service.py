@@ -7,7 +7,8 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from retriever import code, flow, graph, messages, glossary, repo_tags, usecase_master, config as rconfig
+from retriever import (code, flow, graph, messages, glossary, repo_tags, usecase_consistency,
+                        usecase_master, config as rconfig)
 
 RETRIEVAL_HOST = os.environ.get("RETRIEVAL_HOST", "127.0.0.1")
 RETRIEVAL_PORT = int(os.environ.get("RETRIEVAL_PORT", "8848"))
@@ -101,6 +102,34 @@ def _source_systems_payload():
     return {"items": items, "count": len(items)}
 
 
+def _usecase_impact_payload(qs):
+    value = _required(_str(qs, "use_case_id"), "use_case_id")
+    return impact_report.build_report(f"use-case:{value}")
+
+
+def _search_usecases_payload(qs):
+    return usecase_master.search_usecases(
+        query=_str(qs, "query") or None,
+        source_system=_str(qs, "source_system") or None,
+        include_inactive=_str(qs, "include_inactive").lower() in {"1", "true"},
+        channel=_str(qs, "channel") or None,
+        business_category_code=_str(qs, "business_category_code") or None,
+        country=_str(qs, "country") or None,
+        service_line=_str(qs, "service_line") or None,
+        delivery_mode=_str(qs, "delivery_mode") or None,
+        offset=_int(qs, "offset", 0),
+        limit=_int(qs, "limit", 50),
+    )
+
+
+def _usecase_quality_payload(qs):
+    return usecase_consistency.quality_findings(
+        severity=_str(qs, "severity") or None,
+        offset=_int(qs, "offset", 0),
+        limit=_int(qs, "limit", 50),
+    )
+
+
 def _outage_impact_payload(qs):
     supplied = [(key, _str(qs, key).strip()) for key in ("channel", "vendor", "repo") if _str(qs, key).strip()]
     if len(supplied) != 1:
@@ -176,6 +205,9 @@ ROUTES = {
     "/outage-impact": _outage_impact_payload,
     "/source-system-impact": _source_system_impact_payload,
     "/source-systems": lambda qs: _source_systems_payload(),
+    "/usecase-impact": _usecase_impact_payload,
+    "/search-usecases": _search_usecases_payload,
+    "/usecase-quality": _usecase_quality_payload,
 }
 
 

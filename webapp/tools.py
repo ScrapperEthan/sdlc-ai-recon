@@ -2,7 +2,8 @@
 Add a tool by adding a schema here and a branch in dispatch()."""
 import impact_report
 import outage_report
-from retriever import graph, messages as msg, code, flow, unified_impact, arch_focus, usecase_master, repo_tags
+from retriever import (graph, messages as msg, code, flow, unified_impact, arch_focus,
+                        usecase_consistency, usecase_master, repo_tags)
 
 # Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
 # (dependency closure), so the inline view's repo sample leads with what actually breaks.
@@ -156,6 +157,44 @@ TOOLS = [
             "use-case/active/inactive counts. The picker for source_system_impact. Call when the "
             "user asks 'what upstream systems are there' or needs to disambiguate a name.",
             {}),
+    _schema("usecase_impact",
+            "FULL detail for ONE Use Case: identity/business/governance, consent-preflight (policy "
+            "checks, NOT the channel list), channels_declared (channel_rule.channel FACT), resolved "
+            "endpoint_repos (declared source_system entrypoint), the rule_text decision expression "
+            "as a STRUCTURAL tree (rule_text_ast — mode/operator_tree/normalized_expression; while "
+            "semantics=='unconfirmed' — the default — NEVER read this as an asserted fallback/"
+            "parallel order, only as structure), validation_findings (rule_text vs channel_rule "
+            "consistency, severity-ranked), plus upstream/downstream repos and the channel chain. "
+            "Call this for 'what is use case X', 'tell me about M2050', 'M2050 的渠道/上游/owner 是"
+            "什么', or before answering any question about one specific use_case_id's configuration.",
+            {"use_case_id": {"type": "string"}}, ["use_case_id"]),
+    _schema("search_usecases",
+            "Use Case CATALOG search across the full ~2,800-row master dataset, server-side "
+            "paginated (never dumps the whole table — `items` defaults to the first 50 matches; "
+            "use `offset`/`limit` to page). Filters: `query` (substring on id/name/project), "
+            "`source_system` (canonicalized), `include_inactive`, `channel` (from channel_rule "
+            "fact), `business_category_code`, `country`, `service_line`, `delivery_mode`. Call this "
+            "for 'find use cases matching X', 'list SMS use cases in HK', 'show me PEGA batch use "
+            "cases' — anything that filters/browses the catalog rather than asking about ONE known "
+            "use_case_id (for that, use usecase_impact instead).",
+            {"query": {"type": "string"}, "source_system": {"type": "string"},
+             "include_inactive": {"type": "boolean"}, "channel": {"type": "string"},
+             "business_category_code": {"type": "string"}, "country": {"type": "string"},
+             "service_line": {"type": "string"}, "delivery_mode": {"type": "string"},
+             "offset": {"type": "integer"}, "limit": {"type": "integer"}}, []),
+    _schema("usecase_quality_findings",
+            "Data-quality / consistency DASHBOARD across the whole active Use Case dataset: orphan "
+            "channel_rule/ext rows, active use cases with no channel rule, master rows missing Ext, "
+            "null priority (risk of NPE), PUSH+INBOX with no route/router, illegal business_category "
+            "codes, plus PER-USE-CASE rule_text-vs-channel_rule mismatches (channel_set_mismatch, "
+            "expression_vs_priority — e.g. the I0141/I0142 case where rule_text disagrees with the "
+            "priority order). Severity-ranked; `counts_by_severity` is always the FULL breakdown, "
+            "`findings` is paginated (`offset`/`limit`) and optionally filtered by `severity` "
+            "('error'/'warning'/'info'). These are FLAGGED disagreements between data sources, not "
+            "confirmed production failures — say so. Call for 'what data quality issues are there', "
+            "'show me config problems', '有哪些 use case 配置有问题'.",
+            {"severity": {"type": "string"}, "offset": {"type": "integer"},
+             "limit": {"type": "integer"}}, []),
     _schema("show_coverage",
             "Render the 392-repo estate overview INLINE, optionally filtered. Call this when the user asks "
             "to see the repos on a channel or matching a keyword ('show me the SMS repos', '有哪些 tracking "
@@ -261,6 +300,33 @@ def dispatch(name, a):
             return {"ok": False, "error": str(error)}
     if name == "list_source_systems":
         return {"items": usecase_master.source_systems()}
+    if name == "usecase_impact":
+        value = (a.get("use_case_id") or "").strip()
+        if not value:
+            return {"ok": False, "error": "use_case_id is required"}
+        try:
+            return impact_report.build_report(f"use-case:{value}")
+        except (FileNotFoundError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+    if name == "search_usecases":
+        return usecase_master.search_usecases(
+            query=a.get("query") or None,
+            source_system=a.get("source_system") or None,
+            include_inactive=bool(a.get("include_inactive", False)),
+            channel=a.get("channel") or None,
+            business_category_code=a.get("business_category_code") or None,
+            country=a.get("country") or None,
+            service_line=a.get("service_line") or None,
+            delivery_mode=a.get("delivery_mode") or None,
+            offset=int(a.get("offset") or 0),
+            limit=int(a.get("limit") or 50),
+        )
+    if name == "usecase_quality_findings":
+        return usecase_consistency.quality_findings(
+            severity=a.get("severity") or None,
+            offset=int(a.get("offset") or 0),
+            limit=int(a.get("limit") or 50),
+        )
     if name == "show_coverage":
         kind = (a.get("kind") or "").strip().lower()
         value = (a.get("value") or "").strip()

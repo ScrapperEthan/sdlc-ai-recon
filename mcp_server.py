@@ -18,7 +18,7 @@ except ImportError:
     )
 
 import impact_report
-from retriever import graph, messages, code, flow, unified_impact, usecase_master
+from retriever import graph, messages, code, flow, unified_impact, usecase_consistency, usecase_master
 
 mcp = FastMCP("sdlc-retriever")
 
@@ -126,6 +126,44 @@ def list_source_systems() -> list:
     """Distinct CANONICALIZED upstream business systems (source_system) — case/format variants
     folded into one entry with raw_variants listed — with use-case/active/inactive counts."""
     return usecase_master.source_systems()
+
+
+@mcp.tool()
+def usecase_impact(use_case_id: str) -> dict:
+    """Full detail for ONE use case: identity/business/governance, consent-preflight, declared
+    channels + endpoint repos, the rule_text decision expression as a STRUCTURAL tree
+    (rule_text_ast — never read as an asserted fallback/parallel order while semantics is
+    "unconfirmed"), validation_findings (rule_text vs channel_rule consistency), upstream/
+    downstream repos and the channel chain."""
+    try:
+        return impact_report.build_report(f"use-case:{use_case_id}")
+    except (FileNotFoundError, ValueError) as error:
+        return {"ok": False, "error": str(error)}
+
+
+@mcp.tool()
+def search_usecases(query: str = "", source_system: str = "", include_inactive: bool = False,
+                     channel: str = "", business_category_code: str = "", country: str = "",
+                     service_line: str = "", delivery_mode: str = "",
+                     offset: int = 0, limit: int = 50) -> dict:
+    """Use Case Catalog search across the full master dataset, server-side paginated (never dumps
+    the whole table — items defaults to the first 50 matches)."""
+    return usecase_master.search_usecases(
+        query=query or None, source_system=source_system or None,
+        include_inactive=include_inactive, channel=channel or None,
+        business_category_code=business_category_code or None, country=country or None,
+        service_line=service_line or None, delivery_mode=delivery_mode or None,
+        offset=offset, limit=limit,
+    )
+
+
+@mcp.tool()
+def usecase_quality_findings(severity: str = "", offset: int = 0, limit: int = 50) -> dict:
+    """Data-quality / consistency findings across the whole active Use Case dataset: orphan
+    channel_rule/ext rows, active use cases with no channel rule, missing Ext, null priority,
+    PUSH+INBOX unconfigured, illegal business_category, plus per-use-case rule_text-vs-channel_rule
+    mismatches. Severity-ranked; these are flagged disagreements, not confirmed prod failures."""
+    return usecase_consistency.quality_findings(severity=severity or None, offset=offset, limit=limit)
 
 
 if __name__ == "__main__":

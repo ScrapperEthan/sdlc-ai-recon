@@ -74,6 +74,63 @@ class SourceSystemToolTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("repo_tags.json", result["error"])
 
+    def test_usecase_impact_missing_id_is_clean_error(self):
+        result = tools.dispatch("usecase_impact", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("use_case_id", result["error"])
+
+    def test_usecase_impact_delegates_to_impact_report_build_report(self):
+        sentinel = {"target": {"kind": "use-case"}}
+        with mock.patch.object(tools.impact_report, "build_report", return_value=sentinel) as build:
+            result = tools.dispatch("usecase_impact", {"use_case_id": "M2050"})
+        build.assert_called_once_with("use-case:M2050")
+        self.assertEqual(result, sentinel)
+
+    def test_usecase_impact_unknown_id_is_clean_error_not_a_crash(self):
+        with mock.patch.object(tools.impact_report, "build_report",
+                               side_effect=FileNotFoundError("unknown target: use-case:NOPE")):
+            result = tools.dispatch("usecase_impact", {"use_case_id": "NOPE"})
+        self.assertFalse(result["ok"])
+        self.assertIn("unknown target", result["error"])
+
+    def test_search_usecases_delegates_with_defaults(self):
+        sentinel = {"available": True, "items": []}
+        with mock.patch.object(tools.usecase_master, "search_usecases", return_value=sentinel) as search:
+            result = tools.dispatch("search_usecases", {"query": "alert"})
+        search.assert_called_once_with(
+            query="alert", source_system=None, include_inactive=False, channel=None,
+            business_category_code=None, country=None, service_line=None, delivery_mode=None,
+            offset=0, limit=50)
+        self.assertEqual(result, sentinel)
+
+    def test_search_usecases_filters_pass_through(self):
+        sentinel = {"available": True, "items": []}
+        with mock.patch.object(tools.usecase_master, "search_usecases", return_value=sentinel) as search:
+            tools.dispatch("search_usecases", {
+                "source_system": "PEGA", "include_inactive": True, "channel": "SMS",
+                "business_category_code": "11", "country": "HK", "service_line": "1",
+                "delivery_mode": "REALTIME", "offset": 10, "limit": 20,
+            })
+        search.assert_called_once_with(
+            query=None, source_system="PEGA", include_inactive=True, channel="SMS",
+            business_category_code="11", country="HK", service_line="1", delivery_mode="REALTIME",
+            offset=10, limit=20)
+
+    def test_usecase_quality_findings_delegates_with_defaults(self):
+        sentinel = {"available": True, "findings": []}
+        with mock.patch.object(tools.usecase_consistency, "quality_findings",
+                               return_value=sentinel) as qf:
+            result = tools.dispatch("usecase_quality_findings", {})
+        qf.assert_called_once_with(severity=None, offset=0, limit=50)
+        self.assertEqual(result, sentinel)
+
+    def test_usecase_quality_findings_severity_pass_through(self):
+        sentinel = {"available": True, "findings": []}
+        with mock.patch.object(tools.usecase_consistency, "quality_findings",
+                               return_value=sentinel) as qf:
+            tools.dispatch("usecase_quality_findings", {"severity": "error", "offset": 5, "limit": 10})
+        qf.assert_called_once_with(severity="error", offset=5, limit=10)
+
 
 if __name__ == "__main__":
     unittest.main()

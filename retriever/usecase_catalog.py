@@ -897,6 +897,117 @@ def owners_for(use_case_ids):
 
 
 # ---------------------------------------------------------------------------
+# Round B4 — Use Case Catalog search (server-side paginated, over the FULL master dataset)
+# ---------------------------------------------------------------------------
+
+def search_usecases(query=None, source_system=None, include_inactive=False, channel=None,
+                     business_category_code=None, country=None, service_line=None,
+                     delivery_mode=None, offset=0, limit=50):
+    """Searchable/filterable Use Case Catalog list — the full 2,800+ row master dataset, ALWAYS
+    server-side paginated (never dumped whole; `limit=0` means unlimited, use with care). `query`
+    substring-matches use_case_id/name/project (case-insensitive). Defaults to Active only, like
+    `use_cases_for_source_system`. Each item carries the Round A coverage-funnel flags plus resolved
+    `endpoint_repos`, matching that function's item shape. Missing dataset -> available:False, empty
+    items, never a crash."""
+    manifest = snapshot_manifest()
+    _dataset, path, rows, cols = _master_rows()
+    empty = {"available": False, "source": manifest, "total": 0, "returned": 0,
+             "truncated": False, "items": []}
+    if not rows:
+        return empty
+
+    bound, _ambiguous = _master_column_map(cols)
+    id_col = bound.get("use_case_id")
+    name_col = bound.get("use_case_name")
+    project_col = bound.get("project_name")
+    source_col = bound.get("source_system")
+    status_col = bound.get("status")
+    category_col = bound.get("business_category")
+    country_col = bound.get("country_code")
+
+    query_needle = (query or "").strip().lower()
+    source_canon = canonicalize_source_system(source_system)["canonical"] if source_system else None
+    channel_needle = (channel or "").strip().upper()
+    category_needle = (business_category_code or "").strip()
+    country_needle = (country or "").strip().upper()
+    service_line_needle = (service_line or "").strip()
+    delivery_mode_needle = (delivery_mode or "").strip().upper()
+
+    rules_idx = rules_by_use_case_id()
+    ext_idx = ext_by_use_case_id()
+
+    matched = []
+    for line_no, row in rows:
+        uc_id = (row.get(id_col) or "").strip() if id_col else ""
+        if not uc_id:
+            continue
+        status_raw = (row.get(status_col) or "").strip() if status_col else ""
+        active = (status_raw.upper() == "Y") if status_col else True
+        if not include_inactive and not active:
+            continue
+
+        name = (row.get(name_col) or "").strip() if name_col else ""
+        project = (row.get(project_col) or "").strip() if project_col else ""
+        raw_source = (row.get(source_col) or "").strip() if source_col else ""
+        source_info = canonicalize_source_system(raw_source) if raw_source else None
+        if source_canon and (not source_info or source_info["canonical"] != source_canon):
+            continue
+        if query_needle and query_needle not in (uc_id + name + project).lower():
+            continue
+        category_raw = (row.get(category_col) or "").strip() if category_col else ""
+        if category_needle and category_raw != category_needle:
+            continue
+        country_raw = (row.get(country_col) or "").strip() if country_col else ""
+        if country_needle and country_raw.upper() != country_needle:
+            continue
+
+        key = uc_id.lower()
+        rules = rules_idx.get(key) or []
+        ext = ext_idx.get(key)
+        channels = sorted({r["channel"].strip().upper() for r in rules if (r.get("channel") or "").strip()})
+        if channel_needle and channel_needle not in channels:
+            continue
+        if service_line_needle and (
+            not ext or (ext.get("service_line") or "").strip() != service_line_needle
+        ):
+            continue
+        if delivery_mode_needle and (
+            not ext or (ext.get("delivery_mode") or "").strip().upper() != delivery_mode_needle
+        ):
+            continue
+
+        endpoint_repos = resolve_endpoint(ext.get("endpoint") or "") if ext else []
+        matched.append({
+            "use_case_id": uc_id,
+            "name": name,
+            "project": project,
+            "source_system": source_info["display_name"] if source_info else "",
+            "source_system_canonical": source_info["canonical"] if source_info else "",
+            "active": active,
+            "channels": channels,
+            "business_category_code": category_raw,
+            "business_category_label": _category_label(category_raw),
+            "country": country_raw,
+            "service_line": (ext.get("service_line") if ext else "") or "",
+            "delivery_mode": (ext.get("delivery_mode") if ext else "") or "",
+            "configured": bool(rules),
+            "expression_ready": bool(ext and (ext.get("rule_text") or "").strip()),
+            "entrypoint_traceable": _entrypoint_traceable(endpoint_repos),
+            "endpoint_repos": endpoint_repos,
+            "citation": _citation_for(path, line_no),
+        })
+
+    total = len(matched)
+    offset = max(0, offset or 0)
+    window = matched[offset:offset + limit] if limit else matched[offset:]
+    return {
+        "available": True, "source": manifest, "total": total,
+        "returned": len(window), "truncated": (offset + len(window)) < total,
+        "items": window,
+    }
+
+
+# ---------------------------------------------------------------------------
 # quality report (Building block 10)
 # ---------------------------------------------------------------------------
 
@@ -924,7 +1035,7 @@ def quality_report(examples_limit=5):
 
     missing_source, stale_ids = [], []
     active_ids, inactive_ids = [], []
-    illegal_enum, junk_streams, statuses = {}, {}, {}
+    illegal_enum, junk_streams, numeric_streams, statuses = {}, {}, {}, {}
     configured_ids, expression_ready_ids, catalog_only_ids = [], [], []
     reference = datetime.now(timezone.utc).replace(tzinfo=None)
     total = 0
@@ -952,8 +1063,13 @@ def quality_report(examples_limit=5):
                     illegal_enum.setdefault(raw, []).append(uc)
         if workstream_col:
             value = (row.get(workstream_col) or "").strip()
-            if value.lower() in _JUNK_WORK_STREAM or value.isdigit():
+            if value.lower() in _JUNK_WORK_STREAM:
                 junk_streams.setdefault(value or "(blank)", []).append(uc)
+            elif value.isdigit():
+                # A pure-numeric work_stream_name is plausibly a real project id, not junk (RUNBOOK-45
+                # Part A follow-up #2 — the old isdigit()->junk rule over-flagged 2,405/2,810 on UAT).
+                # Tracked separately, informational only, until a Part-B owner confirms otherwise.
+                numeric_streams.setdefault(value, []).append(uc)
         if status_col:
             value = (row.get(status_col) or "").strip()
             statuses[value] = statuses.get(value, 0) + 1
@@ -1011,6 +1127,13 @@ def quality_report(examples_limit=5):
             "values": sorted(junk_streams),
             "examples": sample([uc for ids in junk_streams.values() for uc in ids]),
         },
+        "numeric_work_stream": {
+            "count": sum(len(v) for v in numeric_streams.values()),
+            "values": sorted(numeric_streams, key=lambda v: (len(v), v))[:examples_limit],
+            "examples": sample([uc for ids in numeric_streams.values() for uc in ids]),
+            "note": ("pure-numeric work_stream_name — plausibly a real project id, NOT counted as "
+                      "junk; pending owner confirmation (RUNBOOK-45 Part B)"),
+        },
         "status_uniform": {
             "uniform": len(statuses) <= 1,
             "value": next(iter(statuses), None) if len(statuses) == 1 else None,
@@ -1065,6 +1188,9 @@ def render_quality_markdown(report):
         "## Junk work_stream_name values",
         f"- values: {', '.join(report['junk_work_stream']['values']) or 'none'}; "
         f"{report['junk_work_stream']['count']} rows",
+        "",
+        "## Numeric work_stream_name values (NOT counted as junk)",
+        f"- {report['numeric_work_stream']['count']} rows; {report['numeric_work_stream']['note']}",
         "",
         "## status column",
         f"- uniform: {report['status_uniform']['uniform']}"

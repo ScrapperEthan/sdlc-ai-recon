@@ -532,7 +532,7 @@
         }, biz.label));
         g.appendChild(el("text", {
           x: bx + 14, y: by + 36, "font-size": 10, fill: "#6b7a92"
-        }, "业务上游 · 声明字段"));
+        }, biz.dynamic ? "业务上游 · 声明字段（未预置）" : "业务上游 · 声明字段"));
         svg.appendChild(g);
 
         const target = state.nodeById[biz.edge_to || "ingress-api"];
@@ -690,11 +690,25 @@
     }
 
     // Business-upstream sources are a separate, hidden-by-default array (not part of catalog.nodes)
-    // — see retriever/arch_focus.py._business_source_for, which this mirrors.
-    function findBusinessSource(value) {
+    // — see retriever/arch_focus.py._business_source_for, which this mirrors. `label` is the
+    // properly-cased display name from arch_focus.focus()'s `&label=` URL param (e.g. "PowerCard"
+    // instead of the lower-cased highlight value "powercard") — falls back to the raw value.
+    function findBusinessSource(value, label) {
       const v = (value || "").toLowerCase();
       const sources = state.catalog.business_sources || [];
-      return sources.find((s) => (s.source_system || "").toLowerCase() === v || (s.label || "").toLowerCase() === v) || null;
+      const found = sources.find((s) => (s.source_system || "").toLowerCase() === v || (s.label || "").toLowerCase() === v);
+      if (found) return found;
+      if (!v) return null;
+      // Round B6: the static list only pre-declares a handful of source systems for the overview
+      // gutter — UAT has ~150 distinct ones. Any other value still gets a gutter node, synthesized
+      // on the fly, so focus/highlight works for the full universe, not just the pre-declared few.
+      return {
+        id: "biz-dyn-" + v.replace(/[^a-z0-9]+/g, "-"),
+        label: label || value,
+        source_system: value,
+        edge_to: "ingress-api",
+        dynamic: true,
+      };
     }
 
     function computeHighlight(kind, value) {
@@ -733,9 +747,10 @@
     // exists in the DOM by the time applyHighlight() runs (renderDiagram rebuilds from scratch).
     function prepareHighlightState() {
       state.activeBusinessSource = null;
-      const hl = parseHighlightParam(new URLSearchParams(location.search));
+      const params = new URLSearchParams(location.search);
+      const hl = parseHighlightParam(params);
       if (hl && hl.kind === "source-system" && hl.value) {
-        state.activeBusinessSource = findBusinessSource(hl.value);
+        state.activeBusinessSource = findBusinessSource(hl.value, params.get("label"));
       }
     }
 

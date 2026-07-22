@@ -49,6 +49,10 @@ USECASE = """use_case_id,topic
 cancel-card,sms.alert.topic
 """
 
+USECASE_MASTER = """use_case_id,use_case_name,source_system,status
+cancel-card,Cancel Card,PEGA,Y
+"""
+
 
 class RetrievalServiceTests(unittest.TestCase):
     def _write_fixture_root(self, root):
@@ -81,6 +85,17 @@ class RetrievalServiceTests(unittest.TestCase):
         with open(os.path.join(mirror_dir, "IngressResource.java"), "w", encoding="utf-8") as handle:
             handle.write("class IngressResource {}\n")
 
+        dataset_dir = os.path.join(index_dir, "usecase-snapshots", "active")
+        os.makedirs(dataset_dir, exist_ok=True)
+        with open(os.path.join(dataset_dir, "tbl_use_case.snapshot.csv"), "w",
+                  encoding="utf-8", newline="") as handle:
+            handle.write(USECASE_MASTER)
+        with open(os.path.join(dataset_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+            json.dump({"environment": "UAT", "snapshot_id": "test",
+                       "tables": {"tbl_use_case": {"file": "tbl_use_case.snapshot.csv", "row_count": 1}}},
+                      handle)
+        return dataset_dir
+
     def _request_json(self, url):
         with urllib.request.urlopen(url, timeout=5) as response:
             return response.getcode(), json.loads(response.read().decode("utf-8"))
@@ -91,7 +106,7 @@ class RetrievalServiceTests(unittest.TestCase):
 
     def test_http_routes_match_fixture_graph_and_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._write_fixture_root(tmp)
+            dataset_dir = self._write_fixture_root(tmp)
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.object(rconfig, "ROOT", tmp))
                 stack.enter_context(mock.patch.object(rconfig, "MIRROR", os.path.join(tmp, "mirror")))
@@ -110,6 +125,7 @@ class RetrievalServiceTests(unittest.TestCase):
                         os.path.join(tmp, "index", "tbl_event_router_usecase_topic.snapshot.csv"),
                     )
                 )
+                stack.enter_context(mock.patch.object(rconfig, "USECASE_DATASET_DIR", dataset_dir))
                 stack.enter_context(
                     mock.patch.object(rconfig, "GLOSSARY_JSON", os.path.join(tmp, "index", "glossary.json"))
                 )
@@ -153,6 +169,24 @@ class RetrievalServiceTests(unittest.TestCase):
                     self.assertTrue(
                         any(item["type"] == "honesty" for item in usecase_report["risk_callouts"])
                     )
+                    # rule_text_ast/validation_findings from Round B1/B3 flow through automatically
+                    # (impact_report.build_report is the same function /impact-report calls)
+                    self.assertEqual(usecase_report["target"]["business"]["source_system"], "PEGA")
+
+                    status, uc_impact = self._request_json(f"{base}/usecase-impact?use_case_id=cancel-card")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(uc_impact["target"]["kind"], "use-case")
+                    self.assertEqual(uc_impact["target"]["business"]["source_system"], "PEGA")
+
+                    status, catalog = self._request_json(f"{base}/search-usecases?query=cancel")
+                    self.assertEqual(status, 200)
+                    self.assertTrue(catalog["available"])
+                    self.assertEqual({i["use_case_id"] for i in catalog["items"]}, {"cancel-card"})
+
+                    status, quality = self._request_json(f"{base}/usecase-quality")
+                    self.assertEqual(status, 200)
+                    self.assertTrue(quality["available"])
+                    self.assertIn("portal_composer_caveat", quality)
 
                     status, topic_report = self._request_json(f"{base}/impact-report?target=topic:sms.alert.topic")
                     self.assertEqual(status, 200)

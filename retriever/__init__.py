@@ -1,5 +1,5 @@
 """
-Retrieval layer for the HASE multi-repo assistant.
+Retrieval layer for the MDC multi-repo assistant.
 
 Read-only. Standard library only. NO database access, NO credentials — it reads
 the static artifacts we already produced:

@@ -29,10 +29,42 @@ OUTBOUND_RE = re.compile(r"-(?P<vendor>[a-z0-9-]+)-outbound-api$", re.I)
 # Canonicalize to one token per vendor. Extend as new aliases surface — keep values lowercase.
 VENDOR_ALIASES = {"htcl": "3hk"}
 
+# The real last-mile carriers/vendors that legitimately appear as a token in a delivery-job name.
+# The vendor is chosen as the RIGHTMOST *known* token (see _pick_vendor); a name whose only
+# pre-channel tokens are segment/mode/system words (hase, hr, rt, bat, svc, gen, …) has NO vendor
+# and buckets under "unknown" rather than mis-promoting one of those words. This both stops phantom
+# vendor buckets (`hr`, `iccm*` — RUNBOOK-50/51) and the `mc-hk-hase-sms-deli-job` → "hase"
+# regression that let every mc-hk-hase outbound API be grabbed into a bogus bucket. Names are
+# CANONICAL (post-canon_vendor): htcl folds to 3hk, the iccm* family folds to iccm.
+KNOWN_VENDORS = frozenset({
+    "csl", "sinch", "3hk", "cm", "lx", "aurora", "awssg", "awshk",  # sms / push carriers
+    "pfp", "pps", "sfmc",                                            # email
+    "iccm", "otx",                                                  # letter
+    "haro",                                                         # whatsapp
+    "sns", "apns", "fcm",                                           # push infra / terminals
+})
+UNKNOWN_VENDOR = "unknown"
+
 
 def canon_vendor(vendor):
-    """Fold a raw vendor token onto its canonical name (identity when no alias applies)."""
+    """Fold a raw vendor token onto its canonical name (identity when no alias applies).
+
+    The ICCM letter platform appears under family variants in repo names (iccms, iccmh, iccmt,
+    iccmv, iccmpt); collapse the whole `iccm*` family to `iccm` so they don't split into phantom
+    per-variant vendor buckets (RUNBOOK-51)."""
+    if vendor.startswith("iccm"):
+        return "iccm"
     return VENDOR_ALIASES.get(vendor, vendor)
+
+
+def _pick_vendor(pre_channel_tokens):
+    """The vendor is the rightmost token whose canonical form is a KNOWN carrier; if none of the
+    tokens is a known vendor, the job has no identifiable carrier and buckets under "unknown"."""
+    for token in reversed(pre_channel_tokens):
+        canon = canon_vendor(token.lower())
+        if canon in KNOWN_VENDORS:
+            return canon
+    return UNKNOWN_VENDOR
 
 
 def load_json(path):
@@ -99,9 +131,12 @@ def build_topology(
         delivery = DELIVERY_RE.match(repo)
         if delivery:
             channel = delivery.group("channel").lower()
-            vendor = canon_vendor(delivery.group("vendor").lower())
-            name_tokens = [part.lower() for part in delivery.group("prefix").split("-") if part]
-            job = {"repo": repo, "channel": channel, "vendor": vendor, "name_tokens": name_tokens}
+            # Every token before the channel (the regex's `vendor` group is just the last one) is a
+            # vendor candidate; the real carrier is the rightmost KNOWN one. Picking positionally
+            # promoted mode/system words (hr, hase) and split ICCM variants into phantom vendors.
+            pre_channel = [t for t in f"{delivery.group('prefix')}-{delivery.group('vendor')}".split("-") if t]
+            vendor = _pick_vendor(pre_channel)
+            job = {"repo": repo, "channel": channel, "vendor": vendor, "name_tokens": [t.lower() for t in pre_channel]}
             qualifier = (delivery.group("qualifier") or "").lower()
             if qualifier:
                 job["message_type"] = qualifier

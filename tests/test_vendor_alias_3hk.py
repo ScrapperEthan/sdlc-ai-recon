@@ -105,6 +105,64 @@ class VendorAliasTests(unittest.TestCase):
         self.assertNotIn("amet-mdc-hsbc-cm-outbound-api", repos)
 
 
+class VendorTokenPickingTests(unittest.TestCase):
+    """RUNBOOK-51: the vendor is the rightmost KNOWN carrier token, so mode/system words and split
+    ICCM variants stop becoming phantom SMS vendor buckets, and a vendor-less generic delivery job
+    no longer creates a `hase` bucket that steals outbound APIs."""
+
+    def _topo(self, repos):
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            with open(edges, "w", newline="", encoding="utf-8") as handle:
+                w = csv.writer(handle)
+                w.writerow(["from_repo", "to_repo"])
+                for r in repos:
+                    w.writerow([r, "api-starter"])
+            payload, _, _ = make_delivery_topology.build_topology(
+                edges_path=edges,
+                override_path=os.path.join(tmp, "no_override.json"),
+                repo_tags_path=os.path.join(tmp, "no_tags.json"),
+            )
+        return payload
+
+    def test_mode_and_system_tokens_are_not_vendors(self):
+        topo = self._topo([
+            "mc-hk-hase-sms-deli-job",                  # no carrier token → unknown
+            "mc-hk-hase-svc-rt-hr-csl-sms-deli-job",    # hr is a mode word → carrier is csl
+        ])
+        sms = topo["sms"]
+        self.assertNotIn("hase", sms)
+        self.assertNotIn("hr", sms)
+        self.assertIn("csl", sms)
+        self.assertIn(make_delivery_topology.UNKNOWN_VENDOR, sms)
+        self.assertIn("mc-hk-hase-sms-deli-job",
+                      {j["repo"] for j in sms[make_delivery_topology.UNKNOWN_VENDOR]["delivery_jobs"]})
+
+    def test_iccm_family_folds_to_iccm(self):
+        topo = self._topo([
+            "mc-hk-hsbc-svc-bat-iccms-sms-deli-job",
+            "mc-hk-hase-svc-tc-iccmpt-sms-deli-job",
+        ])
+        sms = topo["sms"]
+        self.assertIn("iccm", sms)
+        for phantom in ("iccms", "iccmpt", "iccmh", "iccmt", "iccmv"):
+            self.assertNotIn(phantom, sms)
+        self.assertEqual(len(sms["iccm"]["delivery_jobs"]), 2)
+
+    def test_generic_deli_job_does_not_steal_outbound_apis(self):
+        # the `mc-hk-hase-sms-deli-job` → "hase" regression: with no "hase" vendor bucket, the
+        # mc-hk-hase outbound API is not grabbed into it; it resolves to its real carrier (3hk).
+        topo = self._topo([
+            "mc-hk-hase-sms-deli-job",
+            "mc-hk-hase-svc-bat-htcl-sms-deli-job",   # gives known_vendors a real 3hk
+            "mc-hk-hase-htcl-outbound-api",
+        ])
+        sms = topo["sms"]
+        self.assertNotIn("hase", sms)
+        self.assertIn("mc-hk-hase-htcl-outbound-api",
+                      {a["repo"] for a in sms["3hk"]["outbound_apis"]})
+
+
 class ArchCatalogInvariantTests(unittest.TestCase):
     def test_no_vendorless_external_node_on_a_multivendor_channel(self):
         """A vendor-less external node binds EVERY vendor on its channel (see test_arch_map). That is

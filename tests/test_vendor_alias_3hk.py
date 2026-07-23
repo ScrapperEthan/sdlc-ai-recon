@@ -64,6 +64,29 @@ class VendorAliasTests(unittest.TestCase):
         self.assertEqual(make_delivery_topology.canon_vendor("csl"), "csl")
         self.assertEqual(make_delivery_topology.canon_vendor("htcl"), "3hk")
 
+    def test_2way_qualifier_does_not_become_the_vendor(self):
+        """`htcl-2way-sms` must bucket under 3hk (via htcl), not a phantom `2way` vendor —
+        2-way SMS is a 3HK flow (owner-confirmed 2026-07-23)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            edges = os.path.join(tmp, "internal_edges.csv")
+            with open(edges, "w", newline="", encoding="utf-8") as handle:
+                w = csv.writer(handle)
+                w.writerow(["from_repo", "to_repo"])
+                w.writerow(["mc-hk-hase-svc-bat-htcl-2way-sms-deli-job", "api-starter"])
+                w.writerow(["amet-mdc-hsbc-svc-rt-hr-csl-sms-deli-job", "api-starter"])
+            payload, _, _ = make_delivery_topology.build_topology(
+                edges_path=edges,
+                override_path=os.path.join(tmp, "no_override.json"),
+                repo_tags_path=os.path.join(tmp, "no_tags.json"),
+            )
+        sms = payload["sms"]
+        self.assertNotIn("2way", sms, "'2way' is a message-type qualifier, not a vendor")
+        self.assertIn("mc-hk-hase-svc-bat-htcl-2way-sms-deli-job",
+                      {job["repo"] for job in sms["3hk"]["delivery_jobs"]})
+        # the qualifier is preserved as message_type for later 2-way queries
+        job = next(j for j in sms["3hk"]["delivery_jobs"] if "2way" in j["repo"])
+        self.assertEqual(job.get("message_type"), "2way")
+
     def test_3hk_external_node_binds_only_3hk_repos(self):
         with tempfile.TemporaryDirectory() as tmp:
             topology = _topology(tmp)
@@ -106,6 +129,20 @@ class ArchCatalogInvariantTests(unittest.TestCase):
             offenders, [],
             f"vendor-less external node(s) on a multi-vendor channel bind all vendors: {offenders}",
         )
+
+    def test_aurora_push_lane_present_and_scoped(self):
+        """Aurora is an explicit push provider (own HTTPS client/cert), not generic SNS→APNs/FCM.
+        The catalog must carry a vendor-scoped Aurora outbound + terminal, wired off push-deli."""
+        with open(ARCH_NODES, encoding="utf-8-sig") as handle:
+            catalog = json.load(handle)
+        nodes = {n["id"]: n for n in catalog["nodes"]}
+        self.assertEqual(nodes["ext-aurora"].get("vendor"), "aurora")
+        self.assertEqual(nodes["push-aurora"].get("vendor"), "aurora")
+        # APNs/FCM must now be vendor-scoped too, else it swallows the Aurora repos again.
+        self.assertEqual(nodes["ext-apns-fcm"].get("vendor"), "sns")
+        edges = {tuple(e[:2]) for e in catalog["edges"]}
+        self.assertIn(("push-deli", "push-aurora"), edges)
+        self.assertIn(("push-aurora", "ext-aurora"), edges)
 
 
 if __name__ == "__main__":

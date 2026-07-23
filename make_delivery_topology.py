@@ -11,8 +11,14 @@ from retriever import config
 
 CHANNELS = ("sms", "mms", "email", "letter", "whatsapp", "wechat", "push")
 _CHANNEL_RE = "|".join(CHANNELS)
+# A message-type qualifier can sit between the vendor and the channel (e.g. `htcl-2way-sms`).
+# Capture it as an optional group so the vendor token is the carrier (`htcl`), not the qualifier
+# (`2way`). 2-way SMS is a 3HK/htcl flow (owner-confirmed 2026-07-23) — with canon_vendor(htcl)=3hk
+# this is what folds those jobs under the 3HK vendor instead of a phantom `2way` bucket.
+MSG_QUALIFIERS = "2way"
 DELIVERY_RE = re.compile(
-    rf"^(?P<prefix>.+?)-(?P<vendor>[a-z0-9]+)-(?P<channel>{_CHANNEL_RE})-deli-job$", re.I
+    rf"^(?P<prefix>.+?)-(?P<vendor>[a-z0-9]+)(?:-(?P<qualifier>{MSG_QUALIFIERS}))?-(?P<channel>{_CHANNEL_RE})-deli-job$",
+    re.I,
 )
 OUTBOUND_RE = re.compile(r"-(?P<vendor>[a-z0-9-]+)-outbound-api$", re.I)
 
@@ -95,9 +101,11 @@ def build_topology(
             channel = delivery.group("channel").lower()
             vendor = canon_vendor(delivery.group("vendor").lower())
             name_tokens = [part.lower() for part in delivery.group("prefix").split("-") if part]
-            topology[channel][vendor]["delivery_jobs"].append(
-                {"repo": repo, "channel": channel, "vendor": vendor, "name_tokens": name_tokens}
-            )
+            job = {"repo": repo, "channel": channel, "vendor": vendor, "name_tokens": name_tokens}
+            qualifier = (delivery.group("qualifier") or "").lower()
+            if qualifier:
+                job["message_type"] = qualifier
+            topology[channel][vendor]["delivery_jobs"].append(job)
             continue
         outbound = OUTBOUND_RE.search(repo)
         if outbound:

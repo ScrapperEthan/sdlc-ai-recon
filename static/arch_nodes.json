@@ -39,6 +39,7 @@
     {"id": "wechat-deli", "label": "WeChat 投递任务", "sub": "WeChat Delivery Job", "column": 4, "slot": 8.0, "role": "delivery-job", "channel": "wechat"},
 
     {"id": "push-sns", "label": "AWS SNS", "sub": "Outbound", "column": 5, "slot": 0.0, "role": "outbound-api", "channel": "push", "vendor": "sns"},
+    {"id": "push-aurora", "label": "Aurora Push", "sub": "Outbound · 专用 HTTPS/证书", "column": 5, "slot": 0.5, "role": "outbound-api", "channel": "push", "vendor": "aurora", "note": "Aurora 自有推送服务（专用 HTTPS client + 证书），与 AWS SNS 并行的 push 出站路径；投递仓 *-aurora-push-deli-job 在此。"},
     {"id": "sms-csl", "label": "CSL", "sub": "Outbound API", "column": 5, "slot": 1.0, "role": "outbound-api", "channel": "sms", "vendor": "csl"},
     {"id": "sms-3hk", "label": "3HK", "sub": "Outbound API", "column": 5, "slot": 2.0, "role": "outbound-api", "channel": "sms", "vendor": "3hk"},
     {"id": "sms-sinch", "label": "Sinch", "sub": "Outbound API", "column": 5, "slot": 3.0, "role": "outbound-api", "channel": "sms", "vendor": "sinch"},
@@ -48,7 +49,8 @@
     {"id": "whatsapp-haro", "label": "HASE HARO", "sub": "WhatsApp 网关", "column": 5, "slot": 7.0, "role": "outbound-api", "channel": "whatsapp", "vendor": "haro", "note": "⚠ HARO 属 WhatsApp 通道，名称不含 whatsapp——需人工 override 绑定。"},
     {"id": "wechat-gw", "label": "CN Gateway", "sub": "Nginx → 专线 Lease line", "column": 5, "slot": 8.0, "role": "outbound-api", "channel": "wechat", "vendor": "cn-gateway", "note": "⚠ WeChat 走 CN Gateway/专线，不经 HARO——纯基础设施，需人工 override。"},
 
-    {"id": "ext-apns-fcm", "label": "APNs / FCM", "sub": "推送终端", "column": 6, "slot": 0.0, "role": "external", "kind": "vendor", "channel": "push"},
+    {"id": "ext-apns-fcm", "label": "APNs / FCM", "sub": "推送终端 (SNS 路径)", "column": 6, "slot": 0.0, "role": "external", "kind": "vendor", "channel": "push", "vendor": "sns", "note": "APNs/FCM 是所有 push 的最终设备终端；此节点范围限定 AWS SNS 路径，Aurora 路径见 ext-aurora。"},
+    {"id": "ext-aurora", "label": "Aurora", "sub": "推送服务", "column": 6, "slot": 0.5, "role": "external", "kind": "vendor", "channel": "push", "vendor": "aurora"},
     {"id": "ext-csl-smsc", "label": "CSL SMSC", "sub": "短信中心", "column": 6, "slot": 1.0, "role": "external", "kind": "vendor", "channel": "sms", "vendor": "csl"},
     {"id": "ext-3hk-smsc", "label": "3HK SMSC", "sub": "短信中心", "column": 6, "slot": 2.0, "role": "external", "kind": "vendor", "channel": "sms", "vendor": "3hk"},
     {"id": "ext-sinch", "label": "Sinch", "sub": "供应商", "column": 6, "slot": 3.0, "role": "external", "kind": "vendor", "channel": "sms", "vendor": "sinch"},
@@ -88,6 +90,7 @@
     ["wechat-topics", "wechat-deli"],
 
     ["push-deli", "push-sns"],
+    ["push-deli", "push-aurora"],
     ["sms-deli", "sms-csl"],
     ["sms-deli", "sms-3hk"],
     ["sms-deli", "sms-sinch"],
@@ -98,6 +101,7 @@
     ["wechat-deli", "wechat-gw"],
 
     ["push-sns", "ext-apns-fcm"],
+    ["push-aurora", "ext-aurora"],
     ["sms-csl", "ext-csl-smsc"],
     ["sms-3hk", "ext-3hk-smsc"],
     ["sms-sinch", "ext-sinch"],

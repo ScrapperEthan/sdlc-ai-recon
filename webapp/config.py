@@ -10,9 +10,11 @@ request's thread returns that user's endpoint instead. This keeps the provider f
 import contextvars
 import os
 
-# ---- model: provider is global (all users run the same local copilot-api); the ENDPOINT is
-#      per-user (see below). ----
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "copilot_responses")  # or "openai_chat"
+# ---- model: provider defaults to global (all users run the same local copilot-api) but is now
+#      resolvable per-request too (see _LLM_DEFAULTS/__getattr__ below) -- the internal-beta
+#      paste-token mode (SDLC_LLM_TOKEN_MODE) needs a token-mode caller to get a DIFFERENT provider
+#      (github_copilot_direct) than everyone else in the same process, same mechanism as the
+#      per-user endpoint override. The ENDPOINT is also per-user (see below). ----
 LLM_MOCK = os.environ.get("LLM_MOCK", "") not in ("", "0", "false", "False")
 # Opt-in true token streaming (Responses API SSE). OFF by default so behaviour is unchanged until
 # the internal side turns it on and verifies against its copilot-api; any streaming failure falls
@@ -27,8 +29,24 @@ _LLM_DEFAULTS = {
     "LLM_MODEL": os.environ.get("LLM_MODEL", "gpt-5.5"),
     "LLM_MAX_TOKENS": int(os.environ.get("LLM_MAX_TOKENS", "4096")),
     "LLM_TIMEOUT": int(os.environ.get("LLM_TIMEOUT", "120")),
+    # Provider is now resolved the same way as the endpoint fields above (override wins, else this
+    # env default) so a token-mode request can select a different provider than everyone else in
+    # the same process. When no override sets "provider" (i.e. always, until token mode exists),
+    # this is byte-for-byte the same value the old plain `LLM_PROVIDER = os.environ.get(...)`
+    # module constant used to hold.
+    "LLM_PROVIDER": os.environ.get("LLM_PROVIDER", "copilot_responses"),  # or "openai_chat"
+    # Opaque reference into the RAM-only credential store (webapp/llm_credentials.py). Token-mode
+    # only; empty for everyone else. Never the token itself -- see SDLC_LLM_TOKEN_MODE below.
+    "LLM_CREDENTIAL_ID": "",
 }
 _llm_override = contextvars.ContextVar("sdlc_llm_override", default=None)
+
+# ---- internal beta: paste-token "direct Copilot" mode (THROWAWAY -- removed before GA) ----
+# See docs/specs/copilot-token-direct-mode.md. One flag, default OFF. When off, no new code path is
+# reachable and behaviour is identical to before this feature existed (existing routing tests pass
+# unchanged). MUST NOT be turned on for any external/production entrypoint -- internal test
+# deployment only.
+LLM_TOKEN_MODE_ENABLED = os.environ.get("SDLC_LLM_TOKEN_MODE", "") not in ("", "0", "false", "False")
 
 
 def __getattr__(name):
@@ -61,6 +79,11 @@ def reset_llm_override(token):
 def llm_default_base_url():
     """The env-default endpoint, ignoring any active override (for status/health display)."""
     return _LLM_DEFAULTS["LLM_BASE_URL"]
+
+
+def llm_default_provider():
+    """The env-default provider, ignoring any active override (for status/health display + tests)."""
+    return _LLM_DEFAULTS["LLM_PROVIDER"]
 
 
 # ---- assistant behaviour ----

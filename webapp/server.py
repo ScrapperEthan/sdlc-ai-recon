@@ -14,7 +14,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import agent, config, session_store, llm_routes
+from . import agent, config, session_store, llm_routes, llm_credentials
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -75,6 +75,46 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _uid_cookie_header(uid):
         return f"sdlc_uid={uid}; Path=/; Max-Age=31536000; SameSite=Lax"
+
+    def _describe_llm(self, user_token):
+        """Which LLM this browser is bound to, for the 'my LLM' panel.
+
+        Flag OFF (SDLC_LLM_TOKEN_MODE unset): byte-for-byte the original behaviour -- a straight
+        `llm_routes.describe` call, no new keys, no credential-store lookup at all. Flag ON: also
+        checks the RAM-only paste-token credential store (internal beta, see
+        docs/specs/copilot-token-direct-mode.md) and annotates the reply with `mode`. Never echoes
+        any token/credential secret -- both `describe()` helpers are secret-free by construction."""
+        if not config.LLM_TOKEN_MODE_ENABLED:
+            return llm_routes.describe(user_token)
+
+        tunnel = llm_routes.describe(user_token)
+        if tunnel.get("registered"):
+            return {**tunnel, "mode": "tunnel", "token_mode_available": True}
+        credential = llm_credentials.describe(user_token)
+        if credential.get("connected"):
+            return {"registered": True, "mode": "copilot_token", "label": "Copilot (token mode)",
+                    "token_mode_available": True}
+        return {"registered": False, "mode": "shared", "token_mode_available": True}
+
+    def _resolve_llm_override(self, user_token):
+        """Bind this request to the caller's own LLM endpoint/provider for the whole agent turn.
+
+        Flag OFF: byte-for-byte the original behaviour -- a straight `llm_routes.resolve` call
+        (tunnel override or None -> env default), no credential-store lookup at all. Flag ON: when
+        the token isn't a registered tunnel, also checks the RAM-only paste-token credential store
+        and -- if it holds a live credential for this token -- selects provider
+        `github_copilot_direct` with that `credential_id`, through the SAME
+        `config.set_llm_override`/`reset_llm_override` path tunnel users already use (see
+        config.py). An unknown/stale/disconnected credential_id resolves to None here, same as an
+        unknown tunnel token -- i.e. it fails closed to the shared env-default LLM, never silently
+        reuses someone else's endpoint."""
+        override = llm_routes.resolve(user_token)
+        if override is not None or not config.LLM_TOKEN_MODE_ENABLED:
+            return override
+        if llm_credentials.resolve(user_token) is not None:
+            return {"mode": "copilot_token", "provider": "github_copilot_direct",
+                    "credential_id": user_token}
+        return None
 
     def _resolve_uid(self):
         """Who owns this browser's sessions/feedback — separate from `_user_token` (which LLM to
@@ -139,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"feedback": session_store.list_feedback(self._uid)})
         elif path == "/api/llm/me":
             # Which LLM endpoint this browser is bound to (its own, or the env default).
-            self._send_json(200, llm_routes.describe(self._user_token()))
+            self._send_json(200, self._describe_llm(self._user_token()))
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
@@ -171,8 +211,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._resolve_uid()
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
-                        "/api/llm/register"):
+        allowed = ["/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
+                   "/api/llm/register"]
+        if config.LLM_TOKEN_MODE_ENABLED:
+            # Internal beta only (see docs/specs/copilot-token-direct-mode.md) -- these two routes
+            # don't exist (plain 404, same as any other unknown path) unless the flag is on.
+            allowed += ["/api/llm/connect-token", "/api/llm/disconnect-token"]
+        if path not in allowed:
             self._send(404, b"not found", "text/plain")
             return
 
@@ -195,6 +240,26 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": str(e)})
                 else:
                     self._send_json(200, record)
+                return
+
+            if path == "/api/llm/connect-token":
+                # Internal beta (SDLC_LLM_TOKEN_MODE): the tester pastes their own `.copilot_token`;
+                # it lands ONLY in the RAM-only llm_credentials store (never a file, never logged) --
+                # see webapp/llm_credentials.py. The browser then sends the returned credential_id
+                # back as its X-SDLC-User-Token, same header/pairing-token mechanism tunnel mode
+                # already uses (see _resolve_llm_override).
+                try:
+                    credential_id = llm_credentials.connect(req.get("token"), owner_uid=self._uid)
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                else:
+                    self._send_json(200, {"credential_id": credential_id})
+                return
+
+            if path == "/api/llm/disconnect-token":
+                credential_id = (req.get("credential_id") or "").strip() or self._user_token()
+                llm_credentials.disconnect(credential_id)
+                self._send_json(200, {"ok": True})
                 return
 
             if path == "/api/feedback":
@@ -230,10 +295,11 @@ class Handler(BaseHTTPRequestHandler):
                 session_id = session_store.create_session(owner=self._uid)["id"]
                 history = []
 
-            # Bind this request to the caller's own LLM endpoint (their reverse-tunnel loopback
-            # port) for the whole agent turn; falls back to the env default when unbound. Each
-            # request thread has its own context, so users never share an endpoint.
-            override = llm_routes.resolve(self._user_token())
+            # Bind this request to the caller's own LLM endpoint/provider (their reverse-tunnel
+            # loopback port, or -- token mode only -- their paste-token Copilot credential) for the
+            # whole agent turn; falls back to the env default when unbound. Each request thread has
+            # its own context, so users never share an endpoint.
+            override = self._resolve_llm_override(self._user_token())
 
             if path == "/api/chat/stream":
                 otoken = config.set_llm_override(override)

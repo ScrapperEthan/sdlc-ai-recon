@@ -9,17 +9,23 @@ and stable is what makes internal `git pull` clean: provider/network edits touch
 `llm_providers/`, not this shared file. (See the "Merge-Conflict Rule".)
 """
 from . import config
-from .llm_providers import copilot_responses, openai_chat
+from .llm_providers import copilot_responses, openai_chat, github_copilot_direct
 
 
 def _provider_module():
+    """Override-aware: `config.LLM_PROVIDER` resolves per-request (see config.py), so a token-mode
+    caller can get `github_copilot_direct` in the same process where everyone else gets the env
+    default. No token/proxy/cert code here -- that lives in `llm_providers/github_copilot_direct.py`."""
     provider = config.LLM_PROVIDER
     if provider == "copilot_responses":
         return copilot_responses
     if provider == "openai_chat":
         return openai_chat
+    if provider == "github_copilot_direct":
+        return github_copilot_direct
     raise RuntimeError(
-        f"Unknown LLM_PROVIDER: {provider!r} (expected 'copilot_responses' or 'openai_chat')"
+        f"Unknown LLM_PROVIDER: {provider!r} "
+        "(expected 'copilot_responses', 'openai_chat', or 'github_copilot_direct')"
     )
 
 

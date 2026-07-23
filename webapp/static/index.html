@@ -1073,16 +1073,46 @@
         onclick="document.getElementById('llm-panel').hidden = true">&times;</button>
     </div>
     <div class="llm-body">
-      <p class="usage-note">Every user calls their <strong>own</strong> local LLM — nobody shares one.
-        Expose your local copilot-api to this server with a reverse tunnel, then register its loopback
-        port here. Your chats will route to your endpoint.</p>
-      <label for="llm-label">Label</label>
-      <input id="llm-label" class="llm-input" placeholder="e.g. alice">
-      <label for="llm-base">Endpoint (loopback)</label>
-      <input id="llm-base" class="llm-input" placeholder="http://127.0.0.1:4141/v1">
-      <label for="llm-model">Model (optional)</label>
-      <input id="llm-model" class="llm-input" placeholder="leave blank for the server default">
-      <button id="llm-connect" class="fb-comment-save" type="button">Connect my LLM</button>
+      <p class="usage-note">Every user calls their <strong>own</strong> LLM — nobody shares one.
+        Expose your local copilot-api to this server with a reverse tunnel and register its loopback
+        port, or (internal beta, when enabled) paste your own Copilot token below. Your chats will
+        route to your endpoint.</p>
+
+      <!-- Internal beta (SDLC_LLM_TOKEN_MODE): two-choice selector, spec §7. The token radio + its
+           field are only unhidden once /api/llm/me reports token_mode_available (see
+           refreshLlmStatus) -- with the flag off this whole block behaves exactly like the old
+           single-mode panel (tunnel fields only, no radios visibly doing anything). -->
+      <div id="llm-mode-choice" class="llm-mode-choice" role="radiogroup" aria-label="Connection mode">
+        <label class="llm-mode-option">
+          <input type="radio" name="llm-mode" id="llm-mode-tunnel" value="tunnel" checked>
+          Reverse tunnel
+        </label>
+        <label class="llm-mode-option" id="llm-mode-token-option" hidden>
+          <input type="radio" name="llm-mode" id="llm-mode-token" value="token">
+          Copilot token — no tunnel
+        </label>
+      </div>
+
+      <div id="llm-fields-tunnel">
+        <label for="llm-label">Label</label>
+        <input id="llm-label" class="llm-input" placeholder="e.g. alice">
+        <label for="llm-base">Endpoint (loopback)</label>
+        <input id="llm-base" class="llm-input" placeholder="http://127.0.0.1:4141/v1">
+        <label for="llm-model">Model (optional)</label>
+        <input id="llm-model" class="llm-input" placeholder="leave blank for the server default">
+      </div>
+
+      <div id="llm-fields-token" hidden>
+        <label for="llm-token">Paste .copilot_token</label>
+        <input id="llm-token" class="llm-input" type="password" placeholder="paste your Copilot token" autocomplete="off">
+        <p class="usage-note">Internal beta: kept in server memory only for this session — never
+          written to disk, never logged. Plain HTTP on this box; internal testing only.</p>
+      </div>
+
+      <div class="llm-actions">
+        <button id="llm-connect" class="fb-comment-save" type="button">Connect</button>
+        <button id="llm-disconnect" class="fb-comment-save llm-disconnect" type="button">Disconnect</button>
+      </div>
       <p id="llm-status" class="usage-note"></p>
     </div>
   </aside>
@@ -2034,41 +2064,108 @@ document.addEventListener('click', (event) => {
 usageButton.addEventListener('click', openUsageDashboard);
 
 const llmButton = document.getElementById('llm-button'),
-      llmPanel = document.getElementById('llm-panel');
+      llmPanel = document.getElementById('llm-panel'),
+      llmModeTokenOption = document.getElementById('llm-mode-token-option'),
+      llmModeTunnelRadio = document.getElementById('llm-mode-tunnel'),
+      llmModeTokenRadio = document.getElementById('llm-mode-token'),
+      llmFieldsTunnel = document.getElementById('llm-fields-tunnel'),
+      llmFieldsToken = document.getElementById('llm-fields-token');
+
+// Internal beta (SDLC_LLM_TOKEN_MODE): only known once /api/llm/me answers. Until then the token
+// radio stays hidden and the panel behaves exactly like the tunnel-only original.
+let tokenModeAvailable = false;
+let lastLlmMode = 'shared';
+
+function applyLlmModeVisibility() {
+  llmModeTokenOption.hidden = !tokenModeAvailable;
+  const wantsToken = tokenModeAvailable && llmModeTokenRadio.checked;
+  llmFieldsTunnel.hidden = wantsToken;
+  llmFieldsToken.hidden = !wantsToken;
+}
 
 async function refreshLlmStatus() {
   try {
     const me = await fetchJson('/api/llm/me');
+    tokenModeAvailable = !!(me && me.token_mode_available);
+    lastLlmMode = (me && me.mode) || (me && me.registered ? 'tunnel' : 'shared');
+    applyLlmModeVisibility();
     if (me && me.registered) {
-      llmButton.textContent = 'LLM: ' + (me.label || 'mine');
-      llmButton.title = 'Your requests route to ' + (me.base_url || 'your endpoint');
+      const label = me.mode === 'copilot_token' ? (me.label || 'Copilot token') : (me.label || 'mine');
+      llmButton.textContent = 'LLM: ' + label;
+      llmButton.title = me.mode === 'copilot_token'
+        ? 'Your requests use your own Copilot token (no tunnel)'
+        : 'Your requests route to ' + (me.base_url || 'your endpoint');
     } else {
       llmButton.textContent = 'LLM: shared';
-      llmButton.title = 'Using the server default — click to connect your own local LLM';
+      llmButton.title = 'Using the server default — click to connect your own LLM';
     }
   } catch (error) { /* leave the pill as-is */ }
 }
 
-async function connectLlm() {
+async function connectLlmTunnel(statusEl) {
   const base_url = document.getElementById('llm-base').value.trim();
   const label = document.getElementById('llm-label').value.trim();
   const model = document.getElementById('llm-model').value.trim();
-  const statusEl = document.getElementById('llm-status');
   if (!base_url) { statusEl.textContent = 'Enter your endpoint first.'; return; }
   statusEl.textContent = 'Connecting...';
+  const record = await fetchJson('/api/llm/register', {
+    method: 'POST',
+    body: JSON.stringify({base_url, label, model, token: userToken || undefined})
+  });
+  userToken = record.token;
+  localStorage.setItem('sdlc_user_token', userToken);
+  statusEl.textContent = 'Connected — your chats now use ' + record.base_url;
+}
+
+async function connectLlmToken(statusEl) {
+  const tokenInput = document.getElementById('llm-token');
+  const token = tokenInput.value.trim();
+  if (!token) { statusEl.textContent = 'Paste your .copilot_token first.'; return; }
+  statusEl.textContent = 'Connecting...';
+  const record = await fetchJson('/api/llm/connect-token', {
+    method: 'POST',
+    body: JSON.stringify({token})
+  });
+  userToken = record.credential_id;
+  localStorage.setItem('sdlc_user_token', userToken);
+  tokenInput.value = '';  // never leave the pasted token sitting in the DOM
+  statusEl.textContent = 'Connected — your chats now use your own Copilot token.';
+}
+
+async function connectLlm() {
+  const statusEl = document.getElementById('llm-status');
   try {
-    const record = await fetchJson('/api/llm/register', {
-      method: 'POST',
-      body: JSON.stringify({base_url, label, model, token: userToken || undefined})
-    });
-    userToken = record.token;
-    localStorage.setItem('sdlc_user_token', userToken);
-    statusEl.textContent = 'Connected — your chats now use ' + record.base_url;
+    if (tokenModeAvailable && llmModeTokenRadio.checked) {
+      await connectLlmToken(statusEl);
+    } else {
+      await connectLlmTunnel(statusEl);
+    }
     await refreshLlmStatus();
   } catch (error) {
     statusEl.textContent = 'Failed: ' + error.message;
   }
 }
+
+async function disconnectLlm() {
+  const statusEl = document.getElementById('llm-status');
+  try {
+    if (lastLlmMode === 'copilot_token' && userToken) {
+      await fetchJson('/api/llm/disconnect-token', {
+        method: 'POST',
+        body: JSON.stringify({credential_id: userToken})
+      });
+    }
+    userToken = '';
+    localStorage.removeItem('sdlc_user_token');
+    statusEl.textContent = 'Disconnected — your chats now use the shared default LLM.';
+    await refreshLlmStatus();
+  } catch (error) {
+    statusEl.textContent = 'Failed: ' + error.message;
+  }
+}
+
+llmModeTunnelRadio.addEventListener('change', applyLlmModeVisibility);
+llmModeTokenRadio.addEventListener('change', applyLlmModeVisibility);
 
 llmButton.addEventListener('click', () => {
   usagePanel.hidden = true;
@@ -2076,10 +2173,12 @@ llmButton.addEventListener('click', () => {
   if (!llmPanel.hidden) {
     const base = document.getElementById('llm-base');
     if (!base.value) base.value = 'http://127.0.0.1:4141/v1';
-    base.focus();
+    applyLlmModeVisibility();
+    (llmFieldsToken.hidden ? base : document.getElementById('llm-token')).focus();
   }
 });
 document.getElementById('llm-connect').addEventListener('click', connectLlm);
+document.getElementById('llm-disconnect').addEventListener('click', disconnectLlm);
 
 sessionListEl.addEventListener('click', async (event) => {
   const item = event.target.closest('.session-item');
@@ -2153,7 +2252,13 @@ refreshLlmStatus();
   .llm-body label { margin:6px 0 0; }
   .llm-input { width:100%; height:38px; border:1px solid var(--line-strong,#c4cfdd); border-radius:9px; padding:0 11px; outline:0; font:inherit; }
   .llm-input:focus { border-color:var(--accent,#2563eb); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
-  #llm-connect { align-self:flex-start; margin-top:10px; }
+  .llm-mode-choice { display:flex; flex-direction:column; gap:6px; margin:4px 0 8px; padding:10px 11px; background:var(--surface-soft,#f8fafc); border:1px solid var(--line,#d9e1ee); border-radius:9px; }
+  .llm-mode-option { display:flex; align-items:center; gap:8px; margin:0; text-transform:none; letter-spacing:normal; font-weight:600; font-size:13px; color:var(--ink,#172033); cursor:pointer; }
+  .llm-mode-option input { margin:0; }
+  .llm-actions { display:flex; gap:8px; margin-top:10px; }
+  #llm-connect, #llm-disconnect { align-self:flex-start; }
+  .llm-disconnect { color:var(--muted,#65748b); background:var(--surface-soft,#f8fafc); border-color:var(--line,#d9e1ee); }
+  .llm-disconnect:hover { background:#fef2f2; border-color:#fecaca; color:#b91c1c; }
 </style>
 <!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
      blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->

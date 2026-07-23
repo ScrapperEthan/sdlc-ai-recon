@@ -36,34 +36,81 @@ def _schema(name, desc, props, required=()):
         "parameters": {"type": "object", "properties": props, "required": list(required)}}}
 
 
+def _impact_view(repo):
+    """Dependency blast-radius as an INLINE view dict (used by `show_impact` and `impact(inline=1)`).
+    Downstream = repos that DEPEND ON this one and break if it changes (graph.impact's
+    `depended_on_by`); upstream = this repo's own deps (`depends_on`). Keep these straight."""
+    repo = (repo or "").strip()
+    if not repo:
+        return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
+    try:
+        known = graph.known_repos()
+    except Exception:  # noqa: BLE001 — the embeddable page can still explain a missing index
+        known = set()
+    if known and repo not in known:
+        return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
+    url = f"/impact.html?embed=1&target={repo}"
+    if not known:
+        return {"ok": True, "view": "impact", "url": url,
+                "summary": f"已打开 {repo} 的依赖影响视图；当前依赖索引不可用，图中会显示可用的最佳结果。"}
+    try:
+        dep = graph.impact(repo, transitive=True)
+    except Exception:  # noqa: BLE001 — impact chips are optional; keep the inline view usable
+        return {"ok": True, "view": "impact", "url": url,
+                "summary": f"已打开 {repo} 的依赖影响视图；依赖计数暂不可用。"}
+    downstream = dep["depended_on_by"]  # affected consumers — the answer to "连累谁"
+    upstream = dep["depends_on"]         # this repo's own dependencies
+    return {
+        "ok": True, "view": "impact", "url": url,
+        "summary": f"已在依赖图上展开 {repo} 的影响：下游（受影响）{len(downstream)} 个、上游（依赖）{len(upstream)} 个仓库。",
+        "impact": {"repos": {"count": len(downstream) + len(upstream),
+                             "by_relation": {"dependency-downstream": len(downstream),
+                                             "dependency-upstream": len(upstream)},
+                             "sample": sorted(downstream)[:6]}},
+    }
+
+
+def _coverage_view(kind, value):
+    """Estate overview as an INLINE view dict (used by `show_coverage` and `list_repos(inline=1)`)."""
+    kind = (kind or "").strip().lower()
+    value = (value or "").strip()
+    param = ("channel=" + value) if kind == "channel" and value else (("q=" + value) if value else "")
+    return {"ok": True, "view": "coverage",
+            "url": "/coverage.html?embed=1" + ("&" + param if param else ""),
+            "summary": ("仓库全景" + (f"（筛选：{kind}:{value}）" if value else "（全量 392）"))}
+
+
 TOOLS = [
-    _schema("impact", "Dependency blast radius: who depends on a repo and what it depends on.",
-            {"repo": {"type": "string"}, "transitive": {"type": "boolean"}}, ["repo"]),
+    _schema("impact", "Dependency blast radius: who depends on a repo and what it depends on. "
+            "Set inline=true to ALSO render the dependency graph inline in your answer (for "
+            "'what breaks if I change X', '改 X 会连累谁', 'is X risky to touch').",
+            {"repo": {"type": "string"}, "transitive": {"type": "boolean"},
+             "inline": {"type": "boolean"}}, ["repo"]),
     _schema("hubs", "Most depended-on repos (riskiest to change).",
             {"top": {"type": "integer"}}),
-    _schema("consumers", "Repos that CONSUME a queue/topic (substring match).",
-            {"destination": {"type": "string"}}, ["destination"]),
-    _schema("producers", "Repos that PRODUCE to a queue/topic (substring match).",
-            {"destination": {"type": "string"}}, ["destination"]),
-    _schema("repo_routes", "All message edges (produce/consume) touching a repo.",
-            {"repo": {"type": "string"}}, ["repo"]),
-    _schema("usecase_route",
-            "use-case <-> topic from the dev/SCT routing snapshot. Pass ONLY use_case_id to get that "
-            "use case's topic(s); pass ONLY topic to search use cases by topic (substring). Passing "
-            "BOTH is PAIR VERIFICATION (does this exact pair exist) and does NOT list a topic's other "
-            "use cases — for that, use use_cases_for_topic.",
-            {"use_case_id": {"type": "string"}, "topic": {"type": "string"}}),
-    _schema("use_cases_for_topic",
-            "REVERSE lookup: given a TOPIC, list EVERY use case that routes to it (dev/SCT snapshot). "
-            "Use this for 'what other use cases share this topic', 'which use cases are affected if "
-            "this topic/channel changes', '这个 topic 还有哪些 use case', or after finding one use "
-            "case's topic to see its siblings. Pass the FULL topic with exact=true (default) for a "
-            "known topic; exact=false for a substring probe. Do NOT also pass a use_case_id — that "
-            "hides the siblings. Returns total/returned/truncated (never a cut-off blob) + snapshot "
-            "provenance; report the dev/SCT-vs-production caveat and never say 'no other use cases "
-            "exist' when you mean 'none in this snapshot'.",
-            {"topic": {"type": "string"}, "exact": {"type": "boolean"}, "limit": {"type": "integer"}},
-            ["topic"]),
+    _schema("message_flow",
+            "Async message wiring over the message-edge snapshot. Pick ONE entry point: pass "
+            "`destination` (a topic/queue substring) to find repos on it — `direction` 'consume' "
+            "(default) lists CONSUMERS, 'produce' lists PRODUCERS, 'both' returns both; OR pass "
+            "`repo` to list every produce/consume edge touching that repo; OR pass `use_case_id` "
+            "(optionally with `destination`) to STITCH the async path use-case -> topic -> "
+            "consumers across sources. Use for '谁在消费/生产这个 topic', 'who produces to this "
+            "queue', 'this repo's message routes', 'trace this use case's message flow'.",
+            {"destination": {"type": "string"}, "direction": {"type": "string"},
+             "repo": {"type": "string"}, "use_case_id": {"type": "string"}}),
+    _schema("usecase_routing",
+            "use-case <-> topic routing from the dev/SCT snapshot. FORWARD (default): pass "
+            "`use_case_id` for its topic(s), OR `topic` to search use cases by topic substring, OR "
+            "BOTH for exact PAIR verification (does this pair exist). REVERSE: set `reverse=true` "
+            "with a `topic` to list EVERY use case routing to it — the answer to 'what other use "
+            "cases share this topic', '这个 topic 还有哪些 use case', 'which use cases are affected "
+            "if this topic/channel changes'. `exact` (default true; false=substring) and `limit` "
+            "apply to the reverse lookup, which returns total/returned/truncated + snapshot "
+            "provenance (never a cut-off blob). ALWAYS report the dev/SCT-vs-production caveat and "
+            "never say 'no other use cases exist' when you mean 'none in this snapshot'.",
+            {"use_case_id": {"type": "string"}, "topic": {"type": "string"},
+             "reverse": {"type": "boolean"}, "exact": {"type": "boolean"},
+             "limit": {"type": "integer"}}),
     _schema("list_repos",
             "REPO DIRECTORY lookup (not code search). Call this for 'what repos does X have', "
             "'what APIs does X expose', 'what tracking repos are there' — X being a repo-name "
@@ -89,10 +136,13 @@ TOOLS = [
             "sheet's MDC-Common flag) — NEVER via the name, since they don't contain 'mdc' and their "
             "`system` tag is 'hase', not 'amet-mdc'. **Copy `count` verbatim into your answer — never "
             "count or subset the `repos` list yourself.** `mdc_common=true` (without `group`) filters "
-            "the plain query/system/etc. path down to just the business-sheet-flagged repos.",
+            "the plain query/system/etc. path down to just the business-sheet-flagged repos. "
+            "Set inline=true to ALSO render the estate overview inline (optionally filtered by "
+            "`channel`, else `query`) — this replaces the old show_coverage tool.",
             {"query": {"type": "string"}, "mode": {"type": "string"},
              "channel": {"type": "string"}, "system": {"type": "string"},
-             "group": {"type": "string"}, "mdc_common": {"type": "boolean"}}),
+             "group": {"type": "string"}, "mdc_common": {"type": "boolean"},
+             "inline": {"type": "boolean"}}),
     _schema("search_code", "Search the read-only mirror; returns 'path:line:text'. Pass `repos` "
             "(a list of exact repo ids, e.g. from `list_repos`) to scope the search to just those "
             "repos instead of scanning the whole ~390-repo mirror — much faster and avoids noise "
@@ -103,8 +153,6 @@ TOOLS = [
     _schema("read_file", "Read line-numbered source (path relative to mirror/).",
             {"path": {"type": "string"}, "start": {"type": "integer"},
              "end": {"type": "integer"}}, ["path"]),
-    _schema("trace", "Stitch use-case/destination across the async message wiring.",
-            {"use_case_id": {"type": "string"}, "destination": {"type": "string"}}),
     _schema("unified_impact",
             "CROSS-REPO CALL GRAPH + blast radius. For 'who calls / who uses / the call chain of X' "
             "(X = a class, method, service, or repo), pass X as `seed`. Returns REAL callers from the "
@@ -114,10 +162,6 @@ TOOLS = [
             "to search_code/read_file if the result's `callers.available` is false.",
             {"seed": {"type": "string"}, "transitive": {"type": "boolean"},
              "bundle": {"type": "string"}}, ["seed"]),
-    _schema("call_graph",
-            "Raw `codegraph explore <query>` for a symbol, routed to the bundle that defines it. "
-            "Prefer `unified_impact` (it wraps this plus deps/messages); use this only for a raw dump.",
-            {"query": {"type": "string"}}, ["query"]),
     _schema("show_arch",
             "Render the architecture diagram INLINE in your answer with the affected chain "
             "highlighted. Call this whenever the user asks what is affected / impacted / broken by a "
@@ -131,12 +175,6 @@ TOOLS = [
             "open a page or click a node themselves. Still write the affected-path explanation in "
             "text too.",
             {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind", "value"]),
-    _schema("show_impact",
-            "Render the dependency blast-radius INLINE in your answer for a repo the user wants to change "
-            "or is worried about. Call this whenever the user asks 'what breaks if I change X', 'who depends "
-            "on X', 'is X risky to touch', '改 X 会连累谁' (X = a repo name). `repo` is the repo id. The user "
-            "SEES the impact inline; also summarise the downstream/upstream counts in text.",
-            {"repo": {"type": "string"}}, ["repo"]),
     _schema("source_system_impact",
             "Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which "
             "Use Cases it feeds, the Round A coverage funnel (configured/expression_ready/"
@@ -151,12 +189,6 @@ TOOLS = [
             "through the rest; the coverage funnel counts are always the FULL total, never truncated.",
             {"source_system": {"type": "string"}, "include_inactive": {"type": "boolean"},
              "offset": {"type": "integer"}, "limit": {"type": "integer"}}, ["source_system"]),
-    _schema("list_source_systems",
-            "List distinct CANONICALIZED upstream business systems (source_system) — folds case/"
-            "format variants (eAlert/e-Alert/…) into one entry with raw_variants listed — plus "
-            "use-case/active/inactive counts. The picker for source_system_impact. Call when the "
-            "user asks 'what upstream systems are there' or needs to disambiguate a name.",
-            {}),
     _schema("usecase_impact",
             "FULL detail for ONE Use Case: identity/business/governance, consent-preflight (policy "
             "checks, NOT the channel list), channels_declared (channel_rule.channel FACT), resolved "
@@ -195,18 +227,14 @@ TOOLS = [
             "'show me config problems', '有哪些 use case 配置有问题'.",
             {"severity": {"type": "string"}, "offset": {"type": "integer"},
              "limit": {"type": "integer"}}, []),
-    _schema("show_coverage",
-            "Render the 392-repo estate overview INLINE, optionally filtered. Call this when the user asks "
-            "to see the repos on a channel or matching a keyword ('show me the SMS repos', '有哪些 tracking "
-            "仓库', 'what does the estate look like'). `kind` is 'channel' or 'query'; `value` is the channel "
-            "(sms/email/…) or a search keyword.",
-            {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind"]),
 ]
 
 
 def dispatch(name, a):
     a = a or {}
     if name == "impact":
+        if a.get("inline"):
+            return _impact_view(a["repo"])
         return graph.impact(a["repo"], a.get("transitive", False))
     if name == "hubs":
         return graph.hubs(a.get("top", 20))
@@ -220,7 +248,38 @@ def dispatch(name, a):
         return msg.usecase_route(a.get("use_case_id") or None, a.get("topic") or None)
     if name == "use_cases_for_topic":
         return msg.reverse_lookup_use_cases(a["topic"], a.get("exact", True), a.get("limit", 50))
+    if name == "message_flow":
+        # Merges consumers/producers/repo_routes/trace: one entry point over the message-edge
+        # snapshot, disambiguated by which arg is supplied.
+        dest = (a.get("destination") or "").strip()
+        repo = (a.get("repo") or "").strip()
+        use_case = (a.get("use_case_id") or "").strip()
+        if use_case:
+            return flow.trace(use_case or None, dest or None)
+        if repo:
+            return msg.routes_for_repo(repo)
+        if dest:
+            direction = (a.get("direction") or "consume").strip().lower()
+            if direction == "produce":
+                return {"direction": "produce", "matches": msg.who_produces(dest)}
+            if direction == "both":
+                return {"direction": "both", "consumers": msg.who_consumes(dest),
+                        "producers": msg.who_produces(dest)}
+            return {"direction": "consume", "matches": msg.who_consumes(dest)}
+        return {"error": "message_flow needs one of: destination, repo, or use_case_id"}
+    if name == "usecase_routing":
+        # Merges usecase_route (forward) + use_cases_for_topic (reverse=true).
+        if a.get("reverse"):
+            topic = (a.get("topic") or "").strip()
+            if not topic:
+                return {"error": "usecase_routing reverse=true needs a topic"}
+            return msg.reverse_lookup_use_cases(topic, a.get("exact", True), a.get("limit", 50))
+        return msg.usecase_route(a.get("use_case_id") or None, a.get("topic") or None)
     if name == "list_repos":
+        if a.get("inline"):
+            if a.get("channel"):
+                return _coverage_view("channel", a.get("channel"))
+            return _coverage_view("query", a.get("query"))
         try:
             group = (a.get("group") or "").strip().lower()
             if group:
@@ -262,37 +321,7 @@ def dispatch(name, a):
                 result["impact"] = impact
         return result
     if name == "show_impact":
-        repo = (a.get("repo") or "").strip()
-        if not repo:
-            return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
-        try:
-            known = graph.known_repos()
-        except Exception:  # noqa: BLE001 — the embeddable page can still explain a missing index
-            known = set()
-        if known and repo not in known:
-            return {"ok": False, "error": f"unknown repo: {repo}", "hint": "use an exact repo id"}
-        url = f"/impact.html?embed=1&target={repo}"
-        if not known:
-            return {"ok": True, "view": "impact", "url": url,
-                    "summary": f"已打开 {repo} 的依赖影响视图；当前依赖索引不可用，图中会显示可用的最佳结果。"}
-        try:
-            dep = graph.impact(repo, transitive=True)
-        except Exception:  # noqa: BLE001 — impact chips are optional; keep the inline view usable
-            return {"ok": True, "view": "impact", "url": url,
-                    "summary": f"已打开 {repo} 的依赖影响视图；依赖计数暂不可用。"}
-        # "改 X 会连累谁" asks for the blast radius: repos that DEPEND ON this one and break if it
-        # changes = graph.impact's `depended_on_by` (downstream consumers). `depends_on` is what this
-        # repo itself needs (its upstream deps). Keep these straight — the labels were inverted before.
-        downstream = dep["depended_on_by"]  # affected consumers — the answer to "连累谁"
-        upstream = dep["depends_on"]         # this repo's own dependencies
-        return {
-            "ok": True, "view": "impact",
-            "url": url,
-            "summary": f"已在依赖图上展开 {repo} 的影响：下游（受影响）{len(downstream)} 个、上游（依赖）{len(upstream)} 个仓库。",
-            "impact": {"repos": {"count": len(downstream) + len(upstream),
-                                    "by_relation": {"dependency-downstream": len(downstream), "dependency-upstream": len(upstream)},
-                                    "sample": sorted(downstream)[:6]}},
-        }
+        return _impact_view(a.get("repo"))
     if name == "source_system_impact":
         value = (a.get("source_system") or "").strip()
         if not value:
@@ -336,10 +365,5 @@ def dispatch(name, a):
             limit=int(a.get("limit") or 50),
         )
     if name == "show_coverage":
-        kind = (a.get("kind") or "").strip().lower()
-        value = (a.get("value") or "").strip()
-        param = ("channel=" + value) if kind == "channel" and value else (("q=" + value) if value else "")
-        return {"ok": True, "view": "coverage",
-                "url": "/coverage.html?embed=1" + ("&" + param if param else ""),
-                "summary": ("仓库全景" + (f"（筛选：{kind}:{value}）" if value else "（全量 392）"))}
+        return _coverage_view(a.get("kind"), a.get("value"))
     return {"error": f"unknown tool: {name}"}

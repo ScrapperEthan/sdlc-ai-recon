@@ -178,9 +178,12 @@ def answer_events(question, history=None):
             except Exception as e:  # noqa: BLE001
                 result = {"error": str(e)}
             yield {"type": "tool_end", "name": name}
-            # show_arch renders inline: hand the frontend a view directive so the diagram appears
-            # in the answer itself (the user never opens a page or clicks a node).
-            if name in ("show_arch", "show_impact", "show_coverage") and isinstance(result, dict) and result.get("ok"):
+            # Inline-rendering tools hand the frontend a view directive so the diagram appears in
+            # the answer itself (the user never opens a page or clicks a node). Gate on the RESULT
+            # carrying a `view` key rather than the tool name, so the merged tools also emit:
+            # impact(inline=1)/list_repos(inline=1) return a view dict, as do the legacy
+            # show_impact/show_coverage. show_arch's result has no `view` key, so name-match it.
+            if isinstance(result, dict) and result.get("ok") and (result.get("view") or name == "show_arch"):
                 emitted_views.append(result)
                 yield {"type": "view", "view": result}
             trace.append({"tool": name, "args": args})

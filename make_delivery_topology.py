@@ -16,6 +16,18 @@ DELIVERY_RE = re.compile(
 )
 OUTBOUND_RE = re.compile(r"-(?P<vendor>[a-z0-9-]+)-outbound-api$", re.I)
 
+# A few vendors appear under more than one token in repo names. 3HK's repos carry its legal name
+# "htcl" (Hutchison Telecommunications) while the diagram and the business call it "3hk"; left
+# unaliased they split into two vendor buckets, so the "3HK" outbound/SMSC nodes (vendor="3hk")
+# bind an empty set while a channel-only node swallowed every SMS vendor instead (RUNBOOK-49).
+# Canonicalize to one token per vendor. Extend as new aliases surface — keep values lowercase.
+VENDOR_ALIASES = {"htcl": "3hk"}
+
+
+def canon_vendor(vendor):
+    """Fold a raw vendor token onto its canonical name (identity when no alias applies)."""
+    return VENDOR_ALIASES.get(vendor, vendor)
+
 
 def load_json(path):
     try:
@@ -81,7 +93,7 @@ def build_topology(
         delivery = DELIVERY_RE.match(repo)
         if delivery:
             channel = delivery.group("channel").lower()
-            vendor = delivery.group("vendor").lower()
+            vendor = canon_vendor(delivery.group("vendor").lower())
             name_tokens = [part.lower() for part in delivery.group("prefix").split("-") if part]
             topology[channel][vendor]["delivery_jobs"].append(
                 {"repo": repo, "channel": channel, "vendor": vendor, "name_tokens": name_tokens}
@@ -89,7 +101,7 @@ def build_topology(
             continue
         outbound = OUTBOUND_RE.search(repo)
         if outbound:
-            vendor = outbound.group("vendor").lower()
+            vendor = canon_vendor(outbound.group("vendor").lower())
             outbound_repos.append({"repo": repo, "vendor": vendor})
             continue
         if repo.endswith("-deli-job"):
@@ -101,8 +113,9 @@ def build_topology(
     for api in outbound_repos:
         # Outbound names often carry a system prefix (for example mc-x-sinch-outbound-api).
         # Prefer a vendor already discovered structurally from a delivery job, rather than
-        # mistaking that entire prefixed stem for the vendor.
-        repo_tokens = set(api["repo"].lower().split("-"))
+        # mistaking that entire prefixed stem for the vendor. Canonicalize tokens too, so an
+        # alias in the name (mc-hk-hase-htcl-outbound-api) matches its canonical vendor bucket.
+        repo_tokens = {canon_vendor(token) for token in api["repo"].lower().split("-")}
         candidates = sorted((vendor for vendor in known_vendors if vendor in repo_tokens), key=len, reverse=True)
         if candidates:
             api["vendor"] = candidates[0]

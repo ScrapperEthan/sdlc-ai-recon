@@ -20,13 +20,17 @@ def _arch_impact(kind, value):
     use_cases = report.get("affected_use_cases") or {}
     repos = report.get("affected_repos") or {}
     items = repos.get("items") or []
-    sample = [item.get("repo") for item in
-              sorted(items, key=lambda x: _REL_ORDER.get(x.get("relation"), 9))[:6] if item.get("repo")]
+    ordered = [item.get("repo") for item in
+               sorted(items, key=lambda x: _REL_ORDER.get(x.get("relation"), 9)) if item.get("repo")]
+    uc_items = [i.get("use_case") for i in (use_cases.get("items") or []) if i.get("use_case")]
+    # Carry the FULL affected chain (bounded) into the tool result, not just a 6-item teaser, so the
+    # model can answer from what the diagram actually shows instead of re-searching the mirror.
     return {
         "confidence": report.get("confidence"),
-        "use_cases": {"count": use_cases.get("count", 0),
-                      "items": [i.get("use_case") for i in (use_cases.get("items") or [])[:8]]},
-        "repos": {"count": repos.get("count", 0), "by_relation": repos.get("by_relation") or {}, "sample": sample},
+        "use_cases": {"count": use_cases.get("count", 0), "items": uc_items[:40],
+                      "truncated": len(uc_items) > 40},
+        "repos": {"count": repos.get("count", 0), "by_relation": repos.get("by_relation") or {},
+                  "items": ordered[:40], "truncated": len(ordered) > 40, "sample": ordered[:6]},
     }
 
 
@@ -63,6 +67,11 @@ def _impact_view(repo):
     return {
         "ok": True, "view": "impact", "url": url,
         "summary": f"已在依赖图上展开 {repo} 的影响：下游（受影响）{len(downstream)} 个、上游（依赖）{len(upstream)} 个仓库。",
+        # Full (bounded) lists so the model sees the blast radius it just rendered, not only a sample.
+        "downstream": {"count": len(downstream), "repos": sorted(downstream)[:60],
+                       "truncated": len(downstream) > 60},
+        "upstream": {"count": len(upstream), "repos": sorted(upstream)[:60],
+                     "truncated": len(upstream) > 60},
         "impact": {"repos": {"count": len(downstream) + len(upstream),
                              "by_relation": {"dependency-downstream": len(downstream),
                                              "dependency-upstream": len(upstream)},
@@ -71,13 +80,29 @@ def _impact_view(repo):
 
 
 def _coverage_view(kind, value):
-    """Estate overview as an INLINE view dict (used by `show_coverage` and `list_repos(inline=1)`)."""
+    """Estate overview as an INLINE view dict (used by `show_coverage` and `list_repos(inline=1)`).
+    Also carries the actual repo list + count so the model isn't blind to the estate view it renders
+    (the iframe fetches these itself; without them the model would re-grep the mirror to answer)."""
     kind = (kind or "").strip().lower()
     value = (value or "").strip()
     param = ("channel=" + value) if kind == "channel" and value else (("q=" + value) if value else "")
-    return {"ok": True, "view": "coverage",
+    view = {"ok": True, "view": "coverage",
             "url": "/coverage.html?embed=1" + ("&" + param if param else ""),
-            "summary": ("仓库全景" + (f"（筛选：{kind}:{value}）" if value else "（全量 392）"))}
+            "summary": ("仓库全景" + (f"（筛选：{kind}:{value}）" if value else "（全量）"))}
+    try:
+        if kind == "channel" and value:
+            data = repo_tags.filter_repos(channel=value)
+        elif value:
+            data = repo_tags.filter_repos(query=value)
+        else:
+            data = repo_tags.filter_repos()
+    except Exception:  # noqa: BLE001 — the diagram still renders without the list; data is a bonus
+        return view
+    repos = data.get("repos") or []
+    view["count"] = data.get("count", len(repos))
+    view["repos"] = repos[:60]
+    view["repos_truncated"] = len(repos) > 60
+    return view
 
 
 TOOLS = [

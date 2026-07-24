@@ -1,0 +1,41 @@
+{
+  "_README": [
+    "This file is the COLUMN MAP for MDC_Repo_List_Analysis*.xlsx. It is the knob the",
+    "intranet Codex edits when the sheet changes — you should almost never need to touch",
+    "enrich_repo_tags.py itself.",
+    "",
+    "How matching works: a semantic field lists the header text(s) it accepts under",
+    "'aliases'. Matching ignores case, spaces and punctuation, so 'MDC Common', 'mdc_common'",
+    "and 'MDC  COMMON' all match — but a genuine RENAME (e.g. the column becomes 'Shared?')",
+    "means you add that new text to the aliases list here. Nothing else changes.",
+    "",
+    "To add a NEW channel column: add \"<Header Text>\": \"<canonical-channel>\" to channel_flags.",
+    "To add a NEW yes/no flag you don't care to name: do nothing — any Y/N column is captured",
+    "automatically into each repo's 'flags' map. Only name it here if downstream logic needs it.",
+    "If a field's column is missing, that field is simply left empty (never a crash).",
+    "When you override a block, provide the WHOLE block (blocks replace, they don't merge)."
+  ],
+  "sheet_name": "full Repository List",
+  "repository": {"aliases": ["Repository", "Repo", "Repository Name"], "needles": ["repo"]},
+  "boolean_true": ["y", "yes", "true", "1", "x"],
+  "boolean_false": ["n", "no", "false", "0", ""],
+  "channel_flags": {
+    "SMS": "sms",
+    "EMAIL": "email",
+    "PUSH": "push",
+    "WhatsAPP": "whatsapp",
+    "Letter": "letter",
+    "Wechat": "wechat",
+    "Others": "other"
+  },
+  "named_flags": {
+    "mdc_common": "MDC Common",
+    "time_critical": "TimeCritcal(Y/N)"
+  },
+  "enum_columns": {
+    "mode_declared": {"aliases": ["Batch/Realtime(B/R)"], "map": {"R": "realtime", "B": "batch"}},
+    "marketing_servicing": {"aliases": ["Maraketing/Servicing(M/S)"], "map": {"M": "marketing", "S": "servicing"}},
+    "business_line": {"aliases": ["CMB/WPB"], "allowed": ["cmb", "wpb"]}
+  },
+  "sensitive_columns": ["Remark"]
+}

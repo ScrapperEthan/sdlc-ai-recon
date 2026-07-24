@@ -43,6 +43,12 @@ REPO_TAGS_JSON = _p("SDLC_REPO_TAGS", "index", "repo_tags.json")
 REPO_TAGS_OVERRIDE_JSON = _p("SDLC_REPO_TAGS_OVERRIDE", "index", "repo_tags.override.json")
 MDC_SHEET_XLSX = _p("SDLC_MDC_SHEET", "MDC_Repo_List_Analysis.xlsx")
 REPO_TAGS_MDC_JSON = _p("SDLC_REPO_TAGS_MDC", "index", "repo_tags.mdc.json")
+# Codex-editable column map for the MDC sheet. Missing -> enrich_repo_tags.DEFAULT_SCHEMA
+# (the v0.2 layout) is used, so behaviour is unchanged until someone supplies a schema.
+MDC_SHEET_SCHEMA_JSON = _p("SDLC_MDC_SHEET_SCHEMA", "mdc_sheet_schema.json")
+# Authoritative in-scope MDC roster (every repo the sheet lists = MDC). The consumption
+# layer scopes list_repos/search to this set; amet-* / anything not in the sheet is out-of-scope.
+MDC_ROSTER_JSON = _p("SDLC_MDC_ROSTER", "index", "mdc_roster.json")
 TAG_RECONCILE_MD = _p("SDLC_TAG_RECONCILE_MD", "index", "reports", "TAG_RECONCILE.md")
 TAG_RECONCILE_JSON = _p("SDLC_TAG_RECONCILE_JSON", "index", "reports", "TAG_RECONCILE.json")
 DELIVERY_TOPOLOGY_JSON = _p("SDLC_DELIVERY_TOPOLOGY", "index", "delivery_topology.json")

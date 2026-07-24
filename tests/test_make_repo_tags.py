@@ -333,7 +333,7 @@ class MakeRepoTagsTests(unittest.TestCase):
             self.assertEqual(report["summary"]["mismatches"], 1)
             self.assertEqual(report["mismatches"][0]["repo"], "mc-hk-hase-sms-job")
             rendered = enrich_repo_tags.markdown_report(report)
-            self.assertIn("MDC_Repo_List_Analysis.xlsx:full Repository List row 2", rendered)
+            self.assertIn("MDC sheet:full Repository List row 2", rendered)
 
             tags_path = os.path.join(tmp, "repo_tags.json")
             report_md = os.path.join(tmp, "reports", "TAG_RECONCILE.md")
@@ -341,6 +341,7 @@ class MakeRepoTagsTests(unittest.TestCase):
             make_repo_tags.write_payload(payload, tags_path)
             self.assertEqual(enrich_repo_tags.main([
                 "--sheet", sheet, "--out", mdc_path, "--report", "--tags", tags_path,
+                "--roster", os.path.join(tmp, "mdc_roster.json"),
                 "--report-md", report_md, "--report-json", report_json,
             ]), 0)
             self.assertTrue(os.path.exists(report_md))

@@ -51,7 +51,16 @@ def canon_vendor(vendor):
 
     The ICCM letter platform appears under family variants in repo names (iccms, iccmh, iccmt,
     iccmv, iccmpt); collapse the whole `iccm*` family to `iccm` so they don't split into phantom
-    per-variant vendor buckets (RUNBOOK-51)."""
+    per-variant vendor buckets (RUNBOOK-51).
+
+    RUNBOOK-52 investigated whether `iccm` and `3hk` should really be one vendor for SMS (an
+    earlier finding suggested some ICCM-SMS jobs silently route through 3HK's gateway). CLOSED,
+    kept separate: real HTCL/CSL/Sinch/CM traffic goes straight into its own topic/job, never
+    through an ICCM job. Only 2 of 13 ICCM-SMS repos have a default-only fallback to
+    HUTCHISON_GW_SMS (triggers on an empty/unrecognized router), the fallback's own live-ness is
+    unconfirmed (no matching Router bean found), and the real DB config snapshot showed 0/79 empty
+    routers — the trigger condition doesn't occur in practice. Do not re-merge iccm into 3hk on a
+    future re-read of this same evidence; see RUNBOOK-52 for the full trace."""
     if vendor.startswith("iccm"):
         return "iccm"
     return VENDOR_ALIASES.get(vendor, vendor)

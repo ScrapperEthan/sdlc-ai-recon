@@ -1,5 +1,8 @@
 # RUNBOOK 52 (INTERNAL Codex / you) — ICCM-SMS route→real-carrier gap (investigation, not a fix yet)
 
+> **✅ CLOSED 2026-07-24 — no code change needed. See "RESULT" at the bottom of this file for the
+> internal Codex investigation findings and closing rationale.**
+
 > **Context:** RUNBOOK-51 folded the SMS repo tokens `iccms`/`iccmh`/`iccmt`/`iccmv`/`iccmpt` into one
 > `iccm` vendor bucket. You (internal Codex) then confirmed via source scan that this platform-level
 > fold is CORRECT — they are all ICCM, distinguished by business line (SHP general / High-Risk-Speed /
@@ -103,3 +106,43 @@ Part B  [ ICCM-SMS repo count = ___  (list) ]
 - `iccmpt` needs no further action (confirmed dead/404 in RUNBOOK-51's Codex report).
 - The platform-level fold (`iccm* → iccm` in `canon_vendor`) stays as-is regardless of this runbook's
   outcome — it's already validated correct for grouping purposes.
+
+---
+
+# RESULT (2026-07-24, internal Codex investigation) — CLOSED, no code change
+
+**Correction to the original concern's framing:** the field driving routing is a DB-configured
+**`router`** (not a per-message `route`), resolved via `AbstractMessageDirector.java:88` /
+`AbstractBouncebackMessageDirector.java:141` / `AbstractResendService.java:129`, then
+`SendEventHandler.java:79-81` picks the Kafka topic and `AbstractMessageDelivery.java:305` calls
+`RouterAdapter.match(...)` (`RouterAdapter.java:75-86`: exact match preferred, default only on no
+match). **Real HTCL/CSL/Sinch/CM traffic goes straight into its OWN topic/job from the start — it does
+NOT pass through an ICCM job first.** ICCM and 3HK are parallel, disjoint pipelines, not nested. The
+original worry ("ICCM might silently BE 3HK under the hood") was broader than what the code actually
+does.
+
+**Actual scope, across the 13 real ICCM-SMS repos** (not 25 — the original count mixed in email;
+`iccmpt` reconfirmed dead/404):
+- **11 repos**: normal router AND its own default fallback both stay inside ICCM (SHP1-3 / VM1 / VM3,
+  with HR/TC business-line variants) — no 3HK involvement at all, in any case.
+- **2 repos** (`mc-hk-hase-svc-rt-gen-iccms-sms-deli-job`, `mc-hk-hase-svc-rt-gen-iccmv-sms-deli-job`)
+  have a **default-ONLY** fallback to `HUTCHISON_GW_SMS` (3HK) — triggers *only* when the router value
+  is empty or unrecognized. Evidence: `SmsMessageDelivery.java:122-123`.
+- **That fallback's live-ness is itself unconfirmed**: no matching `HUTCHISON_GW_SMS` Router bean was
+  found in the currently indexed `delivery-core`, so static analysis can't even confirm the fallback
+  would succeed if it fired.
+- **The trigger condition doesn't occur in real data**: DB snapshot `tbl_use_case_channel_rule`
+  (79 ICCM-SMS config rows, as of 2026-07-20 17:00) has **0 rows with an empty router** — every real
+  use-case carries an explicit, valid ICCM router. The fallback is defensive code, not something
+  current production traffic exercises.
+- 1 repo (`mc-hk-hsbc-svc-bat-iccms-sms-deli-job`) is a stub (README only, no code) — router unknown,
+  can't be statically verified either way.
+
+**Decision (Codex's recommendation, adopted):** do **not** fold these 2 repos into 3HK outage-impact
+unconditionally. The risk is real in theory but empirically ~0 (0/79 empty routers) and the fallback
+code path may not even be functional. If a real incident ever makes this matter, confirm via production
+telemetry first — not worth further static investigation now.
+
+**`make_delivery_topology.py`'s existing `iccm`/`3hk` split is correct as-is.** A short code comment was
+added at `canon_vendor` (master, this commit) pointing back to this result, so a future reader doesn't
+re-open the same question from the same raw evidence.

@@ -14,11 +14,50 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import agent, config, session_store, llm_routes, llm_credentials
+from . import agent, config, session_store, llm_routes, llm_credentials, llm
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
 INDEX = os.path.join(HERE, "static", "index.html")
+
+# Generic, sanitized message for any connect/select/register probe failure. Deliberately never the
+# raw exception str() -- a provider's own error can embed the upstream response body or a full
+# endpoint URL (see e.g. copilot_responses.chat's "copilot-api unreachable at <url>: ..."), and
+# those must never reach the client (spec: no Token/Authorization/proxy-credential/URL/upstream body).
+_LLM_PROBE_ERROR = "could not verify that endpoint/model -- check the connection and try again"
+
+
+def _pick_default_model(listing):
+    """From an `llm.models()` result, the model to try first: the provider's own default, else the
+    first listed model, else "" (let the provider fall back to its own configured default)."""
+    listing = listing or {}
+    default_model = (listing.get("default_model") or "").strip()
+    if default_model:
+        return default_model
+    for entry in listing.get("models") or []:
+        model_id = (entry.get("id") or "").strip()
+        if model_id:
+            return model_id
+    return ""
+
+
+def _probe_llm(override):
+    """Bind `override` for one throwaway chat call to confirm the endpoint+model actually work.
+    Raises on any failure; callers decide what to roll back. Never touches any store itself."""
+    otoken = config.set_llm_override(override)
+    try:
+        llm.chat([{"role": "user", "content": "ping"}], tools=None, temperature=0)
+    finally:
+        config.reset_llm_override(otoken)
+
+
+def _list_models(override):
+    """Bind `override` (or None for the shared default) for one `llm.models()` call."""
+    otoken = config.set_llm_override(override)
+    try:
+        return llm.models()
+    finally:
+        config.reset_llm_override(otoken)
 
 
 def proxy_fetch(url, timeout=30):
@@ -93,8 +132,9 @@ class Handler(BaseHTTPRequestHandler):
         credential = llm_credentials.describe(user_token)
         if credential.get("connected"):
             return {"registered": True, "mode": "copilot_token", "label": "Copilot (token mode)",
-                    "token_mode_available": True}
-        return {"registered": False, "mode": "shared", "token_mode_available": True}
+                    "token_mode_available": True, "model": credential.get("selected_model") or ""}
+        return {"registered": False, "mode": "shared", "token_mode_available": True,
+                "model": config.llm_default_model()}
 
     def _resolve_llm_override(self, user_token):
         """Bind this request to the caller's own LLM endpoint/provider for the whole agent turn.
@@ -103,17 +143,26 @@ class Handler(BaseHTTPRequestHandler):
         (tunnel override or None -> env default), no credential-store lookup at all. Flag ON: when
         the token isn't a registered tunnel, also checks the RAM-only paste-token credential store
         and -- if it holds a live credential for this token -- selects provider
-        `github_copilot_direct` with that `credential_id`, through the SAME
-        `config.set_llm_override`/`reset_llm_override` path tunnel users already use (see
-        config.py). An unknown/stale/disconnected credential_id resolves to None here, same as an
-        unknown tunnel token -- i.e. it fails closed to the shared env-default LLM, never silently
-        reuses someone else's endpoint."""
+        `github_copilot_direct` with that `credential_id`, plus its confirmed `selected_model` (set
+        by the connect-token probe or a later POST /api/llm/select-model) and the credential's
+        `owner_uid` (audit/ownership metadata carried alongside, same shape `llm_credentials`
+        already tracks -- not consulted by config.py, which only resolves the known LLM_* keys),
+        through the SAME `config.set_llm_override`/`reset_llm_override` path tunnel users already
+        use (see config.py). An unknown/stale/disconnected credential_id resolves to None here, same
+        as an unknown tunnel token -- i.e. it fails closed to the shared env-default LLM, never
+        silently reuses someone else's endpoint."""
         override = llm_routes.resolve(user_token)
         if override is not None or not config.LLM_TOKEN_MODE_ENABLED:
             return override
-        if llm_credentials.resolve(user_token) is not None:
-            return {"mode": "copilot_token", "provider": "github_copilot_direct",
-                    "credential_id": user_token}
+        record = llm_credentials.resolve(user_token)
+        if record is not None:
+            override = {"mode": "copilot_token", "provider": "github_copilot_direct",
+                        "credential_id": user_token, "owner_uid": record.get("owner_uid") or ""}
+            model = record.get("selected_model")
+            if model:
+                override["model"] = model
+                override["selected_model"] = model
+            return override
         return None
 
     def _resolve_uid(self):
@@ -180,6 +229,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/llm/me":
             # Which LLM endpoint this browser is bound to (its own, or the env default).
             self._send_json(200, self._describe_llm(self._user_token()))
+        elif path == "/api/llm/models":
+            # Model list for whichever endpoint this browser is currently bound to (tunnel, token,
+            # or the shared default) -- always available, not gated by SDLC_LLM_TOKEN_MODE.
+            try:
+                listing = _list_models(self._resolve_llm_override(self._user_token()))
+            except Exception:  # noqa: BLE001 -- never relay the raw provider error (may embed a URL)
+                self._send_json(502, {"error": _LLM_PROBE_ERROR})
+            else:
+                self._send_json(200, listing)
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.removeprefix("/api/sessions/"))
             try:
@@ -212,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
         self._resolve_uid()
         path = urlparse(self.path).path
         allowed = ["/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
-                   "/api/llm/register"]
+                   "/api/llm/register", "/api/llm/select-model", "/api/llm/tunnel-models"]
         if config.LLM_TOKEN_MODE_ENABLED:
             # Internal beta only (see docs/specs/copilot-token-direct-mode.md) -- these two routes
             # don't exist (plain 404, same as any other unknown path) unless the flag is on.
@@ -231,9 +289,35 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/llm/register":
                 # A user binds their own local LLM (reached via their reverse-tunnel loopback port).
+                # Probe BEFORE persisting: a bad base_url/model/api_key must never land in
+                # llm_routes.json as if it worked.
+                try:
+                    base_url = llm_routes.validate_base_url(req.get("base_url"))
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                    return
+                model = (req.get("model") or "").strip()
+                api_key = req.get("api_key") or ""
+                candidate = {"base_url": base_url}
+                if model:
+                    candidate["model"] = model
+                if api_key:
+                    candidate["api_key"] = api_key
+                if not model:
+                    try:
+                        model = _pick_default_model(_list_models(candidate))
+                    except Exception:  # noqa: BLE001 -- listing is best-effort; the probe below is what gates persistence
+                        model = ""
+                    if model:
+                        candidate["model"] = model
+                try:
+                    _probe_llm(candidate)
+                except Exception:  # noqa: BLE001 -- never relay the raw provider error
+                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
+                    return
                 try:
                     record = llm_routes.register(
-                        req.get("base_url"), req.get("model") or "", req.get("api_key") or "",
+                        base_url, model, api_key,
                         req.get("label") or "", req.get("provider") or "", req.get("token") or None,
                     )
                 except ValueError as e:
@@ -248,18 +332,105 @@ class Handler(BaseHTTPRequestHandler):
                 # see webapp/llm_credentials.py. The browser then sends the returned credential_id
                 # back as its X-SDLC-User-Token, same header/pairing-token mechanism tunnel mode
                 # already uses (see _resolve_llm_override).
+                #
+                # Only report "Connected" once a REAL llm.chat() probe against a real model has
+                # succeeded -- a token that merely looks non-blank (e.g. copy-pasted wrong, revoked,
+                # no Copilot entitlement) must never be reported as connected. On any failure the
+                # freshly-created credential is deleted, not left dangling in RAM.
                 try:
                     credential_id = llm_credentials.connect(req.get("token"), owner_uid=self._uid)
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
-                else:
-                    self._send_json(200, {"credential_id": credential_id})
+                    return
+                base_override = {"mode": "copilot_token", "provider": "github_copilot_direct",
+                                  "credential_id": credential_id}
+                try:
+                    model = _pick_default_model(_list_models(base_override))
+                    probe_override = dict(base_override)
+                    if model:
+                        probe_override["model"] = model
+                        probe_override["selected_model"] = model
+                    _probe_llm(probe_override)
+                except Exception:  # noqa: BLE001 -- never relay the raw provider error
+                    llm_credentials.disconnect(credential_id)
+                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
+                    return
+                if model:
+                    llm_credentials.set_selected_model(credential_id, model, owner_uid=self._uid)
+                self._send_json(200, {"credential_id": credential_id, "model": model, "connected": True})
                 return
 
             if path == "/api/llm/disconnect-token":
                 credential_id = (req.get("credential_id") or "").strip() or self._user_token()
                 llm_credentials.disconnect(credential_id)
                 self._send_json(200, {"ok": True})
+                return
+
+            if path == "/api/llm/select-model":
+                # Switch the model for whichever endpoint this browser is currently bound to (tunnel
+                # route or, in token mode, its credential). Re-confirms the model is still in the
+                # provider's own list, then re-probes with a real llm.chat() call BEFORE persisting
+                # anything -- a failed switch leaves the previously-confirmed model untouched.
+                user_token = self._user_token()
+                new_model = (req.get("model") or "").strip()
+                if not new_model:
+                    self._send_json(400, {"error": "model is required"})
+                    return
+
+                tunnel_override = llm_routes.resolve(user_token)
+                credential_record = (llm_credentials.resolve(user_token)
+                                     if tunnel_override is None and config.LLM_TOKEN_MODE_ENABLED else None)
+                if tunnel_override is not None:
+                    candidate = dict(tunnel_override, model=new_model, selected_model=new_model)
+                elif credential_record is not None:
+                    if (credential_record.get("owner_uid") or "") != self._uid:
+                        self._send_json(403, {"error": "credential is not owned by this session"})
+                        return
+                    candidate = {"mode": "copilot_token", "provider": "github_copilot_direct",
+                                 "credential_id": user_token,
+                                 "owner_uid": credential_record.get("owner_uid") or "",
+                                 "model": new_model, "selected_model": new_model}
+                else:
+                    self._send_json(400, {"error": "connect an LLM before choosing a model"})
+                    return
+
+                try:
+                    listing = _list_models(candidate)
+                except Exception:  # noqa: BLE001
+                    self._send_json(502, {"error": _LLM_PROBE_ERROR})
+                    return
+                available_ids = {(m.get("id") or "").strip() for m in listing.get("models") or []}
+                if new_model not in available_ids:
+                    self._send_json(400, {"error": "model is no longer available; refresh the model list"})
+                    return
+
+                try:
+                    _probe_llm(candidate)
+                except Exception:  # noqa: BLE001 -- never relay the raw provider error; old model stays active
+                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
+                    return
+
+                if tunnel_override is not None:
+                    llm_routes.register(
+                        tunnel_override["base_url"], new_model, tunnel_override.get("api_key") or "",
+                        "", tunnel_override.get("provider") or "", user_token,
+                    )
+                else:
+                    llm_credentials.set_selected_model(user_token, new_model, owner_uid=self._uid)
+                self._send_json(200, {"ok": True, "model": new_model})
+                return
+
+            if path == "/api/llm/tunnel-models":
+                # Read-only discovery for the tunnel panel's 'Load models' button, BEFORE a tunnel is
+                # registered -- never persists anything (see llm_routes.list_remote_models).
+                try:
+                    listing = llm_routes.list_remote_models(req.get("base_url"), req.get("api_key") or "")
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                except RuntimeError:
+                    self._send_json(502, {"error": _LLM_PROBE_ERROR})
+                else:
+                    self._send_json(200, listing)
                 return
 
             if path == "/api/feedback":

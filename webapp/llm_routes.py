@@ -12,6 +12,8 @@ resolve to loopback, which both matches the tunnel model and blocks SSRF to arbi
 import json
 import os
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -44,9 +46,12 @@ def _save(data):
     os.replace(tmp, config.LLM_ROUTES_STORE)
 
 
-def _validate_base_url(base_url):
+def validate_base_url(base_url):
     """Return a normalized base_url or raise ValueError. Enforces http(s) + loopback host (unless
-    the deployment opted into non-loopback connector hosts)."""
+    the deployment opted into non-loopback connector hosts).
+
+    Validation only -- does not register or persist anything. Public so server.py can validate a
+    candidate endpoint (e.g. before probing it or listing its models) without registering a route."""
     base_url = (base_url or "").strip()
     if not base_url:
         raise ValueError("base_url is required")
@@ -64,9 +69,53 @@ def _validate_base_url(base_url):
     return base_url.rstrip("/")
 
 
+def _open_models_request(req, timeout):
+    """Thin indirection over `urllib.request.urlopen` -- exists so tests can stub the tunnel's
+    `/models` response (`mock.patch.object(llm_routes, "_open_models_request", ...)`) without
+    patching the shared `urllib.request` module itself, which would also intercept unrelated
+    urlopen calls elsewhere in the same process (e.g. a test's own HTTP client)."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def list_remote_models(base_url, api_key=""):
+    """GET `<base_url>/models` (the same OpenAI-compatible discovery endpoint the provider files
+    talk to) and return only `{"models": [{"id", "label"}, ...]}` -- for the tunnel panel's 'Load
+    models' button, used BEFORE a tunnel is registered. Read-only: never touches
+    `llm_routes.json`, never registers a route.
+
+    Raises ValueError for a bad base_url (message is safe to return as-is -- purely local
+    validation, no network involved) or RuntimeError for anything network/response related
+    (message is deliberately generic -- callers must not relay upstream response bodies)."""
+    base_url = validate_base_url(base_url)
+    req = urllib.request.Request(base_url + "/models", method="GET")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with _open_models_request(req, 10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        raise RuntimeError("tunnel endpoint rejected the model list request") from None
+    except urllib.error.URLError:
+        raise RuntimeError("tunnel endpoint unreachable") from None
+    except (ValueError, OSError):
+        raise RuntimeError("tunnel endpoint returned an invalid response") from None
+
+    entries = body.get("data") if isinstance(body, dict) else body
+    if not isinstance(entries, list):
+        entries = []
+    models = []
+    for entry in entries:
+        if isinstance(entry, str):
+            models.append({"id": entry, "label": entry})
+        elif isinstance(entry, dict) and entry.get("id"):
+            model_id = str(entry["id"])
+            models.append({"id": model_id, "label": str(entry.get("label") or model_id)})
+    return {"models": models}
+
+
 def register(base_url, model="", api_key="", label="", provider="", token=None):
     """Register (or update) a user's LLM endpoint; returns the public record incl. its token."""
-    base_url = _validate_base_url(base_url)
+    base_url = validate_base_url(base_url)
     with _LOCK:
         data = _load()
         token = (token or "").strip() or uuid.uuid4().hex
@@ -76,7 +125,7 @@ def register(base_url, model="", api_key="", label="", provider="", token=None):
             "base_url": base_url,
             "model": (model or "").strip(),
             "api_key": (api_key or "").strip(),
-            "provider": (provider or "").strip(),
+            "provider": (provider or "").strip() or existing.get("provider") or "",
             "label": (label or "").strip() or existing.get("label") or "user",
             "created_at": existing.get("created_at") or _now(),
             "updated_at": _now(),

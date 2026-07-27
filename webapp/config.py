@@ -38,6 +38,13 @@ _LLM_DEFAULTS = {
     # Opaque reference into the RAM-only credential store (webapp/llm_credentials.py). Token-mode
     # only; empty for everyone else. Never the token itself -- see SDLC_LLM_TOKEN_MODE below.
     "LLM_CREDENTIAL_ID": "",
+    # The model the user actually confirmed (via connect-probe or POST /api/llm/select-model),
+    # resolved the same override-then-env way as everything else. Distinct from LLM_MODEL: LLM_MODEL
+    # is what providers put in their request payload (so provider code needs zero changes to pick up
+    # a dynamic selection -- the override sets both keys to the same value), while
+    # LLM_SELECTED_MODEL is what server.py's status endpoints (/api/llm/me, connect/select-model
+    # responses) read to report the confirmed model without depending on any provider internals.
+    "LLM_SELECTED_MODEL": "",
 }
 _llm_override = contextvars.ContextVar("sdlc_llm_override", default=None)
 
@@ -84,6 +91,12 @@ def llm_default_base_url():
 def llm_default_provider():
     """The env-default provider, ignoring any active override (for status/health display + tests)."""
     return _LLM_DEFAULTS["LLM_PROVIDER"]
+
+
+def llm_default_model():
+    """The deployment's default model, ignoring any active override (for status display, and for
+    picking a starting model to probe before anything has been selected yet)."""
+    return _LLM_DEFAULTS["LLM_MODEL"]
 
 
 # ---- assistant behaviour ----

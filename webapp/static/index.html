@@ -1098,15 +1098,29 @@
         <input id="llm-label" class="llm-input" placeholder="e.g. alice">
         <label for="llm-base">Endpoint (loopback)</label>
         <input id="llm-base" class="llm-input" placeholder="http://127.0.0.1:4141/v1">
-        <label for="llm-model">Model (optional)</label>
-        <input id="llm-model" class="llm-input" placeholder="leave blank for the server default">
+        <div class="llm-model-head">
+          <label for="llm-model">Model</label>
+          <button id="llm-load-models" class="llm-load-models" type="button">Load models</button>
+        </div>
+        <select id="llm-tunnel-model-select" class="llm-input" hidden></select>
+        <input id="llm-model" class="llm-input" placeholder="leave blank for the server default, or type a model id">
       </div>
 
       <div id="llm-fields-token" hidden>
-        <label for="llm-token">Paste .copilot_token</label>
-        <input id="llm-token" class="llm-input" type="password" placeholder="paste your Copilot token" autocomplete="off">
-        <p class="usage-note">Internal beta: kept in server memory only for this session — never
-          written to disk, never logged. Plain HTTP on this box; internal testing only.</p>
+        <!-- Not yet connected: paste-once token entry. -->
+        <div id="llm-token-entry">
+          <label for="llm-token">Paste .copilot_token</label>
+          <input id="llm-token" class="llm-input" type="password" placeholder="paste your Copilot token" autocomplete="off">
+          <p class="usage-note">Internal beta: kept in server memory only for this session — never
+            written to disk, never logged. Plain HTTP on this box; internal testing only.</p>
+        </div>
+        <!-- Connected: summary + live model switcher, no token field shown again. -->
+        <div id="llm-token-connected" hidden>
+          <p class="usage-note">Connected — your own Copilot token, kept in server memory for this
+            session only.</p>
+          <label for="llm-token-model">Model</label>
+          <select id="llm-token-model" class="llm-input"></select>
+        </div>
       </div>
 
       <div class="llm-actions">
@@ -2069,12 +2083,24 @@ const llmButton = document.getElementById('llm-button'),
       llmModeTunnelRadio = document.getElementById('llm-mode-tunnel'),
       llmModeTokenRadio = document.getElementById('llm-mode-token'),
       llmFieldsTunnel = document.getElementById('llm-fields-tunnel'),
-      llmFieldsToken = document.getElementById('llm-fields-token');
+      llmFieldsToken = document.getElementById('llm-fields-token'),
+      llmTokenEntry = document.getElementById('llm-token-entry'),
+      llmTokenConnected = document.getElementById('llm-token-connected'),
+      llmTokenModelSelect = document.getElementById('llm-token-model'),
+      llmTunnelModelSelect = document.getElementById('llm-tunnel-model-select'),
+      llmLoadModelsButton = document.getElementById('llm-load-models');
 
 // Internal beta (SDLC_LLM_TOKEN_MODE): only known once /api/llm/me answers. Until then the token
 // radio stays hidden and the panel behaves exactly like the tunnel-only original.
 let tokenModeAvailable = false;
 let lastLlmMode = 'shared';
+let lastLlmModel = '';
+
+// Dynamic model selector: refreshLlmStatus can be in flight more than once (panel reopen, a
+// connect/select-model call awaiting its own follow-up refresh, a slow network) -- only the LATEST
+// call is allowed to touch the DOM, so a slow/out-of-order response can never clobber a newer model
+// with stale data ("model pill" must never regress).
+let llmStatusRevision = 0;
 
 function applyLlmModeVisibility() {
   llmModeTokenOption.hidden = !tokenModeAvailable;
@@ -2083,21 +2109,54 @@ function applyLlmModeVisibility() {
   llmFieldsToken.hidden = !wantsToken;
 }
 
+function populateModelSelect(select, models, selected) {
+  const ids = (models || []).map(m => m.id);
+  if (selected && !ids.includes(selected)) ids.unshift(selected);  // keep the confirmed model visible
+  select.innerHTML = '';
+  for (const model of (models || [])) {
+    const opt = document.createElement('option');
+    opt.value = model.id;
+    opt.textContent = model.label || model.id;
+    select.appendChild(opt);
+  }
+  if (selected) select.value = selected;
+}
+
+async function loadTokenModelOptions(selected) {
+  try {
+    const listing = await fetchJson('/api/llm/models');
+    populateModelSelect(llmTokenModelSelect, listing.models, selected || listing.default_model);
+  } catch (error) { /* leave whatever options already exist */ }
+}
+
 async function refreshLlmStatus() {
+  const myRevision = ++llmStatusRevision;
   try {
     const me = await fetchJson('/api/llm/me');
+    if (myRevision !== llmStatusRevision) return;  // a newer refresh already landed -- drop this one
     tokenModeAvailable = !!(me && me.token_mode_available);
     lastLlmMode = (me && me.mode) || (me && me.registered ? 'tunnel' : 'shared');
+    lastLlmModel = (me && me.model) || '';
     applyLlmModeVisibility();
+
+    const isTokenMode = lastLlmMode === 'copilot_token';
+    llmTokenEntry.hidden = isTokenMode;
+    llmTokenConnected.hidden = !isTokenMode;
+    if (isTokenMode) await loadTokenModelOptions(lastLlmModel);
+    if (myRevision !== llmStatusRevision) return;  // re-check: the model-list fetch above awaited
+
     if (me && me.registered) {
-      const label = me.mode === 'copilot_token' ? (me.label || 'Copilot token') : (me.label || 'mine');
-      llmButton.textContent = 'LLM: ' + label;
-      llmButton.title = me.mode === 'copilot_token'
+      const label = isTokenMode ? (me.label || 'Copilot token') : (me.label || 'mine');
+      llmButton.textContent = 'LLM: ' + label + (lastLlmModel ? ' · ' + lastLlmModel : '');
+      llmButton.title = (isTokenMode
         ? 'Your requests use your own Copilot token (no tunnel)'
-        : 'Your requests route to ' + (me.base_url || 'your endpoint');
+        : 'Your requests route to ' + (me.base_url || 'your endpoint'))
+        + (lastLlmModel ? ' — model: ' + lastLlmModel : '');
     } else {
-      llmButton.textContent = 'LLM: shared';
-      llmButton.title = 'Using the server default — click to connect your own LLM';
+      llmButton.textContent = 'LLM: shared' + (lastLlmModel ? ' · ' + lastLlmModel : '');
+      llmButton.title = 'Using the server default'
+        + (lastLlmModel ? ' (model: ' + lastLlmModel + ')' : '')
+        + ' — click to connect your own LLM';
     }
   } catch (error) { /* leave the pill as-is */ }
 }
@@ -2107,21 +2166,23 @@ async function connectLlmTunnel(statusEl) {
   const label = document.getElementById('llm-label').value.trim();
   const model = document.getElementById('llm-model').value.trim();
   if (!base_url) { statusEl.textContent = 'Enter your endpoint first.'; return; }
-  statusEl.textContent = 'Connecting...';
+  statusEl.textContent = 'Connecting (checking the endpoint + model)...';
   const record = await fetchJson('/api/llm/register', {
     method: 'POST',
     body: JSON.stringify({base_url, label, model, token: userToken || undefined})
   });
   userToken = record.token;
   localStorage.setItem('sdlc_user_token', userToken);
-  statusEl.textContent = 'Connected — your chats now use ' + record.base_url;
+  statusEl.textContent = 'Connected — your chats now use ' + record.base_url
+    + (record.model ? ' (' + record.model + ')' : '');
 }
 
 async function connectLlmToken(statusEl) {
   const tokenInput = document.getElementById('llm-token');
   const token = tokenInput.value.trim();
+  // Blank token: stay in Token mode and show the error -- never silently fall back to Tunnel mode.
   if (!token) { statusEl.textContent = 'Paste your .copilot_token first.'; return; }
-  statusEl.textContent = 'Connecting...';
+  statusEl.textContent = 'Connecting (verifying the token + a model)...';
   const record = await fetchJson('/api/llm/connect-token', {
     method: 'POST',
     body: JSON.stringify({token})
@@ -2129,7 +2190,8 @@ async function connectLlmToken(statusEl) {
   userToken = record.credential_id;
   localStorage.setItem('sdlc_user_token', userToken);
   tokenInput.value = '';  // never leave the pasted token sitting in the DOM
-  statusEl.textContent = 'Connected — your chats now use your own Copilot token.';
+  statusEl.textContent = 'Connected — your chats now use your own Copilot token'
+    + (record.model ? ' (' + record.model + ')' : '') + '.';
 }
 
 async function connectLlm() {
@@ -2164,8 +2226,56 @@ async function disconnectLlm() {
   }
 }
 
+async function switchModel(selectEl, statusEl) {
+  const previous = lastLlmModel;
+  const next = selectEl.value;
+  if (!next || next === previous) return;
+  statusEl.textContent = 'Switching model (re-checking the connection)...';
+  try {
+    const result = await fetchJson('/api/llm/select-model', {
+      method: 'POST',
+      body: JSON.stringify({model: next})
+    });
+    statusEl.textContent = 'Model switched to ' + result.model + '.';
+    await refreshLlmStatus();
+  } catch (error) {
+    selectEl.value = previous;  // failed switch keeps the previously-confirmed model active
+    statusEl.textContent = 'Failed: ' + error.message + ' — kept using ' + (previous || 'the previous model') + '.';
+  }
+}
+
 llmModeTunnelRadio.addEventListener('change', applyLlmModeVisibility);
 llmModeTokenRadio.addEventListener('change', applyLlmModeVisibility);
+
+llmTokenModelSelect.addEventListener('change', () => {
+  switchModel(llmTokenModelSelect, document.getElementById('llm-status'));
+});
+
+llmLoadModelsButton.addEventListener('click', async () => {
+  const statusEl = document.getElementById('llm-status');
+  const base_url = document.getElementById('llm-base').value.trim();
+  if (!base_url) { statusEl.textContent = 'Enter your endpoint first.'; return; }
+  statusEl.textContent = 'Loading models...';
+  try {
+    const listing = await fetchJson('/api/llm/tunnel-models', {
+      method: 'POST',
+      body: JSON.stringify({base_url})
+    });
+    populateModelSelect(llmTunnelModelSelect, listing.models, document.getElementById('llm-model').value.trim());
+    llmTunnelModelSelect.hidden = false;
+    statusEl.textContent = listing.models.length
+      ? 'Loaded ' + listing.models.length + ' model(s) — pick one, or keep typing a model id manually.'
+      : 'Endpoint reachable but reported no models — type a model id manually.';
+  } catch (error) {
+    statusEl.textContent = 'Failed to load models: ' + error.message;
+  }
+});
+
+llmTunnelModelSelect.addEventListener('change', () => {
+  // The manual field stays the single source of truth for Connect -- picking from the dropdown
+  // just fills it in, so a typed model id keeps working exactly as before.
+  document.getElementById('llm-model').value = llmTunnelModelSelect.value;
+});
 
 llmButton.addEventListener('click', () => {
   usagePanel.hidden = true;
@@ -2259,6 +2369,10 @@ refreshLlmStatus();
   #llm-connect, #llm-disconnect { align-self:flex-start; }
   .llm-disconnect { color:var(--muted,#65748b); background:var(--surface-soft,#f8fafc); border-color:var(--line,#d9e1ee); }
   .llm-disconnect:hover { background:#fef2f2; border-color:#fecaca; color:#b91c1c; }
+  .llm-model-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:6px 0 0; }
+  .llm-model-head label { margin:0; }
+  .llm-load-models { min-height:28px; padding:0 10px; font-size:12px; font-weight:700; color:var(--accent-strong,#1d4ed8); background:#f8fbff; border:1px solid #cddcf8; border-radius:7px; cursor:pointer; }
+  .llm-load-models:hover { background:#eef4ff; border-color:#9bb7ea; }
 </style>
 <!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
      blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->

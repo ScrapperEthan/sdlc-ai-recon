@@ -12,12 +12,14 @@ this app ever touches, so keeping it out of any file/log is the whole point of t
         "oauth_token": str,                  # the pasted .copilot_token -- RAM only, never persisted
         "service_token": str | None,         # cached short-lived Copilot service token (stage 2)
         "service_token_expiry": float | None,  # epoch seconds, set by github_copilot_direct.py
+        "selected_model": str | None,        # the model confirmed by a real llm.chat() probe
         "created_at": str,
     }
 
 Process-memory only: restarting the server (or the process dying) drops every credential, which is
 the correct behaviour for a throwaway internal beta (no vault, no migration to undo -- see spec §9).
 """
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -25,9 +27,25 @@ from datetime import datetime, timezone
 _LOCK = threading.Lock()
 _STORE = {}  # credential_id -> record. Intentionally a plain dict: RAM only, never touches disk.
 
+# Model ids look like "gpt-5.5", "claude-3-5-sonnet-20241022", or namespaced "openai/gpt-4o" --
+# never free text. Rejecting anything else keeps a bad/garbled model id a clean 400 instead of it
+# silently riding into a provider request payload.
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,200}$")
+
 
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _valid_model_id(model_id):
+    """Return a stripped, validated model id, or raise ValueError. Never logs/echoes anything but
+    the id itself (model ids are not secrets)."""
+    model_id = (model_id or "").strip()
+    if not model_id:
+        raise ValueError("model is required")
+    if not _MODEL_ID_RE.match(model_id):
+        raise ValueError(f"invalid model id: {model_id!r}")
+    return model_id
 
 
 def connect(oauth_token, owner_uid=""):
@@ -45,6 +63,7 @@ def connect(oauth_token, owner_uid=""):
             "oauth_token": oauth_token,
             "service_token": None,
             "service_token_expiry": None,
+            "selected_model": None,
             "created_at": _now(),
         }
     return credential_id
@@ -87,13 +106,34 @@ def update_service_token(credential_id, service_token, expiry):
         return True
 
 
+def set_selected_model(credential_id, model_id, owner_uid=""):
+    """Persist the model confirmed by a real probe (see server.py) against this credential.
+
+    Owner-bound: only the browser that connected this credential (matching `owner_uid`) may change
+    its model -- raises PermissionError otherwise, so one tester can never repoint another tester's
+    credential at a different model. Raises ValueError for a malformed model id. Returns False
+    (no-op) if the credential was disconnected concurrently -- fails closed, same as
+    `update_service_token`."""
+    model_id = _valid_model_id(model_id)
+    credential_id = (credential_id or "").strip()
+    with _LOCK:
+        record = _STORE.get(credential_id)
+        if record is None:
+            return False
+        if record.get("owner_uid") != (owner_uid or "").strip():
+            raise PermissionError("credential is not owned by this session")
+        record["selected_model"] = model_id
+        return True
+
+
 def describe(credential_id):
     """Public view for the UI's 'my LLM' panel -- never includes oauth_token/service_token, only
-    whether a credential is connected."""
+    whether a credential is connected and (once probed) its confirmed model."""
     record = resolve(credential_id)
     if not record:
         return {"connected": False}
-    return {"connected": True, "mode": "copilot_token", "created_at": record.get("created_at")}
+    return {"connected": True, "mode": "copilot_token", "created_at": record.get("created_at"),
+             "selected_model": record.get("selected_model")}
 
 
 def count():

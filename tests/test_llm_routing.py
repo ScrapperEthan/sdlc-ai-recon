@@ -55,6 +55,42 @@ class ConfigOverrideTests(unittest.TestCase):
         self.assertEqual(config.LLM_BASE_URL, "http://127.0.0.1:1111/v1")  # main thread unchanged
 
 
+class SelectedModelOverrideTests(unittest.TestCase):
+    """Dynamic model selector: LLM_SELECTED_MODEL resolves the same override-then-env way as the
+    other LLM_* fields, and llm_default_model() ignores any active override (mirrors
+    llm_default_base_url/llm_default_provider)."""
+
+    def tearDown(self):
+        config.set_llm_override(None)
+
+    def test_selected_model_override_wins_then_falls_back(self):
+        token = config.set_llm_override({"selected_model": "gpt-9000"})
+        try:
+            self.assertEqual(config.LLM_SELECTED_MODEL, "gpt-9000")
+        finally:
+            config.reset_llm_override(token)
+        self.assertEqual(config.LLM_SELECTED_MODEL, "")  # unset -> env default (blank)
+
+    def test_selected_model_is_isolated_from_model(self):
+        """selected_model and model are distinct override keys -- setting one must not change the
+        other (model still feeds the provider payload; selected_model is what status endpoints
+        report)."""
+        token = config.set_llm_override({"model": "provider-model", "selected_model": "ui-model"})
+        try:
+            self.assertEqual(config.LLM_MODEL, "provider-model")
+            self.assertEqual(config.LLM_SELECTED_MODEL, "ui-model")
+        finally:
+            config.reset_llm_override(token)
+
+    def test_llm_default_model_ignores_active_override(self):
+        default = config.llm_default_model()
+        token = config.set_llm_override({"model": "something-else", "selected_model": "something-else"})
+        try:
+            self.assertEqual(config.llm_default_model(), default)
+        finally:
+            config.reset_llm_override(token)
+
+
 class LlmRoutesTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -110,6 +146,65 @@ class LlmRoutesTests(unittest.TestCase):
         with mock.patch.object(config, "LLM_ALLOW_NONLOOPBACK", True):
             record = llm_routes.register("http://bastion.internal:9000/v1", label="ops")
         self.assertEqual(record["base_url"], "http://bastion.internal:9000/v1")
+
+    def test_register_preserves_provider_when_updating_model_only(self):
+        """A partial update (e.g. the model-switch flow re-registering with the same token) must not
+        silently wipe a previously-stored provider -- only label already had this fallback; provider
+        needs it too now that select-model re-registers with provider="" to mean 'unchanged'."""
+        first = llm_routes.register("http://127.0.0.1:24101/v1", model="m1", provider="openai_chat",
+                                     label="alice")
+        second = llm_routes.register("http://127.0.0.1:24101/v1", model="m2", token=first["token"])
+        self.assertEqual(second["model"], "m2")
+        self.assertEqual(second["label"], "alice")  # pre-existing fallback, unaffected
+
+    def test_validate_base_url_is_public(self):
+        self.assertEqual(llm_routes.validate_base_url("http://127.0.0.1:24101/v1/"),
+                          "http://127.0.0.1:24101/v1")
+        with self.assertRaises(ValueError):
+            llm_routes.validate_base_url("http://evil.example.com/v1")
+        # validation only -- never registers anything
+        self.assertEqual(llm_routes.describe("anything"), {"registered": False})
+
+    @staticmethod
+    def _json_response(payload):
+        body = json.dumps(payload).encode("utf-8")
+
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner):
+                return body
+
+        return _Resp()
+
+    def test_list_remote_models_parses_openai_style_response(self):
+        resp = self._json_response({"data": [{"id": "m1"}, {"id": "m2", "label": "Model Two"}]})
+        with mock.patch.object(llm_routes, "_open_models_request", return_value=resp):
+            listing = llm_routes.list_remote_models("http://127.0.0.1:24101/v1")
+        self.assertEqual(listing, {"models": [{"id": "m1", "label": "m1"},
+                                               {"id": "m2", "label": "Model Two"}]})
+
+    def test_list_remote_models_never_registers_a_route(self):
+        resp = self._json_response({"data": []})
+        with mock.patch.object(llm_routes, "_open_models_request", return_value=resp):
+            llm_routes.list_remote_models("http://127.0.0.1:24101/v1")
+        self.assertEqual(llm_routes.describe("anything"), {"registered": False})
+        self.assertFalse(os.path.exists(config.LLM_ROUTES_STORE))
+
+    def test_list_remote_models_rejects_non_loopback(self):
+        with self.assertRaises(ValueError):
+            llm_routes.list_remote_models("http://evil.example.com/v1")
+
+    def test_list_remote_models_network_failure_is_sanitized_runtime_error(self):
+        with mock.patch.object(llm_routes, "_open_models_request",
+                                side_effect=urllib.error.URLError("connection refused")):
+            with self.assertRaises(RuntimeError) as caught:
+                llm_routes.list_remote_models("http://127.0.0.1:24101/v1")
+        self.assertNotIn("connection refused", str(caught.exception))
 
 
 # ===================================================================================================
@@ -235,6 +330,42 @@ class ConcurrentProviderIsolationTests(unittest.TestCase):
         self.assertIsNone(config._llm_override.get())
 
 
+class LlmModelsFacadeTests(unittest.TestCase):
+    """llm.models() -- the model-listing half of the provider contract (llm.models()/llm.chat()).
+    Forwards to the current provider's own models() when it has one; degrades to a single-entry
+    list built from the configured model when it doesn't (external repo must not hard-crash just
+    because the internal-owned provider files haven't grown models() yet)."""
+
+    def tearDown(self):
+        config.set_llm_override(None)
+
+    def test_mock_mode_returns_single_self_consistent_model(self):
+        with mock.patch.object(config, "LLM_MOCK", True):
+            listing = llm.models()
+        self.assertEqual(listing["models"], [{"id": listing["default_model"], "label": listing["default_model"]}])
+
+    def test_forwards_to_provider_models_when_present(self):
+        fake_listing = {"models": [{"id": "m1", "label": "Model One"}], "default_model": "m1"}
+        with mock.patch.object(copilot_responses, "models", create=True, return_value=fake_listing):
+            self.assertEqual(llm.models(), fake_listing)
+
+    def test_falls_back_to_single_entry_when_provider_lacks_models(self):
+        # None of the real provider files implement models() in this repo yet -- llm.py must
+        # degrade gracefully (not AttributeError) rather than assuming every provider has grown one.
+        self.assertFalse(hasattr(copilot_responses, "models"))
+        listing = llm.models()
+        self.assertEqual(listing, {"models": [{"id": config.LLM_MODEL, "label": config.LLM_MODEL}],
+                                    "default_model": config.LLM_MODEL})
+
+    def test_fallback_respects_the_active_model_override(self):
+        token = config.set_llm_override({"model": "overridden-model"})
+        try:
+            listing = llm.models()
+        finally:
+            config.reset_llm_override(token)
+        self.assertEqual(listing["default_model"], "overridden-model")
+
+
 class LlmCredentialsStoreTests(unittest.TestCase):
     """4c: webapp/llm_credentials.py -- RAM-only, connect/resolve/disconnect lifecycle, fails closed
     on a stale id, and genuinely never touches disk."""
@@ -270,6 +401,7 @@ class LlmCredentialsStoreTests(unittest.TestCase):
         self.assertEqual(record["oauth_token"], "my-oauth-token")
         self.assertEqual(record["owner_uid"], "alice")
         self.assertIsNone(record["service_token"])
+        self.assertIsNone(record["selected_model"])  # unset until a probe confirms one
 
     def test_resolve_unknown_or_blank_id_is_none(self):
         self.assertIsNone(llm_credentials.resolve("does-not-exist"))
@@ -313,6 +445,31 @@ class LlmCredentialsStoreTests(unittest.TestCase):
         self.assertFalse(llm_credentials.disconnect("never-existed"))
         self.assertFalse(llm_credentials.disconnect(""))
 
+    def test_set_selected_model_persists_and_describe_reports_it(self):
+        cred_id = self._connect(owner_uid="alice")
+        self.assertTrue(llm_credentials.set_selected_model(cred_id, "gpt-4o", owner_uid="alice"))
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "gpt-4o")
+        self.assertEqual(llm_credentials.describe(cred_id)["selected_model"], "gpt-4o")
+
+    def test_set_selected_model_rejects_bad_model_id(self):
+        cred_id = self._connect()
+        with self.assertRaises(ValueError):
+            llm_credentials.set_selected_model(cred_id, "", owner_uid="u1")
+        with self.assertRaises(ValueError):
+            llm_credentials.set_selected_model(cred_id, "bad model id!!", owner_uid="u1")
+        self.assertIsNone(llm_credentials.resolve(cred_id)["selected_model"])  # rejected, unchanged
+
+    def test_set_selected_model_enforces_ownership(self):
+        """Acceptance: one tester can never repoint another tester's credential at a different
+        model, even knowing its credential_id."""
+        cred_id = self._connect(owner_uid="alice")
+        with self.assertRaises(PermissionError):
+            llm_credentials.set_selected_model(cred_id, "gpt-4o", owner_uid="mallory")
+        self.assertIsNone(llm_credentials.resolve(cred_id)["selected_model"])  # unchanged
+
+    def test_set_selected_model_on_unknown_id_is_false(self):
+        self.assertFalse(llm_credentials.set_selected_model("nope", "gpt-4o", owner_uid=""))
+
     def test_ram_only_never_touches_disk(self):
         """The whole point of this store: connect/resolve/update/describe/disconnect must NEVER call
         `open()` -- there is no llm_credentials.json, unlike llm_routes.json. Spy on builtins.open
@@ -329,6 +486,7 @@ class LlmCredentialsStoreTests(unittest.TestCase):
             cred_id = llm_credentials.connect("secret-token", owner_uid="u1")
             llm_credentials.resolve(cred_id)
             llm_credentials.update_service_token(cred_id, "svc", time.time() + 100)
+            llm_credentials.set_selected_model(cred_id, "gpt-4o", owner_uid="u1")
             llm_credentials.describe(cred_id)
             llm_credentials.count()
             llm_credentials.disconnect(cred_id)
@@ -618,7 +776,19 @@ class ServerHelperFlagOnTests(unittest.TestCase):
         with mock.patch.object(llm_routes, "resolve", return_value=None):
             result = handler._resolve_llm_override(cred_id)
         self.assertEqual(result, {"mode": "copilot_token", "provider": "github_copilot_direct",
-                                   "credential_id": cred_id})
+                                   "credential_id": cred_id, "owner_uid": ""})
+
+    def test_resolve_override_includes_confirmed_model_once_selected(self):
+        """Once connect-token/select-model has probed and confirmed a model, every subsequent chat
+        turn for this credential must actually use it -- not silently fall back to the env default."""
+        handler = self._handler()
+        cred_id = self._connect()
+        llm_credentials.set_selected_model(cred_id, "gpt-4o", owner_uid="")
+        with mock.patch.object(llm_routes, "resolve", return_value=None):
+            result = handler._resolve_llm_override(cred_id)
+        self.assertEqual(result, {"mode": "copilot_token", "provider": "github_copilot_direct",
+                                   "credential_id": cred_id, "owner_uid": "",
+                                   "model": "gpt-4o", "selected_model": "gpt-4o"})
 
     def test_resolve_override_unknown_token_falls_back_to_shared(self):
         handler = self._handler()
@@ -639,7 +809,8 @@ class ServerHelperFlagOnTests(unittest.TestCase):
         handler = self._handler()
         with mock.patch.object(llm_routes, "describe", return_value={"registered": False}):
             result = handler._describe_llm("never-connected")
-        self.assertEqual(result, {"registered": False, "mode": "shared", "token_mode_available": True})
+        self.assertEqual(result, {"registered": False, "mode": "shared", "token_mode_available": True,
+                                   "model": config.llm_default_model()})
 
 
 class ServerEndpointHttpTests(unittest.TestCase):
@@ -699,16 +870,24 @@ class ServerEndpointHttpTests(unittest.TestCase):
         self.assertEqual(body, {"registered": False})  # exact -- no new keys when off
 
     def test_connect_me_disconnect_lifecycle_over_http(self):
-        with mock.patch.object(config, "LLM_TOKEN_MODE_ENABLED", True):
+        # connect-token now runs a real llm.models()/llm.chat() probe before reporting Connected
+        # (dynamic model selector) -- mock the facade so this stays a pure HTTP/store test, no real
+        # Copilot endpoint involved.
+        listing = {"models": [{"id": "m1", "label": "Model One"}], "default_model": "m1"}
+        with mock.patch.object(config, "LLM_TOKEN_MODE_ENABLED", True), \
+             mock.patch.object(llm, "models", return_value=listing), \
+             mock.patch.object(llm, "chat", return_value={"role": "assistant", "content": "pong"}):
             status, body = self._post("/api/llm/connect-token", {"token": "pasted-token-value"})
             self.assertEqual(status, 200)
             cred_id = body["credential_id"]
             self.assertTrue(cred_id)
+            self.assertEqual(body["model"], "m1")
 
             status, me = self._get("/api/llm/me", {"X-SDLC-User-Token": cred_id})
             self.assertEqual(status, 200)
             self.assertTrue(me["registered"])
             self.assertEqual(me["mode"], "copilot_token")
+            self.assertEqual(me["model"], "m1")
             self.assertNotIn("pasted-token-value", json.dumps(me))
 
             status, body = self._post("/api/llm/disconnect-token", {"credential_id": cred_id})
@@ -724,6 +903,274 @@ class ServerEndpointHttpTests(unittest.TestCase):
             status, body = self._post("/api/llm/connect-token", {"token": ""})
         self.assertEqual(status, 400)
         self.assertIn("error", body)
+
+
+def _raw_post(base, path, payload, headers=None):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(base + path, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8")), resp.headers.get("Set-Cookie")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8")), e.headers.get("Set-Cookie")
+
+
+def _raw_get(base, path, headers=None):
+    req = urllib.request.Request(base + path)
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8")), resp.headers.get("Set-Cookie")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8")), e.headers.get("Set-Cookie")
+
+
+class _Browser:
+    """Stand-in for one real browser talking to the test server: remembers the `sdlc_uid` cookie
+    across calls (like a browser would), so ownership checks that depend on 'this is the same
+    browser that connected the credential' behave correctly across separate HTTP requests. A second
+    `_Browser` instance with its own (never-shared) cookie simulates a different user/browser.
+
+    Also remembers `user_token` (the credential_id or tunnel token from a successful connect/
+    register) and sends it as `X-SDLC-User-Token` on every later call, mirroring the real frontend's
+    `authHeaders()` (index.html) -- set it explicitly after a successful connect/register."""
+
+    def __init__(self, base):
+        self.base = base
+        self.cookie = None
+        self.user_token = None
+
+    def _headers(self, extra):
+        headers = {}
+        if self.user_token:
+            headers["X-SDLC-User-Token"] = self.user_token
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        headers.update(extra or {})  # an explicit per-call header (e.g. impersonation) wins
+        return headers
+
+    def post(self, path, payload, headers=None):
+        status, body, set_cookie = _raw_post(self.base, path, payload, self._headers(headers))
+        if set_cookie:
+            self.cookie = set_cookie.split(";")[0]
+        return status, body
+
+    def get(self, path, headers=None):
+        status, body, set_cookie = _raw_get(self.base, path, self._headers(headers))
+        if set_cookie:
+            self.cookie = set_cookie.split(";")[0]
+        return status, body
+
+
+class DynamicModelSelectorTests(unittest.TestCase):
+    """The Copilot dynamic-model-selector endpoints: probe-gated POST /api/llm/connect-token, GET
+    /api/llm/models, POST /api/llm/select-model, POST /api/llm/tunnel-models, and probe-gated POST
+    /api/llm/register. Per the external test boundary, this uses ONLY a mocked `llm` facade
+    (llm.chat/llm.models monkeypatched) -- never a real Copilot endpoint or network call."""
+
+    def setUp(self):
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), webserver.Handler)
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.srv.server_address[:2]
+        self.base = f"http://{host}:{port}"
+        self._tmp = tempfile.TemporaryDirectory()
+        store = os.path.join(self._tmp.name, "llm_routes.json")
+        self._patches = [
+            mock.patch.object(config, "LLM_ROUTES_STORE", store),
+            mock.patch.object(config, "LLM_ALLOW_NONLOOPBACK", False),
+            mock.patch.object(config, "LLM_TOKEN_MODE_ENABLED", True),
+        ]
+        for p in self._patches:
+            p.start()
+        self.browser = _Browser(self.base)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _ok_chat():
+        return mock.patch.object(llm, "chat", return_value={"role": "assistant", "content": "pong"})
+
+    # ---- connect-token: probe success/failure lifecycle -----------------------------------------
+
+    def test_connect_token_probes_and_selects_default_model(self):
+        listing = {"models": [{"id": "m1", "label": "Model One"}, {"id": "m2", "label": "Model Two"}],
+                   "default_model": "m2"}
+        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+            status, body = self.browser.post("/api/llm/connect-token", {"token": "tok-a"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["connected"])
+        self.assertEqual(body["model"], "m2")
+        self.assertEqual(llm_credentials.resolve(body["credential_id"])["selected_model"], "m2")
+
+    def test_connect_token_probe_failure_cleans_up_credential(self):
+        before = llm_credentials.count()
+        with mock.patch.object(llm, "models", return_value={"models": [], "default_model": ""}), \
+             mock.patch.object(llm, "chat", side_effect=RuntimeError("token rejected (401)")):
+            status, body = self.browser.post("/api/llm/connect-token", {"token": "tok-bad"})
+        self.assertEqual(status, 400)
+        self.assertEqual(llm_credentials.count(), before)  # nothing left dangling in RAM
+        self.assertNotIn("token rejected", json.dumps(body))  # sanitized, no upstream detail leaked
+
+    def test_two_credentials_have_independent_selected_models(self):
+        """Acceptance: multi-user credential/model isolation."""
+        alice, bob = _Browser(self.base), _Browser(self.base)
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, alice_body = alice.post("/api/llm/connect-token", {"token": "alice-token"})
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m9"}], "default_model": "m9"}), \
+             self._ok_chat():
+            _, bob_body = bob.post("/api/llm/connect-token", {"token": "bob-token"})
+
+        self.assertNotEqual(alice_body["credential_id"], bob_body["credential_id"])
+        self.assertEqual(alice_body["model"], "m1")
+        self.assertEqual(bob_body["model"], "m9")
+        self.assertEqual(llm_credentials.resolve(alice_body["credential_id"])["selected_model"], "m1")
+        self.assertEqual(llm_credentials.resolve(bob_body["credential_id"])["selected_model"], "m9")
+
+    # ---- select-model: switch commit/rollback --------------------------------------------------
+
+    def _connect(self, browser, models_list, default_model):
+        listing = {"models": models_list, "default_model": default_model}
+        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+            _, body = browser.post("/api/llm/connect-token", {"token": "tok"})
+        browser.user_token = body["credential_id"]  # mirrors the frontend storing it for later calls
+        return body["credential_id"]
+
+    def test_select_model_success_commits_new_model(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+            status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["model"], "m2")
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m2")
+
+    def test_select_model_failure_keeps_old_model(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing), \
+             mock.patch.object(llm, "chat", side_effect=RuntimeError("boom")):
+            status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
+        self.assertEqual(status, 400)
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m1")  # unchanged
+
+    def test_select_model_rejects_model_not_in_current_list(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        listing = {"models": [{"id": "m1"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing):
+            status, body = self.browser.post("/api/llm/select-model", {"model": "ghost-model"})
+        self.assertEqual(status, 400)
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m1")
+
+    def test_select_model_without_a_connection_is_400(self):
+        status, body = self.browser.post("/api/llm/select-model", {"model": "m1"})
+        self.assertEqual(status, 400)
+
+    def test_select_model_blank_model_is_400(self):
+        self._connect(self.browser, [{"id": "m1"}], "m1")
+        status, body = self.browser.post("/api/llm/select-model", {"model": ""})
+        self.assertEqual(status, 400)
+
+    def test_select_model_cannot_be_hijacked_by_a_different_owner(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        stranger = _Browser(self.base)  # a different browser -- no shared cookie, different uid
+        listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing):
+            status, body = stranger.post("/api/llm/select-model", {"model": "m2"},
+                                          {"X-SDLC-User-Token": cred_id})
+        self.assertEqual(status, 403)
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m1")
+
+    def test_select_model_for_tunnel_updates_the_route_not_a_credential(self):
+        with self._ok_chat():
+            status, record = self.browser.post(
+                "/api/llm/register", {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "label": "alice"})
+        self.assertEqual(status, 200)
+        self.browser.user_token = record["token"]  # mirrors the frontend storing it for later calls
+        listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+            status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
+        self.assertEqual(status, 200)
+        updated = llm_routes.resolve(record["token"])
+        self.assertEqual(updated["model"], "m2")
+        # provider-neutral (no credential store involvement) -- label survives the partial update
+        self.assertEqual(llm_routes.describe(record["token"])["label"], "alice")
+
+    # ---- tunnel: probe-gated register + read-only model listing ---------------------------------
+
+    def test_register_requires_successful_probe(self):
+        with mock.patch.object(llm, "chat", side_effect=RuntimeError("connection refused")):
+            status, body = self.browser.post(
+                "/api/llm/register", {"base_url": "http://127.0.0.1:24101/v1", "model": "m1"})
+        self.assertEqual(status, 400)
+        self.assertFalse(os.path.exists(config.LLM_ROUTES_STORE))  # nothing persisted
+
+    def test_register_persists_after_successful_probe(self):
+        with self._ok_chat():
+            status, body = self.browser.post(
+                "/api/llm/register", {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "label": "alice"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["model"], "m1")
+        self.assertTrue(llm_routes.resolve(body["token"]))
+
+    def test_tunnel_models_lists_without_registering(self):
+        body_bytes = json.dumps({"data": [{"id": "m1"}, {"id": "m2", "label": "Model Two"}]}).encode("utf-8")
+
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner):
+                return body_bytes
+
+        with mock.patch.object(llm_routes, "_open_models_request", return_value=_Resp()):
+            status, body = self.browser.post("/api/llm/tunnel-models", {"base_url": "http://127.0.0.1:24101/v1"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["models"], [{"id": "m1", "label": "m1"}, {"id": "m2", "label": "Model Two"}])
+        self.assertFalse(os.path.exists(config.LLM_ROUTES_STORE))
+
+    # ---- GET /api/llm/models: works for shared/tunnel/token alike --------------------------------
+
+    def test_get_models_reflects_the_bound_provider(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}, {"id": "m3"}], "m1")
+        listing = {"models": [{"id": "m1"}, {"id": "m3"}], "default_model": "m1"}
+        with mock.patch.object(llm, "models", return_value=listing):
+            status, body = self.browser.get("/api/llm/models")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, listing)
+
+    # ---- sanitized errors: never leak secrets/URLs/upstream bodies -------------------------------
+
+    def test_connect_token_error_never_leaks_upstream_detail(self):
+        secret_detail = "Authorization: Bearer sk-supersecret at http://internal.example.com/copilot"
+        with mock.patch.object(llm, "models", return_value={"models": [], "default_model": ""}), \
+             mock.patch.object(llm, "chat", side_effect=RuntimeError(secret_detail)):
+            status, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        self.assertEqual(status, 400)
+        dumped = json.dumps(body)
+        self.assertNotIn("sk-supersecret", dumped)
+        self.assertNotIn("internal.example.com", dumped)
+        self.assertNotIn("Authorization", dumped)
+
+    def test_register_error_never_leaks_upstream_detail(self):
+        secret_detail = "copilot-api unreachable at http://127.0.0.1:24101/v1: [Errno 111] refused"
+        with mock.patch.object(llm, "chat", side_effect=RuntimeError(secret_detail)):
+            status, body = self.browser.post("/api/llm/register", {"base_url": "http://127.0.0.1:24101/v1"})
+        self.assertEqual(status, 400)
+        self.assertNotIn("127.0.0.1:24101", json.dumps(body))
 
 
 if __name__ == "__main__":

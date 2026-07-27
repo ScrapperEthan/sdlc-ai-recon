@@ -29,6 +29,24 @@ def _provider_module():
     )
 
 
+def models():
+    """List models the current (override-aware) provider exposes, for the model-picker UI.
+
+    Returns `{"models": [{"id": "...", "label": "..."}, ...], "default_model": "..."}`. Forwards to
+    the provider's own `models()` -- no URL/token/proxy/payload logic here, same rule as
+    `chat`/`chat_stream` above. A provider that hasn't implemented `models()` yet degrades to a
+    single-entry list built from its configured model, so callers never have to special-case it."""
+    if config.LLM_MOCK:
+        return _mock_models()
+
+    provider = _provider_module()
+    lister = getattr(provider, "models", None)
+    if lister:
+        return lister()
+    model = config.LLM_MODEL
+    return {"models": [{"id": model, "label": model}] if model else [], "default_model": model}
+
+
 def chat(messages, tools=None, temperature=0):
     """Route to the configured provider; return an OpenAI chat-style message."""
     if config.LLM_MOCK:
@@ -80,6 +98,11 @@ def stream_text(message):
     text = message.get("content") or ""
     for i in range(0, len(text), 24):
         yield text[i:i + 24]
+
+
+def _mock_models():
+    model = config.LLM_MODEL or "mock-model"
+    return {"models": [{"id": model, "label": model}], "default_model": model}
 
 
 def _mock(messages, tools):

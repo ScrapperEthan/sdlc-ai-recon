@@ -65,12 +65,14 @@ class CheckUseCaseTests(unittest.TestCase):
                 findings = consistency.check_use_case("I0141")
 
         checks = {f["check"] for f in findings}
-        self.assertIn("expression_vs_priority", checks)
-        mismatch = next(f for f in findings if f["check"] == "expression_vs_priority")
-        # Owner-confirmed 2026-07-27 (config/rule_text_semantics.json ships with the answer):
-        # rule_text wins, so this is a resolvable inconsistency -> "warning" carrying a resolution,
-        # no longer an open "error". The disagreement is still reported, with both sources cited.
-        self.assertEqual(mismatch["severity"], "warning")
+        # Once the operators are owner-confirmed, the RUNBOOK-45 "canonical contradiction" turns out
+        # NOT to be a contradiction: priority 1<2<3 is fully consistent with "LETTER first, then
+        # EMAIL & SMS together" (LETTER outranks both). The only real difference is that a priority
+        # column cannot say EMAIL and SMS are simultaneous -> grouping-only, informational.
+        self.assertIn("expression_vs_priority_grouping", checks)
+        self.assertNotIn("expression_vs_priority", checks)
+        mismatch = next(f for f in findings if f["check"] == "expression_vs_priority_grouping")
+        self.assertEqual(mismatch["severity"], "info")
         self.assertIn("rule_text is authoritative", mismatch["resolution"])
         self.assertTrue(mismatch["citations"])
 

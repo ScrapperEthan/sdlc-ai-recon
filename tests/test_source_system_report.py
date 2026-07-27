@@ -312,7 +312,9 @@ class RuleTextAstAndValidationWiringTests(unittest.TestCase):
         self.assertEqual(report["rule_text_interpretation"]["initial_channels"], ["LETTER"])
         self.assertEqual(report["rule_text_interpretation"]["parallel_groups"], [["EMAIL", "SMS"]])
         findings = {f["check"] for f in report["validation_findings"]}
-        self.assertIn("expression_vs_priority", findings)  # the I0141 canonical mismatch
+        # Owner-confirmed semantics reclassify the I0141 case: priority 1<2<3 does not contradict
+        # "LETTER first, then EMAIL & SMS together" — it just cannot express the parallel group.
+        self.assertIn("expression_vs_priority_grouping", findings)
         self.assertIn("Channel Decision Expression", markdown)
         self.assertIn("semantics: **owner-confirmed**", markdown)
         self.assertIn("sends first: LETTER", markdown)

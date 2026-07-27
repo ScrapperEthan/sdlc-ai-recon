@@ -486,7 +486,18 @@ def build_topic_report(topic, tags):
 def build_usecase_report(use_case_id, tags):
     trace = flow.trace(use_case_id=use_case_id)
     usecase = messages.usecase_route(use_case_id=use_case_id)
-    if usecase.get("available") and not usecase.get("matches"):
+    # RUNBOOK-53 (box-verified on real UAT): the route snapshot and the use-case catalog are two
+    # DIFFERENT populations — 353 route ids (older dev/SCT) vs 2,810 UAT master ids, intersection
+    # only 297. Gating "unknown target" on the route snapshot alone therefore rejected 2,513 real
+    # UAT use cases (89.4%) before any lookup ran. A use case is unknown only when NEITHER source
+    # knows it; the route dimension being empty is a missing-dimension note, not a missing target.
+    master = usecase_master.master_for(use_case_id)
+    catalog_key = use_case_id.strip().lower()
+    known_to_catalog = bool(master) or bool(
+        usecase_master.rules_by_use_case_id().get(catalog_key)
+        or usecase_master.ext_by_use_case_id().get(catalog_key)
+    )
+    if usecase.get("available") and not usecase.get("matches") and not known_to_catalog:
         raise FileNotFoundError(f"unknown target: use-case:{use_case_id}")
 
     route_rows = []
@@ -517,10 +528,14 @@ def build_usecase_report(use_case_id, tags):
     notes = list(trace.get("partial") or [])
     if usecase.get("available"):
         notes.append("use-case routing is from a dev/SCT snapshot and should be verified against prod")
+        if not usecase.get("matches") and known_to_catalog:
+            # Known to the catalog but absent from the route snapshot — say so instead of silently
+            # returning an empty routing section (see the population mismatch noted above).
+            notes.append("no routing entry for this use case in the available route snapshot "
+                         "(different environment/population) — routing dimension unavailable")
     chain = channel_chain(tags, participants, topics, deduped)
 
     usecase_cites = matched_usecase_citations(use_case_id=use_case_id)
-    master = usecase_master.master_for(use_case_id)
     target = {
         "input": f"use-case:{use_case_id}",
         "kind": "use-case",

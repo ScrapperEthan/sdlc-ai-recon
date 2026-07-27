@@ -318,31 +318,77 @@ def stage_groups(tree):
     return [[f"<{tree['op']}-subexpression>"]]  # e.g. a bare '|' node reached directly (unusual)
 
 
+def _all_channels(node):
+    """Every channel anywhere under this node, in left-to-right source order."""
+    if node is None:
+        return []
+    if "channel" in node:
+        return [node["channel"]]
+    return _all_channels(node.get("left")) + _all_channels(node.get("right"))
+
+
+def _dedupe(items):
+    seen, out = set(), []
+    for item in items:
+        key = tuple(item) if isinstance(item, list) else item
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _interpret_node(node):
+    """Recursive per-node interpretation. RUNBOOK-53 found the previous flat implementation emitted
+    a literal `<>-subexpression>` placeholder for **106 of the 108 MIXED expressions** — every one
+    whose root operator is `&` with a nested `>` group, e.g. `(SMS > EMAIL) & PUSH`. Flattening
+    cannot represent nesting, so interpretation has to recurse.
+
+    Returns, for one node: `initial` (channels that send when this node starts), `terminal` (the
+    channels a FOLLOWING `>` stage waits on), plus the accumulated parallel groups, ordering edges
+    and selectable channels.
+    """
+    if "channel" in node:
+        channel = node["channel"]
+        return {"initial": [channel], "terminal": [channel],
+                "parallel_groups": [], "edges": [], "selectable": []}
+
+    op = node["op"]
+
+    if op == "|":
+        # 二选一 — exactly one branch is used, so nothing below can be asserted as sent or ordered.
+        return {"initial": [], "terminal": [], "parallel_groups": [], "edges": [],
+                "selectable": _all_channels(node)}
+
+    left = _interpret_node(node["left"])
+    right = _interpret_node(node["right"])
+    merged = {
+        "parallel_groups": left["parallel_groups"] + right["parallel_groups"],
+        "edges": left["edges"] + right["edges"],
+        "selectable": left["selectable"] + right["selectable"],
+    }
+
+    if op == "&":
+        # 一起发 — both sides start together; each side keeps its own internal ordering.
+        together = left["initial"] + right["initial"]
+        return dict(merged, initial=together, terminal=left["terminal"] + right["terminal"],
+                    parallel_groups=([together] if len(together) > 1 else []) +
+                                    merged["parallel_groups"])
+
+    # ">" — 哪个大就哪个先发: the left side sends first; the right side follows what the left ends on.
+    return dict(merged, initial=left["initial"], terminal=right["terminal"],
+                edges=merged["edges"] + [[frm, to] for frm in left["terminal"]
+                                          for to in right["initial"]])
+
+
 def _build_interpretation(tree, semantics):
-    if tree.get("op") is None:
-        return {"available": True, "initial_channels": [tree["channel"]], "parallel_groups": [],
-                "fallback_edges": [], "selectable_channels": []}
-    if tree["op"] == "|":
-        options = []
-
-        def _collect(node):
-            if node.get("op") == "|":
-                _collect(node["left"])
-                _collect(node["right"])
-            else:
-                options.append(node)
-
-        _collect(tree)
-        selectable = sorted({ch for opt in options for stage in stage_groups(opt) for ch in stage})
-        return {"available": True, "initial_channels": [], "parallel_groups": [],
-                "fallback_edges": [], "selectable_channels": selectable}
-    stages = stage_groups(tree)
-    initial = stages[0] if stages else []
-    edges = [[frm, to] for frm_stage, to_stage in zip(stages, stages[1:])
-             for frm in frm_stage for to in to_stage]
-    parallel_groups = [stage for stage in stages if len(stage) > 1]
-    return {"available": True, "initial_channels": initial, "parallel_groups": parallel_groups,
-            "fallback_edges": edges, "selectable_channels": []}
+    result = _interpret_node(tree)
+    return {
+        "available": True,
+        "initial_channels": _dedupe(result["initial"]),
+        "parallel_groups": _dedupe([_dedupe(group) for group in result["parallel_groups"]]),
+        "fallback_edges": _dedupe(result["edges"]),
+        "selectable_channels": sorted(set(result["selectable"])),
+    }
 
 
 def interpret(ast, semantics=None):

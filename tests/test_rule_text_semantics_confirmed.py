@@ -115,15 +115,37 @@ class ConsistencyResolutionTest(unittest.TestCase):
             return ucc.check_use_case(
                 "I0141", rules_idx={"i0141": self.RULES}, ext_idx={"i0141": self.EXT})
 
-    def test_confirmed_owner_answer_resolves_the_disagreement(self):
+    def test_i0141_is_grouping_only_not_a_real_contradiction(self):
+        # RUNBOOK-53 consequence: with the operators confirmed, priority 1<2<3 does NOT contradict
+        # "LETTER first, then EMAIL & SMS together" — LETTER outranks both, and the only difference
+        # is that a priority column cannot express 一起发. Informational, not a conflict.
         findings = self._check(["rule_text", "channel_rule_priority"])
-        clash = [f for f in findings if f["check"] == "expression_vs_priority"]
+        clash = [f for f in findings if f["check"] == "expression_vs_priority_grouping"]
         self.assertEqual(len(clash), 1)
-        self.assertEqual(clash[0]["severity"], "warning")  # resolvable, no longer an open question
+        self.assertEqual(clash[0]["severity"], "info")
         self.assertIn("rule_text is authoritative", clash[0]["resolution"])
-        # Still cites BOTH sources — the point of the finding is that two tables disagree.
+        self.assertNotIn("expression_vs_priority", {f["check"] for f in findings})
+        # Still cites BOTH sources — the reader must be able to check the claim.
         self.assertIn("ext.csv:9", clash[0]["citations"])
         self.assertIn("channel_rule.csv:3", clash[0]["citations"])
+
+    def test_priority_that_actually_reverses_the_order_is_a_real_conflict(self):
+        # rule_text says SMS sends first; priority ranks EMAIL above SMS -> genuine contradiction.
+        rules = [
+            {"channel": "SMS", "priority": "2", "citation": "channel_rule.csv:2"},
+            {"channel": "EMAIL", "priority": "1", "citation": "channel_rule.csv:3"},
+        ]
+        ext = {"rule_text": "SMS > EMAIL", "citation": "ext.csv:9"}
+        with mock.patch.object(ucc.rt, "source_precedence",
+                               return_value=["rule_text", "channel_rule_priority"]):
+            findings = ucc.check_use_case("X0001", rules_idx={"x0001": rules},
+                                          ext_idx={"x0001": ext})
+        clash = [f for f in findings if f["check"] == "expression_vs_priority"]
+        self.assertEqual(len(clash), 1)
+        self.assertEqual(clash[0]["severity"], "warning")
+        self.assertIn("SMS(p2) before EMAIL(p1)", clash[0]["message"])
+        self.assertIn("disagrees about ORDER", clash[0]["resolution"])
+
 
     def test_unconfirmed_preserves_the_original_no_winner_behaviour(self):
         findings = self._check(None)
@@ -150,6 +172,33 @@ class ConsistencyResolutionTest(unittest.TestCase):
                 "I0141", rules_idx={"i0141": self.RULES}, ext_idx={"i0141": ext})
         blank = [f for f in findings if f["check"] == "blank_with_rules"]
         self.assertEqual(blank[0]["severity"], "warning")
+
+
+class NestedMixedExpressionTest(unittest.TestCase):
+    """RUNBOOK-53 found 106 of 108 MIXED expressions rendered a literal `<>-subexpression>`
+    placeholder — every one whose root operator is `&` wrapping a nested `>` group. Flattening
+    cannot represent nesting; interpretation now recurses."""
+
+    def test_nested_fallback_inside_parallel_no_longer_emits_a_placeholder(self):
+        result = rt.interpret(rt.parse("(SMS > EMAIL) & PUSH"), CONFIRMED)
+        self.assertTrue(result["available"])
+        self.assertNotIn("subexpression", json.dumps(result))
+        self.assertEqual(result["initial_channels"], ["SMS", "PUSH"])   # both start together
+        self.assertEqual(result["parallel_groups"], [["SMS", "PUSH"]])
+        self.assertEqual(result["fallback_edges"], [["SMS", "EMAIL"]])  # inner order preserved
+
+    def test_nested_choice_inside_parallel_keeps_the_choice_separate(self):
+        result = rt.interpret(rt.parse("(EMAIL | SMS) & PUSH"), CONFIRMED)
+        self.assertNotIn("subexpression", json.dumps(result))
+        self.assertEqual(result["initial_channels"], ["PUSH"])
+        self.assertEqual(result["selectable_channels"], ["EMAIL", "SMS"])
+
+    def test_deeply_nested_expression_stays_placeholder_free(self):
+        result = rt.interpret(rt.parse("LETTER > ((SMS > EMAIL) & PUSH)"), CONFIRMED)
+        self.assertNotIn("subexpression", json.dumps(result))
+        self.assertEqual(result["initial_channels"], ["LETTER"])
+        self.assertIn(["LETTER", "SMS"], result["fallback_edges"])
+        self.assertIn(["SMS", "EMAIL"], result["fallback_edges"])
 
 
 if __name__ == "__main__":

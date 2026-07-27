@@ -88,6 +88,63 @@ def _priority_groups(rules):
     return [sorted(channels) for _priority, channels in groups]
 
 
+def _priority_map(rules):
+    """{CHANNEL: numeric priority} from channel_rule rows; blank/non-numeric skipped (null_priority
+    is its own check)."""
+    out = {}
+    for rule in rules:
+        channel = (rule.get("channel") or "").strip().upper()
+        raw = (rule.get("priority") or "").strip()
+        if not channel or not raw:
+            continue
+        try:
+            out[channel] = int(float(raw))
+        except ValueError:
+            continue
+    return out
+
+
+def _priority_vs_confirmed_order(uc_id, interpretation, rules, citations):
+    """RUNBOOK-53 measured `expression_vs_priority` at 439 of 499 findings — 88% of the whole
+    report. Once rule_text is owner-confirmed as authoritative, "do the two groupings look
+    identical?" is the wrong question: a priority column is a per-row ordinal with **no way to
+    express 一起发**, so a `&` group will essentially always "disagree" with it. That is a
+    representation limit, not a defect, and reporting it as one drowns the real problems.
+
+    The question that survives the owner's ruling is: does priority CONTRADICT the confirmed order?
+
+      - an ordering edge A->B where priority(A) >= priority(B)  -> genuine contradiction (warning)
+      - channels sent together that carry different priorities  -> the column simply cannot say
+        that; rule_text governs                                 -> informational
+    """
+    priorities = _priority_map(rules)
+    if not priorities:
+        return []
+    contradictions = [
+        f"{frm}(p{priorities[frm]}) before {to}(p{priorities[to]})"
+        for frm, to in interpretation.get("fallback_edges") or []
+        if frm in priorities and to in priorities and priorities[frm] >= priorities[to]
+    ]
+    if contradictions:
+        return [_finding(
+            "expression_vs_priority", "warning", uc_id,
+            "channel_rule.priority contradicts the owner-confirmed rule_text send order: "
+            + ", ".join(sorted(contradictions)), citations,
+            resolution="rule_text is authoritative (owner-confirmed) — the priority column "
+                       "disagrees about ORDER, which rule_text wins")]
+    split = [group for group in interpretation.get("parallel_groups") or []
+             if len({priorities[ch] for ch in group if ch in priorities}) > 1]
+    if split:
+        return [_finding(
+            "expression_vs_priority_grouping", "info", uc_id,
+            "rule_text sends " + "; ".join(", ".join(group) for group in split)
+            + " together, but channel_rule.priority assigns them different levels",
+            citations,
+            resolution="rule_text is authoritative (owner-confirmed) — a priority column cannot "
+                       "express 一起发, so this is a representation limit, not a conflict")]
+    return []
+
+
 def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
     """Findings for ONE use case, comparing rule_text (B1 AST) against channel_rule facts.
     `rules_idx`/`ext_idx` are optional pre-built {lower_id: ...} indices — pass them when checking
@@ -156,6 +213,14 @@ def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
         return findings  # ordering comparison below is meaningless once the sets disagree
 
     if ast["mode"] in ("FALLBACK", "PARALLEL", "MIXED") and ast["operator_tree"]:
+        interpretation = rt.interpret(ast)
+        if interpretation.get("available") and authoritative == "rule_text":
+            # Confirmed semantics available -> compare against the ACTUAL send order rather than
+            # against a grouping the priority column is structurally unable to reproduce.
+            return findings + _priority_vs_confirmed_order(
+                uc_id, interpretation, rules, [ext_citation] + rule_citations)
+
+        # Unconfirmed (or unparseable) -> the original structural grouping comparison, unchanged.
         rule_groups = _priority_groups(rules)
         expr_groups = [sorted(stage) for stage in rt.stage_groups(ast["operator_tree"])]
         if rule_groups and expr_groups and rule_groups != expr_groups:

@@ -2110,10 +2110,15 @@ function applyLlmModeVisibility() {
 }
 
 function populateModelSelect(select, models, selected) {
-  const ids = (models || []).map(m => m.id);
-  if (selected && !ids.includes(selected)) ids.unshift(selected);  // keep the confirmed model visible
+  // Keep the confirmed model visible even if the current listing doesn't include it (e.g. a stale
+  // list, or the endpoint briefly reporting fewer models) -- synthesize an <option> for it rather
+  // than just tracking an id that never becomes a selectable option.
+  const normalized = [...(models || [])];
+  if (selected && !normalized.some(m => m.id === selected)) {
+    normalized.unshift({id: selected, label: selected});
+  }
   select.innerHTML = '';
-  for (const model of (models || [])) {
+  for (const model of normalized) {
     const opt = document.createElement('option');
     opt.value = model.id;
     opt.textContent = model.label || model.id;
@@ -2137,6 +2142,11 @@ async function refreshLlmStatus() {
     tokenModeAvailable = !!(me && me.token_mode_available);
     lastLlmMode = (me && me.mode) || (me && me.registered ? 'tunnel' : 'shared');
     lastLlmModel = (me && me.model) || '';
+    // Sync the radio choice to what the server actually reports -- otherwise a page reload after
+    // connecting in Token mode shows the confirmed state in the pill/panel fields while the radio
+    // (and therefore which fields are visible) silently defaults back to Tunnel.
+    if (lastLlmMode === 'copilot_token') llmModeTokenRadio.checked = true;
+    if (lastLlmMode === 'tunnel') llmModeTunnelRadio.checked = true;
     applyLlmModeVisibility();
 
     const isTokenMode = lastLlmMode === 'copilot_token';

@@ -28,25 +28,41 @@ _LLM_PROBE_ERROR = "could not verify that endpoint/model -- check the connection
 
 
 def _pick_default_model(listing):
-    """From an `llm.models()` result, the model to try first: the provider's own default, else the
-    first listed model, else "" (let the provider fall back to its own configured default)."""
+    """From an `llm.models()` result, the model to try first: the provider's own default -- but only
+    if it's actually one of the listed ids (a provider's `default_model` and its `models` list can
+    disagree, e.g. after a deploy changed the default before the list caught up) -- else the first
+    listed model, else "" (let the provider fall back to its own configured default)."""
     listing = listing or {}
+    ids = [
+        (entry.get("id") or "").strip()
+        for entry in listing.get("models") or []
+        if isinstance(entry, dict) and (entry.get("id") or "").strip()
+    ]
     default_model = (listing.get("default_model") or "").strip()
-    if default_model:
+    if default_model and default_model in ids:
         return default_model
-    for entry in listing.get("models") or []:
-        model_id = (entry.get("id") or "").strip()
-        if model_id:
-            return model_id
-    return ""
+    return ids[0] if ids else ""
 
 
-def _probe_llm(override):
+def _probe_llm(override, tools=None):
     """Bind `override` for one throwaway chat call to confirm the endpoint+model actually work.
+
+    Passes `tools` (the real MDC tool schema, when the caller has one -- see `agent.tools.TOOLS`)
+    rather than always probing with no tools at all, so the probe exercises the same request shape
+    real chat turns use, not a simplified one a real endpoint might accept differently. Validates the
+    response is actually a well-formed assistant message -- a provider returning None, a malformed
+    dict, or a non-assistant role must count as a failed probe, not a silent success.
+
     Raises on any failure; callers decide what to roll back. Never touches any store itself."""
     otoken = config.set_llm_override(override)
     try:
-        llm.chat([{"role": "user", "content": "ping"}], tools=None, temperature=0)
+        message = llm.chat(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            tools=tools,
+            temperature=0,
+        )
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise RuntimeError("invalid assistant response")
     finally:
         config.reset_llm_override(otoken)
 
@@ -129,7 +145,7 @@ class Handler(BaseHTTPRequestHandler):
         tunnel = llm_routes.describe(user_token)
         if tunnel.get("registered"):
             return {**tunnel, "mode": "tunnel", "token_mode_available": True}
-        credential = llm_credentials.describe(user_token)
+        credential = llm_credentials.describe(user_token, owner_uid=self._uid)
         if credential.get("connected"):
             return {"registered": True, "mode": "copilot_token", "label": "Copilot (token mode)",
                     "token_mode_available": True, "model": credential.get("selected_model") or ""}
@@ -141,24 +157,30 @@ class Handler(BaseHTTPRequestHandler):
 
         Flag OFF: byte-for-byte the original behaviour -- a straight `llm_routes.resolve` call
         (tunnel override or None -> env default), no credential-store lookup at all. Flag ON: when
-        the token isn't a registered tunnel, also checks the RAM-only paste-token credential store
-        and -- if it holds a live credential for this token -- selects provider
-        `github_copilot_direct` with that `credential_id`, plus its confirmed `selected_model` (set
-        by the connect-token probe or a later POST /api/llm/select-model) and the credential's
-        `owner_uid` (audit/ownership metadata carried alongside, same shape `llm_credentials`
-        already tracks -- not consulted by config.py, which only resolves the known LLM_* keys),
-        through the SAME `config.set_llm_override`/`reset_llm_override` path tunnel users already
-        use (see config.py). An unknown/stale/disconnected credential_id resolves to None here, same
-        as an unknown tunnel token -- i.e. it fails closed to the shared env-default LLM, never
-        silently reuses someone else's endpoint."""
+        the token isn't a registered tunnel, also checks the RAM-only paste-token credential store,
+        scoped to THIS caller (`owner_uid=self._uid` -- a credential belonging to someone else never
+        resolves here, same fail-closed check the store enforces itself).
+
+        Fail-closed, not fail-open: if `user_token` merely LOOKS like one of our credential ids
+        (`llm_credentials.is_credential_id`) but no longer resolves -- disconnected, or never
+        belonged to this owner -- the request is STILL pinned to `github_copilot_direct` with that
+        (now-dead) credential_id, not silently released back to the shared env-default LLM. The
+        provider's own credential lookup then raises (CredentialError), so the caller sees a loud
+        failure instead of quietly spending the shared/default endpoint's quota. `credential_id` +
+        `credential_owner_uid` are threaded through so the provider (internal-owned) can re-verify
+        ownership itself via `llm_credentials.resolve(credential_id, owner_uid=config.LLM_CREDENTIAL_OWNER_UID)`
+        rather than only trusting this check.
+
+        An unregistered tunnel token that also isn't a credential id resolves to None -- i.e. falls
+        back to the shared env-default LLM, exactly as before."""
         override = llm_routes.resolve(user_token)
         if override is not None or not config.LLM_TOKEN_MODE_ENABLED:
             return override
-        record = llm_credentials.resolve(user_token)
-        if record is not None:
+        record = llm_credentials.resolve(user_token, owner_uid=self._uid)
+        if record is not None or llm_credentials.is_credential_id(user_token):
             override = {"mode": "copilot_token", "provider": "github_copilot_direct",
-                        "credential_id": user_token, "owner_uid": record.get("owner_uid") or ""}
-            model = record.get("selected_model")
+                        "credential_id": user_token, "credential_owner_uid": self._uid}
+            model = record.get("selected_model") if record else ""
             if model:
                 override["model"] = model
                 override["selected_model"] = model
@@ -298,11 +320,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 model = (req.get("model") or "").strip()
                 api_key = req.get("api_key") or ""
+                provider = (req.get("provider") or "").strip()
                 candidate = {"base_url": base_url}
                 if model:
                     candidate["model"] = model
                 if api_key:
                     candidate["api_key"] = api_key
+                if provider:
+                    candidate["provider"] = provider
                 if not model:
                     try:
                         model = _pick_default_model(_list_models(candidate))
@@ -311,14 +336,14 @@ class Handler(BaseHTTPRequestHandler):
                     if model:
                         candidate["model"] = model
                 try:
-                    _probe_llm(candidate)
+                    _probe_llm(candidate, tools=agent.tools.TOOLS)
                 except Exception:  # noqa: BLE001 -- never relay the raw provider error
                     self._send_json(400, {"error": _LLM_PROBE_ERROR})
                     return
                 try:
                     record = llm_routes.register(
                         base_url, model, api_key,
-                        req.get("label") or "", req.get("provider") or "", req.get("token") or None,
+                        req.get("label") or "", provider, req.get("token") or None,
                     )
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
@@ -343,26 +368,24 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": str(e)})
                     return
                 base_override = {"mode": "copilot_token", "provider": "github_copilot_direct",
-                                  "credential_id": credential_id}
+                                  "credential_id": credential_id, "credential_owner_uid": self._uid}
                 try:
                     model = _pick_default_model(_list_models(base_override))
-                    probe_override = dict(base_override)
-                    if model:
-                        probe_override["model"] = model
-                        probe_override["selected_model"] = model
-                    _probe_llm(probe_override)
+                    if not model:
+                        raise RuntimeError("no available model")
+                    probe_override = dict(base_override, model=model, selected_model=model)
+                    _probe_llm(probe_override, tools=agent.tools.TOOLS)
                 except Exception:  # noqa: BLE001 -- never relay the raw provider error
-                    llm_credentials.disconnect(credential_id)
+                    llm_credentials.disconnect(credential_id, owner_uid=self._uid)
                     self._send_json(400, {"error": _LLM_PROBE_ERROR})
                     return
-                if model:
-                    llm_credentials.set_selected_model(credential_id, model, owner_uid=self._uid)
+                llm_credentials.set_selected_model(credential_id, model, owner_uid=self._uid)
                 self._send_json(200, {"credential_id": credential_id, "model": model, "connected": True})
                 return
 
             if path == "/api/llm/disconnect-token":
                 credential_id = (req.get("credential_id") or "").strip() or self._user_token()
-                llm_credentials.disconnect(credential_id)
+                llm_credentials.disconnect(credential_id, owner_uid=self._uid)
                 self._send_json(200, {"ok": True})
                 return
 
@@ -378,17 +401,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 tunnel_override = llm_routes.resolve(user_token)
-                credential_record = (llm_credentials.resolve(user_token)
+                # resolve(..., owner_uid=self._uid) is the SAME fail-closed ownership check
+                # llm_credentials enforces everywhere else -- a credential_id that exists but
+                # belongs to someone else comes back None here, indistinguishable from "no such
+                # credential" (never reveals which case it was).
+                credential_record = (llm_credentials.resolve(user_token, owner_uid=self._uid)
                                      if tunnel_override is None and config.LLM_TOKEN_MODE_ENABLED else None)
                 if tunnel_override is not None:
                     candidate = dict(tunnel_override, model=new_model, selected_model=new_model)
                 elif credential_record is not None:
-                    if (credential_record.get("owner_uid") or "") != self._uid:
-                        self._send_json(403, {"error": "credential is not owned by this session"})
-                        return
                     candidate = {"mode": "copilot_token", "provider": "github_copilot_direct",
-                                 "credential_id": user_token,
-                                 "owner_uid": credential_record.get("owner_uid") or "",
+                                 "credential_id": user_token, "credential_owner_uid": self._uid,
                                  "model": new_model, "selected_model": new_model}
                 else:
                     self._send_json(400, {"error": "connect an LLM before choosing a model"})
@@ -405,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    _probe_llm(candidate)
+                    _probe_llm(candidate, tools=agent.tools.TOOLS)
                 except Exception:  # noqa: BLE001 -- never relay the raw provider error; old model stays active
                     self._send_json(400, {"error": _LLM_PROBE_ERROR})
                     return

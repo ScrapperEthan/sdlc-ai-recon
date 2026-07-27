@@ -27,6 +27,12 @@ from datetime import datetime, timezone
 _LOCK = threading.Lock()
 _STORE = {}  # credential_id -> record. Intentionally a plain dict: RAM only, never touches disk.
 
+# Every credential_id carries this prefix so a caller (or the provider re-verifying ownership) can
+# recognize "this looks like one of ours" without a store lookup -- see is_credential_id() below,
+# used by server.py to keep routing a stale/disconnected id at the direct provider (which then fails
+# closed) instead of silently falling back to the shared default LLM.
+_CREDENTIAL_ID_PREFIX = "ct_"
+
 # Model ids look like "gpt-5.5", "claude-3-5-sonnet-20241022", or namespaced "openai/gpt-4o" --
 # never free text. Rejecting anything else keeps a bad/garbled model id a clean 400 instead of it
 # silently riding into a provider request payload.
@@ -56,7 +62,7 @@ def connect(oauth_token, owner_uid=""):
     oauth_token = (oauth_token or "").strip()
     if not oauth_token:
         raise ValueError("token is required")
-    credential_id = uuid.uuid4().hex
+    credential_id = _CREDENTIAL_ID_PREFIX + uuid.uuid4().hex
     with _LOCK:
         _STORE[credential_id] = {
             "owner_uid": (owner_uid or "").strip(),
@@ -69,19 +75,41 @@ def connect(oauth_token, owner_uid=""):
     return credential_id
 
 
-def disconnect(credential_id):
+def _owner_mismatch(record, owner_uid):
+    """True if `owner_uid` was given (not None) and doesn't match the record's owner -- the shared
+    fail-closed check every read/write below applies before touching a credential."""
+    return owner_uid is not None and record.get("owner_uid", "") != (owner_uid or "").strip()
+
+
+def disconnect(credential_id, owner_uid=None):
     """Drop a credential from RAM. Idempotent: returns True if something was actually removed,
-    False if the id was already gone/unknown -- either way it's gone."""
+    False if the id was already gone/unknown -- either way it's gone.
+
+    `owner_uid`: when given (not None), only that credential's own owner may disconnect it -- a
+    different browser that merely learned the credential_id gets a no-op False, not someone else's
+    credential silently dropped out from under them."""
     credential_id = (credential_id or "").strip()
     if not credential_id:
         return False
     with _LOCK:
-        return _STORE.pop(credential_id, None) is not None
+        record = _STORE.get(credential_id)
+        if record is None:
+            return False
+        if _owner_mismatch(record, owner_uid):
+            return False
+        del _STORE[credential_id]
+        return True
 
 
-def resolve(credential_id):
-    """A COPY of the RAM record for a credential_id, or None if unknown/disconnected (fails closed --
-    callers must never fall back to a shared/default endpoint just because this returns None).
+def resolve(credential_id, owner_uid=None):
+    """A COPY of the RAM record for a credential_id, or None if unknown/disconnected/not-yours
+    (fails closed -- callers must never fall back to a shared/default endpoint just because this
+    returns None).
+
+    `owner_uid`: when given (not None), the record is only returned if it belongs to that owner --
+    the same fail-closed check as `disconnect`/`update_service_token`. Pass None (the default) for
+    callers that don't have -- or don't need -- an owner context (e.g. a re-resolve deep inside a
+    provider that already trusts the request it's serving).
 
     Returns a copy (not the live dict) so a caller mutating its own local variable can't accidentally
     corrupt the store outside the lock; use `update_service_token` to write back."""
@@ -90,16 +118,23 @@ def resolve(credential_id):
         return None
     with _LOCK:
         record = _STORE.get(credential_id)
-        return dict(record) if record is not None else None
+        if record is None:
+            return None
+        if _owner_mismatch(record, owner_uid):
+            return None
+        return dict(record)
 
 
-def update_service_token(credential_id, service_token, expiry):
+def update_service_token(credential_id, service_token, expiry, owner_uid=None):
     """Cache the derived short-lived Copilot service token (stage 2 of the token exchange) against
-    this credential. No-op (returns False) if the credential was disconnected concurrently."""
+    this credential. No-op (returns False) if the credential was disconnected concurrently, or (when
+    `owner_uid` is given) doesn't belong to that owner."""
     credential_id = (credential_id or "").strip()
     with _LOCK:
         record = _STORE.get(credential_id)
         if record is None:
+            return False
+        if _owner_mismatch(record, owner_uid):
             return False
         record["service_token"] = service_token
         record["service_token_expiry"] = expiry
@@ -126,14 +161,36 @@ def set_selected_model(credential_id, model_id, owner_uid=""):
         return True
 
 
-def describe(credential_id):
+def describe(credential_id, owner_uid=None):
     """Public view for the UI's 'my LLM' panel -- never includes oauth_token/service_token, only
-    whether a credential is connected and (once probed) its confirmed model."""
-    record = resolve(credential_id)
+    whether a credential is connected and (once probed) its confirmed model. `owner_uid` is
+    forwarded to `resolve` unchanged (None = no ownership filter)."""
+    record = resolve(credential_id, owner_uid=owner_uid)
     if not record:
         return {"connected": False}
     return {"connected": True, "mode": "copilot_token", "created_at": record.get("created_at"),
              "selected_model": record.get("selected_model")}
+
+
+def is_valid_model_id(model_id):
+    """Boolean check for a model id, for callers that just want a yes/no (e.g. a provider validating
+    the model it's about to send) rather than a try/except around `_valid_model_id`."""
+    try:
+        _valid_model_id(model_id)
+        return True
+    except ValueError:
+        return False
+
+
+def is_credential_id(value):
+    """True if `value` has the shape of one of our credential ids (ct_ + 32 lowercase hex chars) --
+    NOT a store lookup. Used to decide routing (e.g. server.py keeps a request pinned to the direct
+    provider, which then fails closed, when the token merely LOOKS like a credential id but no
+    longer resolves -- disconnected or never-existed both fail the same way at the provider)."""
+    if not isinstance(value, str) or not value.startswith(_CREDENTIAL_ID_PREFIX):
+        return False
+    suffix = value[len(_CREDENTIAL_ID_PREFIX):]
+    return len(suffix) == 32 and all(ch in "0123456789abcdef" for ch in suffix.lower())
 
 
 def count():

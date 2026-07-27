@@ -101,6 +101,8 @@ def list_remote_models(base_url, api_key=""):
         raise RuntimeError("tunnel endpoint returned an invalid response") from None
 
     entries = body.get("data") if isinstance(body, dict) else body
+    if entries is None and isinstance(body, dict):
+        entries = body.get("models")  # some endpoints answer {"models": [...]} instead of {"data": [...]}
     if not isinstance(entries, list):
         entries = []
     models = []
@@ -136,8 +138,9 @@ def register(base_url, model="", api_key="", label="", provider="", token=None):
 
 
 def resolve(token):
-    """The override dict (base_url/api_key/model) for a token, or None. Used by the server to bind
-    a request to the user's endpoint via config.set_llm_override. Empty fields fall back to env."""
+    """The override dict (base_url/api_key/model/provider) for a token, or None. Used by the server
+    to bind a request to the user's endpoint via config.set_llm_override. Empty fields fall back to
+    env -- notably `provider`, so a route registered before this field existed still resolves fine."""
     token = (token or "").strip()
     if not token:
         return None
@@ -150,6 +153,8 @@ def resolve(token):
         override["model"] = record["model"]
     if record.get("api_key"):
         override["api_key"] = record["api_key"]
+    if record.get("provider"):
+        override["provider"] = record["provider"]
     return override
 
 

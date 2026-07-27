@@ -38,6 +38,12 @@ _LLM_DEFAULTS = {
     # Opaque reference into the RAM-only credential store (webapp/llm_credentials.py). Token-mode
     # only; empty for everyone else. Never the token itself -- see SDLC_LLM_TOKEN_MODE below.
     "LLM_CREDENTIAL_ID": "",
+    # Who this request is FROM (server.py's self._uid), threaded alongside LLM_CREDENTIAL_ID so the
+    # provider (webapp/llm_providers/github_copilot_direct.py, internal-owned) can re-verify
+    # ownership itself -- llm_credentials.resolve/update_service_token take a matching owner_uid= --
+    # rather than trusting that server.py's own check was sufficient. Token-mode only; empty
+    # otherwise.
+    "LLM_CREDENTIAL_OWNER_UID": "",
     # The model the user actually confirmed (via connect-probe or POST /api/llm/select-model),
     # resolved the same override-then-env way as everything else. Distinct from LLM_MODEL: LLM_MODEL
     # is what providers put in their request payload (so provider code needs zero changes to pick up

@@ -304,12 +304,20 @@ class RuleTextAstAndValidationWiringTests(unittest.TestCase):
                 markdown = impact_report.render_report_markdown(report)
 
         self.assertEqual(report["rule_text_ast"]["mode"], "MIXED")
-        self.assertEqual(report["rule_text_ast"]["semantics"], "unconfirmed")
-        self.assertNotIn("rule_text_interpretation", report)  # unconfirmed by default -> no assertion
+        # Owner-confirmed 2026-07-27: the shipped config/rule_text_semantics.json lights up
+        # interpretation, so the report now carries the effective send order AND must stop badging
+        # the expression as "pending owner confirmation" (that would contradict itself).
+        self.assertEqual(report["rule_text_ast"]["semantics"], "confirmed")
+        self.assertTrue(report["rule_text_interpretation"]["available"])
+        self.assertEqual(report["rule_text_interpretation"]["initial_channels"], ["LETTER"])
+        self.assertEqual(report["rule_text_interpretation"]["parallel_groups"], [["EMAIL", "SMS"]])
         findings = {f["check"] for f in report["validation_findings"]}
         self.assertIn("expression_vs_priority", findings)  # the I0141 canonical mismatch
         self.assertIn("Channel Decision Expression", markdown)
-        self.assertIn("semantics: **unconfirmed**", markdown)
+        self.assertIn("semantics: **owner-confirmed**", markdown)
+        self.assertIn("sends first: LETTER", markdown)
+        self.assertIn("sent together: EMAIL, SMS", markdown)
+        self.assertNotIn("semantics: **unconfirmed**", markdown)
         self.assertIn("Validation Findings", markdown)
         self.assertIn("expression_vs_priority", markdown)
 

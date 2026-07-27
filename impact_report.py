@@ -594,10 +594,14 @@ def build_usecase_report(use_case_id, tags):
             rule_text_raw = ext.get("rule_text") or ""
             if rule_text_raw.strip():
                 ast = rule_text.parse(rule_text_raw)
-                report["rule_text_ast"] = ast
                 semantics = rule_text.interpret(ast)
                 if semantics.get("available"):
+                    # parse() is deliberately config-blind and always stamps "unconfirmed" (it is a
+                    # STRUCTURAL parser). Once the owner answer is in place the report must stop
+                    # telling the reader that operator meaning is pending — it is not.
+                    ast = dict(ast, semantics="confirmed")
                     report["rule_text_interpretation"] = semantics
+                report["rule_text_ast"] = ast
         # Round B3: multi-source consistency findings (rule_text vs channel_rule) — only meaningful
         # once at least one of rules/ext exists; empty list otherwise (catalog_only use case).
         validation = usecase_consistency.check_use_case(use_case_id)
@@ -807,14 +811,28 @@ def render_endpoint_repos(segments):
     return lines
 
 
-def render_rule_text_ast(ast):
-    """Round B1: structural decision tree only — NEVER prints an asserted fallback/parallel meaning
-    while ast['semantics'] == 'unconfirmed' (the default until an owner fills in
-    index/rule_text_semantics.json). Shows the operator string as-is (>/&/|) with an explicit badge."""
+def render_rule_text_ast(ast, interpretation=None):
+    """Round B1: structural decision tree. NEVER prints an asserted fallback/parallel meaning while
+    ast['semantics'] == 'unconfirmed'. Once config/rule_text_semantics.json carries the owner answer
+    (confirmed 2026-07-27) the caller passes the `interpret()` result and the effective send order is
+    printed alongside the structure."""
     lines = [f"- expression: `{ast['normalized_expression']}`", f"- mode: {ast['mode']}"]
     if ast["semantics"] == "unconfirmed":
         lines.append("- semantics: **unconfirmed** — operator meaning (>/&/|) pending owner "
                       "confirmation; shown as structure only, NOT an asserted fallback/parallel order")
+    else:
+        lines.append("- semantics: **owner-confirmed** (config/rule_text_semantics.json)")
+        if interpretation and interpretation.get("available"):
+            if interpretation.get("initial_channels"):
+                lines.append(f"  - sends first: {', '.join(interpretation['initial_channels'])}")
+            for group in interpretation.get("parallel_groups") or []:
+                lines.append(f"  - sent together: {', '.join(group)}")
+            if interpretation.get("selectable_channels"):
+                lines.append("  - exactly one of: "
+                             + ", ".join(interpretation["selectable_channels"]))
+            if interpretation.get("stage_transition") == "unconfirmed":
+                lines.append("  - NOTE: whether a later stage always sends or only on failure of the "
+                             "earlier one is NOT owner-confirmed")
     if ast["parse_warnings"]:
         lines.append("- parse warnings:")
         lines.extend(f"  - {w['type']}: {w.get('detail') or w.get('token') or w.get('channel') or ''}"
@@ -853,7 +871,8 @@ def render_markdown(report):
         lines.extend(render_endpoint_repos(report["endpoint_repos"]))
     if report.get("rule_text_ast"):
         lines.extend(["", "## Channel Decision Expression (rule_text)"])
-        lines.extend(render_rule_text_ast(report["rule_text_ast"]))
+        lines.extend(render_rule_text_ast(report["rule_text_ast"],
+                                          report.get("rule_text_interpretation")))
     if "validation_findings" in report:
         lines.extend(["", "## Validation Findings"])
         lines.extend(render_validation_findings(report["validation_findings"]))

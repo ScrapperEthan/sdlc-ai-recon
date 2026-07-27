@@ -1,0 +1,48 @@
+{
+  "_README": [
+    "Operational meaning of the tbl_use_case_ext.rule_text operators, and which source wins when",
+    "rule_text and tbl_use_case_channel_rule.priority disagree.",
+    "",
+    "CONFIRMED by the business owner, relayed 2026-07-27. Before this, every operator was",
+    "'unconfirmed' and retriever/rule_text.py interpret() deliberately refused to guess.",
+    "",
+    "'meaning' must be a value the interpreter actually implements (see _MEANINGS in",
+    "retriever/rule_text.py). An unrecognised meaning keeps interpretation switched OFF rather than",
+    "silently producing the wrong shape — so renaming a meaning here is safe, it fails closed.",
+    "",
+    "STILL OPEN (narrow follow-up, does NOT block interpretation): for '>', the owner confirmed the",
+    "left side sends FIRST. Whether the right side then always sends, or only after the left side",
+    "fails, was not stated — so stage_transition stays 'unconfirmed' and is reported as such.",
+    "It matters only for outage questions ('LETTER vendor is down — do EMAIL+SMS still go out?')."
+  ],
+
+  ">": {
+    "meaning": "ordered_precedence",
+    "note": "哪个大就哪个先发 — the left operand sends first; stages run left to right."
+  },
+  "&": {
+    "meaning": "parallel_all",
+    "note": "一起发 — every channel in the group is sent together."
+  },
+  "|": {
+    "meaning": "exclusive_choice",
+    "note": "二选一 — exactly one of the operands is used."
+  },
+
+  "precedence": ["|", ">", "&"],
+
+  "stage_transition": "unconfirmed",
+
+  "source_precedence": {
+    "order": ["rule_text", "channel_rule_priority"],
+    "note": [
+      "以 rule_text 为准,没有的情况下再看 priority — rule_text is authoritative; the",
+      "tbl_use_case_channel_rule.priority column is the fallback used only when rule_text is",
+      "blank/absent. A disagreement is therefore still WORTH REPORTING as a data-quality issue,",
+      "but it is no longer an open question about which side is correct."
+    ]
+  },
+
+  "confirmed_by": "business owner (relayed by the project owner)",
+  "confirmed_at": "2026-07-27"
+}

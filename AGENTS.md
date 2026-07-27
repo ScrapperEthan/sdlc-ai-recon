@@ -107,14 +107,19 @@ MDC 消息平台的 AI 助手。索引约 460 个代码仓库 + UAT 业务用例
 
 ## 8. 不许猜业务语义(这条最容易犯)
 
-以下几件事**没有人有权替业务方决定**,默认必须保持 `unconfirmed`,只**标记矛盾**、不判定对错:
-
-- `rule_text` 里 `>` / `&` / `|` 的运算含义(配置位:`config/rule_text_semantics.json`)
-- `business_category` **33** / **37** 的分类名称(配置位:`config/business_enums.json`)
-
+以下几件事**没有人有权替业务方决定**,默认必须保持 `unconfirmed`,只**标记矛盾**、不判定对错。
 已知这些数据源**互相矛盾**(rule_text 与 channel_rule 优先级、与前台页面三方不一致),且现行运行时解析
 逻辑本身有 bug —— 所以**既不能硬编码语义,也不能把运行时当成事实基准**。
-待问清单见 `docs/OWNER-QUESTIONS-zh.md`。
+
+| 事项 | 状态 | 配置位 |
+| --- | --- | --- |
+| `rule_text` 的 `>` / `&` / `\|` 含义 + rule_text 与 priority 谁优先 | ✅ **业主已确认 2026-07-27** | `config/rule_text_semantics.json`(已填) |
+| `source_system` 的 eAlert 系列归并 | ✅ **业主已确认 2026-07-27** | `config/source_system_aliases.json`(已填) |
+| `business_category` **33** / **37** 的分类名称 | ⏳ **待办**:该字段疑似已迁到 `tbl_use_case_router` 表,拿到表后才能确认 | `config/business_enums.json`(未建) |
+
+**已确认的内容不要再改**,除非业主推翻。**未确认的不要猜** —— 代码会 fail closed(见 `_MEANINGS`:
+配置里写了一个解释器没实现的含义,解释功能会自动关闭,而不是按旧假设硬跑)。
+待问清单与数据出处见 `docs/OWNER-QUESTIONS-zh.md`。
 
 ---
 

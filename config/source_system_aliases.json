@@ -1,0 +1,25 @@
+{
+  "_README": [
+    "source_system respelling registry for the tbl_use_case.source_system column.",
+    "",
+    "Only genuine RESPELLINGS belong here. Pure format variants (case, spaces, punctuation) are",
+    "already folded automatically by canonicalize_source_system() in retriever/usecase_catalog.py —",
+    "you do NOT need to list 'MDC' vs 'mdc', or 'PowerCard' vs 'Power Card'.",
+    "",
+    "OWNER-CONFIRMED 2026-07-27: the eAlert family (eAlert / e-Alert / EAlert / ealert) is ONE system.",
+    "That family was ALREADY folded correctly by the automatic canonicalisation (it strips case and",
+    "punctuation), so this entry changes no grouping — it records the confirmation and pins the",
+    "preferred display spelling. PEGA_HK is the one genuine respelling that needs an explicit rule.",
+    "",
+    "DO NOT merge 'MDC Test' into 'MDC' — they are separate (13 rows in the UAT snapshot).",
+    "",
+    "Format: {canonical_name: [variant, variant, ...]}. Add a variant, never remove one silently."
+  ],
+
+  "eAlert": ["e-Alert", "E-Alert", "e_alert", "EALERT"],
+  "MDC": [],
+  "PEGA": ["PEGA_HK"],
+  "PowerCard": [],
+  "HCC": [],
+  "L400": []
+}

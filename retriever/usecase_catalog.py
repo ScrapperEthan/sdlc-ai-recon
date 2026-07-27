@@ -589,12 +589,17 @@ def _canonical_key(value):
 
 
 def _load_aliases():
+    """The alias registry, with `_`-prefixed keys dropped. Every config knob in this project treats
+    `_README` as documentation, not data (AGENTS.md §6) — without this filter a README block would
+    register itself as a bogus source system."""
     try:
         with open(config.SOURCE_SYSTEM_ALIASES_JSON, encoding="utf-8-sig") as handle:
             data = json.load(handle)
     except (FileNotFoundError, OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: value for key, value in data.items() if not str(key).startswith("_")}
 
 
 def _alias_overrides():

@@ -9,8 +9,16 @@ Compares three DATA-COMPUTABLE sources per use case:
   3. rule_text internal validity: duplicate/unknown channel tokens, blank rule_text with rules present
 
 The Portal composer / runtime parser is a 4th, CODE-ONLY source that cannot be computed per-use-case
-from data here — see PORTAL_COMPOSER_CAVEAT. This module never silently picks a winner between
+from data here — see PORTAL_COMPOSER_CAVEAT. This module never SILENTLY picks a winner between
 disagreeing sources; every finding carries both sources' citations, severity-ranked.
+
+Since 2026-07-27 there IS a declared winner, and it is not silent: the business owner confirmed that
+**rule_text is authoritative and channel_rule.priority is the fallback used only when rule_text is
+blank** (`config/rule_text_semantics.json` -> `source_precedence`). Disagreements are therefore still
+reported — two tables describing one use case differently is a real data-quality problem — but they
+now carry a `resolution` naming the effective reading, and drop from "error" (open question) to
+"warning" (resolvable inconsistency). With the config absent/unconfirmed, the original
+no-winner-named behaviour is preserved byte-for-byte.
 
 `quality_findings()` folds in the RUNBOOK-45 Part B categories (orphan channel_rule/ext rows, active
 use cases with no channel rule, master rows missing Ext, null priority, PUSH+INBOX unconfigured,
@@ -37,11 +45,21 @@ _SEVERITY_RANK = {"error": 3, "warning": 2, "info": 1}
 _PUSH_INBOX_KEY = "PUSHINBOX"
 
 
-def _finding(check, severity, use_case_id, message, citations):
-    return {
+def _finding(check, severity, use_case_id, message, citations, resolution=None):
+    payload = {
         "check": check, "severity": severity, "use_case_id": use_case_id, "message": message,
         "citations": sorted({c for c in (citations or []) if c}),
     }
+    if resolution:
+        payload["resolution"] = resolution
+    return payload
+
+
+def _authoritative_source(semantics=None):
+    """The owner-confirmed winner when rule_text and channel_rule.priority disagree, or None while
+    unconfirmed. Confirmed 2026-07-27: rule_text wins, priority is the blank-rule_text fallback."""
+    order = rt.source_precedence(semantics)
+    return order[0] if order else None
 
 
 def _priority_groups(rules):
@@ -91,12 +109,20 @@ def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
 
     rule_text_raw = (ext.get("rule_text") or "").strip() if ext else ""
     ast = rt.parse(rule_text_raw)
+    authoritative = _authoritative_source()
 
     if not rule_text_raw and rules:
+        # Owner-confirmed 2026-07-27: a blank rule_text is the DOCUMENTED case for falling back to
+        # channel_rule.priority ("没有的情况下再看 priority") — normal operation, not a defect. Keep
+        # reporting it (it is still worth seeing) but demote it out of the warning tier so it stops
+        # crowding out real problems. Unconfirmed -> the original warning severity stands.
+        blank_severity = "info" if authoritative == "rule_text" else "warning"
         findings.append(_finding(
-            "blank_with_rules", "warning", uc_id,
+            "blank_with_rules", blank_severity, uc_id,
             f"tbl_use_case_ext.rule_text is blank but {len(rules)} channel_rule row(s) exist",
-            [ext_citation] + [r.get("citation") for r in rules]))
+            [ext_citation] + [r.get("citation") for r in rules],
+            resolution=("channel_rule.priority applies — blank rule_text is the confirmed fallback"
+                        if authoritative == "rule_text" else None)))
 
     for warning in ast["parse_warnings"]:
         if warning["type"] == "duplicate_channel":
@@ -133,11 +159,20 @@ def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
         rule_groups = _priority_groups(rules)
         expr_groups = [sorted(stage) for stage in rt.stage_groups(ast["operator_tree"])]
         if rule_groups and expr_groups and rule_groups != expr_groups:
+            # The disagreement itself is still a real data-quality finding — the two tables describe
+            # the same use case differently. What CHANGED with the 2026-07-27 owner answer is that it
+            # is no longer an open question: rule_text wins. So carry the authoritative reading and
+            # demote error -> warning (a resolvable inconsistency, not an unknown). Unconfirmed ->
+            # the original "error, no winner named" behaviour is preserved exactly.
+            resolved = authoritative == "rule_text"
             findings.append(_finding(
-                "expression_vs_priority", "error", uc_id,
+                "expression_vs_priority", "warning" if resolved else "error", uc_id,
                 f"rule_text grouping {expr_groups} disagrees with channel_rule priority order "
                 f"{rule_groups}",
-                [ext_citation] + rule_citations))
+                [ext_citation] + rule_citations,
+                resolution=(f"rule_text is authoritative (owner-confirmed) — effective order "
+                            f"{expr_groups}; channel_rule.priority applies only when rule_text is "
+                            f"blank" if resolved else None)))
 
     return findings
 

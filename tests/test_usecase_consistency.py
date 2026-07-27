@@ -67,7 +67,11 @@ class CheckUseCaseTests(unittest.TestCase):
         checks = {f["check"] for f in findings}
         self.assertIn("expression_vs_priority", checks)
         mismatch = next(f for f in findings if f["check"] == "expression_vs_priority")
-        self.assertEqual(mismatch["severity"], "error")
+        # Owner-confirmed 2026-07-27 (config/rule_text_semantics.json ships with the answer):
+        # rule_text wins, so this is a resolvable inconsistency -> "warning" carrying a resolution,
+        # no longer an open "error". The disagreement is still reported, with both sources cited.
+        self.assertEqual(mismatch["severity"], "warning")
+        self.assertIn("rule_text is authoritative", mismatch["resolution"])
         self.assertTrue(mismatch["citations"])
 
     def test_channel_set_mismatch(self):

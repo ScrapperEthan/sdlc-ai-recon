@@ -140,13 +140,19 @@ class InterpretUnconfirmedByDefaultTests(unittest.TestCase):
 
 
 class InterpretConfirmedSeamTests(unittest.TestCase):
-    """Once an owner fills in index/rule_text_semantics.json, interpretation lights up with zero
-    code change here — this is the seam itself, exercised with a fixture 'confirmed' file."""
+    """Once an owner fills in config/rule_text_semantics.json, interpretation lights up with zero
+    code change here — this is the seam itself.
+
+    These meanings were placeholders until 2026-07-27; they are now the REAL owner-confirmed
+    vocabulary (`>` 哪个大就哪个先发 / `&` 一起发 / `|` 二选一). Every shape assertion below is
+    unchanged from when the meanings were guesses — i.e. the owner's answer matched the structure
+    this module already produced. See tests/test_rule_text_semantics_confirmed.py for the
+    source-precedence half of the answer and the fail-closed guards."""
 
     _CONFIRMED = {
-        ">": {"meaning": "sequential_fallback"},
-        "&": {"meaning": "parallel_send"},
-        "|": {"meaning": "upstream_selected"},
+        ">": {"meaning": "ordered_precedence"},
+        "&": {"meaning": "parallel_all"},
+        "|": {"meaning": "exclusive_choice"},
     }
 
     def test_fallback_confirmed_yields_edges(self):
@@ -180,7 +186,7 @@ class InterpretConfirmedSeamTests(unittest.TestCase):
     def test_partially_confirmed_still_unavailable(self):
         # Only '>' confirmed, but this expression also uses '&' -> still unconfirmed overall.
         ast = rt.parse("LETTER > (EMAIL & SMS)")
-        result = rt.interpret(ast, semantics={">": {"meaning": "sequential_fallback"}})
+        result = rt.interpret(ast, semantics={">": {"meaning": "ordered_precedence"}})
         self.assertFalse(result["available"])
         self.assertEqual(result["unconfirmed_operators"], ["&"])
 

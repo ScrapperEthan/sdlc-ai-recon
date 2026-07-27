@@ -8,6 +8,25 @@ def _p(env, *parts):
     return os.environ.get(env) or os.path.join(ROOT, *parts)
 
 
+def _cfg(env, name, *legacy_parts):
+    """Knob files (column maps + vocabulary) live in the COMMITTED ``config/`` dir — unlike
+    ``index/``, which is gitignored, so an intranet-Codex edit there can actually be versioned and
+    pushed to the internal repo instead of dying on the box (see AGENTS.md §4).
+
+    Resolution order: env override -> ``config/<name>`` -> a pre-existing legacy path. The legacy
+    fallback only applies when that file already exists, so a box that still holds an older
+    ``index/`` copy keeps working until it is moved, while a clean checkout uses ``config/``.
+    """
+    override = os.environ.get(env)
+    if override:
+        return override
+    new_path = os.path.join(ROOT, "config", name)
+    if os.path.exists(new_path) or not legacy_parts:
+        return new_path
+    legacy = os.path.join(ROOT, *legacy_parts)
+    return legacy if os.path.exists(legacy) else new_path
+
+
 MIRROR = _p("SDLC_MIRROR", "mirror")
 RECON_DIR = _p("SDLC_RECON", "recon_out")
 INDEX_DIR = _p("SDLC_INDEX", "index")
@@ -24,7 +43,9 @@ USECASE_SNAPSHOT_CSV = _p(
 # Use Case master data (Tier 0) — second snapshot on the same use_case_id primary key; supplies
 # identity/governance + the upstream source_system that the routing snapshot above doesn't carry.
 USECASE_MASTER_CSV = _p("SDLC_USECASE_MASTER", "index", "tbl_use_case.snapshot.csv")
-SOURCE_SYSTEM_ALIASES_JSON = _p("SDLC_SOURCE_SYSTEM_ALIASES", "index", "source_system_aliases.json")
+SOURCE_SYSTEM_ALIASES_JSON = _cfg(
+    "SDLC_SOURCE_SYSTEM_ALIASES", "source_system_aliases.json", "index", "source_system_aliases.json"
+)
 # Round A (UAT catalog): manifest-driven, environment-aware dataset directory. A single "active"
 # dataset carries all three UAT tables (tbl_use_case / tbl_use_case_channel_rule / tbl_use_case_ext)
 # plus an optional same-environment route snapshot. Legacy single-file USECASE_MASTER_CSV above stays
@@ -32,7 +53,10 @@ SOURCE_SYSTEM_ALIASES_JSON = _p("SDLC_SOURCE_SYSTEM_ALIASES", "index", "source_s
 USECASE_DATASET_DIR = _p("SDLC_USECASE_DATASET", "index", "usecase-snapshots", "active")
 # Round B2: owner-confirmed rule_text operator semantics. Missing/default -> every operator
 # "unconfirmed" (see retriever/rule_text.py) — the single seam an owner answer plugs into.
-RULE_TEXT_SEMANTICS_JSON = _p("SDLC_RULE_TEXT_SEMANTICS", "index", "rule_text_semantics.json")
+# CONFIRMED 2026-07-27, so this now ships as a committed config/ file rather than a box-local blank.
+RULE_TEXT_SEMANTICS_JSON = _cfg(
+    "SDLC_RULE_TEXT_SEMANTICS", "rule_text_semantics.json", "index", "rule_text_semantics.json"
+)
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

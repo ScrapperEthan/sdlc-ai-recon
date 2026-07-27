@@ -10,9 +10,17 @@ So this module deliberately does NOT assert what `>`/`&`/`|` operationally mean:
   - `parse()` (B1) only builds a STRUCTURAL operator tree — mode/channels/normalized_expression —
     and never emits `initial_channels`/`fallback_edges` as fact.
   - `interpret()` (B2) turns that structure into initial/parallel/fallback/selectable channels, but
-    ONLY once the relevant operators are confirmed in `index/rule_text_semantics.json`. Until then
+    ONLY once the relevant operators are confirmed in `config/rule_text_semantics.json`. Until then
     it returns `{"available": False, ...}`. This file is the single seam an owner answer plugs into
     — filling it in lights up interpretation with zero code change here.
+
+OWNER ANSWER RECEIVED 2026-07-27, so that seam is now filled (`config/rule_text_semantics.json`):
+`>` = 哪个大就哪个先发 (ordered precedence, left sends first), `&` = 一起发 (parallel), `|` = 二选一
+(exclusive choice), and — new, beyond the operators themselves — **rule_text is authoritative over
+tbl_use_case_channel_rule.priority**, which is the fallback used only when rule_text is blank
+(以 rule_text 为准,没有的情况下再看 priority). See `source_precedence()`. The disagreements this
+module reports (e.g. I0141/I0142) therefore remain real DATA-QUALITY findings, but they are no
+longer open questions about which side is right.
 
 Grammar (EBNF, from the UAT rule_text corpus — operator counts on real data: non-blank 2,640;
 no-operator 1,977; `>` 310; `&` 193; `|` 52; mixed 108):
@@ -226,13 +234,24 @@ DEFAULT_SEMANTICS = {
     "&": {"meaning": "unconfirmed"},
     "|": {"meaning": "unconfirmed"},
     "precedence": ["|", ">", "&"],
+    "stage_transition": "unconfirmed",
+    "source_precedence": None,
     "confirmed_by": None,
     "confirmed_at": None,
 }
 
+# The only meanings `_build_interpretation` actually implements. A config that declares some OTHER
+# meaning for an operator is treated as still-unconfirmed rather than silently interpreted with the
+# wrong shape — the seam fails CLOSED. (Confirmed 2026-07-27: `>` ordered, `&` parallel, `|` choice.)
+_MEANINGS = {
+    ">": {"ordered_precedence"},
+    "&": {"parallel_all"},
+    "|": {"exclusive_choice"},
+}
+
 
 def load_semantics():
-    """index/rule_text_semantics.json, merged over the safe default. Missing/invalid file -> the
+    """config/rule_text_semantics.json, merged over the safe default. Missing/invalid file -> the
     default (every operator unconfirmed) — never a crash."""
     try:
         with open(config.RULE_TEXT_SEMANTICS_JSON, encoding="utf-8-sig") as handle:
@@ -246,8 +265,26 @@ def load_semantics():
 
 
 def _op_confirmed(semantics, op):
+    """Confirmed == the owner named a meaning AND it is one this module implements (`_MEANINGS`).
+    An unknown meaning fails closed, so a future redefinition of an operator can never be silently
+    interpreted with today's structural assumptions."""
     meaning = ((semantics or {}).get(op) or {}).get("meaning")
-    return meaning not in (None, "unconfirmed")
+    if meaning in (None, "unconfirmed"):
+        return False
+    return meaning in _MEANINGS.get(op, set())
+
+
+def source_precedence(semantics=None):
+    """Which source wins when rule_text and channel_rule.priority disagree, as an ordered list of
+    source names — or None while unconfirmed. Owner-confirmed 2026-07-27:
+    `["rule_text", "channel_rule_priority"]` (以 rule_text 为准,没有的情况下再看 priority).
+    Consumers must treat None as "no authoritative winner — report the disagreement only"."""
+    semantics = load_semantics() if semantics is None else semantics
+    declared = (semantics or {}).get("source_precedence")
+    order = (declared or {}).get("order") if isinstance(declared, dict) else declared
+    if isinstance(order, list) and order:
+        return [str(item) for item in order]
+    return None
 
 
 def _flatten_group(node):
@@ -310,9 +347,14 @@ def _build_interpretation(tree, semantics):
 
 def interpret(ast, semantics=None):
     """initial_channels / parallel_groups / fallback_edges / selectable_channels — ONLY when every
-    operator actually used in `ast["operator_tree"]` is confirmed in `index/rule_text_semantics.json`.
-    While unconfirmed (the default — always true until an owner edits that file), returns
-    `{"available": False, "reason": ..., "unconfirmed_operators": [...]}`. Never guesses."""
+    operator actually used in `ast["operator_tree"]` is confirmed in `config/rule_text_semantics.json`
+    AND its declared meaning is one this module implements. Otherwise returns
+    `{"available": False, "reason": ..., "unconfirmed_operators": [...]}`. Never guesses.
+
+    `stage_transition` rides along on an available interpretation: `>` is confirmed to mean the left
+    stage sends FIRST, but whether the next stage always follows or only fires on failure was not
+    confirmed — so consumers answering outage questions ("is EMAIL still sent when LETTER fails?")
+    must check it rather than assume."""
     semantics = load_semantics() if semantics is None else semantics
     tree = (ast or {}).get("operator_tree")
     if not tree:
@@ -321,4 +363,6 @@ def interpret(ast, semantics=None):
     if unconfirmed:
         return {"available": False, "reason": "operator semantics not owner-confirmed",
                 "unconfirmed_operators": unconfirmed}
-    return _build_interpretation(tree, semantics)
+    result = _build_interpretation(tree, semantics)
+    result["stage_transition"] = (semantics or {}).get("stage_transition") or "unconfirmed"
+    return result

@@ -662,14 +662,18 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
             llm_credentials.disconnect(cred_id)
 
     def _connect(self, token="real-oauth-token"):
-        cred_id = llm_credentials.connect(token)
+        # Match the owner-bound contract the internal provider enforces on the box. Keeping the
+        # fixture explicit stops this public routing suite from accidentally depending on an older
+        # provider revision that ignored LLM_CREDENTIAL_OWNER_UID.
+        cred_id = llm_credentials.connect(token, owner_uid="u1")
         self._ids.append(cred_id)
         return cred_id
 
     def _bind(self, credential_id):
         return config.set_llm_override(
             {"mode": "copilot_token", "provider": "github_copilot_direct",
-             "credential_id": credential_id}
+             "credential_id": credential_id, "credential_owner_uid": "u1",
+             "model": "gpt-5.4", "selected_model": "gpt-5.4"}
         )
 
     @staticmethod
@@ -854,7 +858,9 @@ class NoSecretLoggingTests(unittest.TestCase):
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 
         otoken = config.set_llm_override(
-            {"mode": "copilot_token", "provider": "github_copilot_direct", "credential_id": cred_id}
+            {"mode": "copilot_token", "provider": "github_copilot_direct",
+             "credential_id": cred_id, "credential_owner_uid": "u1",
+             "model": "gpt-5.4", "selected_model": "gpt-5.4"}
         )
         try:
             with mock.patch.object(github_copilot_direct, "_open", fake_open):
@@ -927,6 +933,17 @@ class FrontendModelSelectorSourceTests(unittest.TestCase):
         refresh_body = self._function_body(self._index_html_source(), "refreshLlmStatus")
         self.assertLess(refresh_body.index("if (tokenListing)"),
                         refresh_body.index("await loadTokenModelOptions"))
+
+    def test_streaming_429_uses_structured_code_and_snake_case_retry_after(self):
+        """NDJSON stream errors do not have an HTTP status or fetchJson's camelCase conversion;
+        the live askStream path must still turn the server's structured 429 event into a useful
+        retry/model-switch message rather than rendering only its generic sanitized error."""
+        source = self._index_html_source()
+        describe_body = self._function_body(source, "describeLlmError")
+        stream_body = self._function_body(source, "askStream")
+        self.assertIn("error.code === 'copilot_rate_limit'", describe_body)
+        self.assertIn("error.retryAfter ?? error.retry_after", describe_body)
+        self.assertIn("describeLlmError(event)", stream_body)
 
 
 class PickDefaultModelTests(unittest.TestCase):

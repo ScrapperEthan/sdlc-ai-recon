@@ -2060,7 +2060,7 @@ async function askStream(text) {
           }
         } else if (event.type === 'error') {
           bubble.classList.remove('loading');
-          setBubbleContent(bubble, 'Error: ' + event.error, false);
+          setBubbleContent(bubble, 'Error: ' + describeLlmError(event), false);
           if (event.reconnect_required) await refreshLlmStatus();
         }
       }
@@ -2258,13 +2258,15 @@ async function connectLlmToken(statusEl) {
 }
 
 function describeLlmError(error) {
-  if (error && error.status === 429) {
-    const wait = Number(error.retryAfter);
+  // fetchJson() exposes camelCase metadata, while NDJSON chat-stream events are the server's JSON
+  // payload verbatim. Accept both shapes so a structured 429 always becomes an actionable hint.
+  if (error && (error.status === 429 || error.code === 'copilot_rate_limit')) {
+    const wait = Number(error.retryAfter ?? error.retry_after);
     const waitHint = Number.isFinite(wait) && wait > 0 ? ` Try again in ${wait} seconds.` : '';
     return 'Copilot is rate limited.' + waitHint
       + (error.retryable ? ' You can retry later or choose another model.' : '');
   }
-  return (error && error.message) || 'Request failed.';
+  return (error && (error.message || error.error)) || 'Request failed.';
 }
 
 async function refreshLlmStatusAfterAuthFailure(error) {

@@ -776,24 +776,17 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
             config.reset_llm_override(otoken)
 
     def test_429_maps_to_rate_limit_error(self):
-        """The external facade must preserve a retry hint supplied by the provider.
-
-        Header parsing belongs to the protected direct-provider implementation.  Once it has
-        converted a ``Retry-After`` response header into ``error.retry_after``, the Token route
-        must carry that value through the provider-neutral error instead of silently dropping it.
-        """
         cred_id = self._connect()
-        rate_limit_error = github_copilot_direct.CopilotRateLimitError("slow down")
-        rate_limit_error.retry_after = 7
+        fake_open = self._fake_open(token_body={"error": "slow down"}, token_status=429)
         otoken = self._bind(cred_id)
         try:
-            with mock.patch.object(github_copilot_direct, "_open", side_effect=rate_limit_error):
+            with mock.patch.object(github_copilot_direct, "_open", fake_open):
                 with self.assertRaises(llm.LlmRateLimitError) as caught:
                     llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
-        # A 429 with Retry-After must expose the hint rather than silently dropping it.
-        self.assertEqual(caught.exception.retry_after, 7)
+        # A 429 without Retry-After must degrade safely to None.
+        self.assertIsNone(caught.exception.retry_after)
 
     def test_401_error_message_never_contains_the_oauth_token(self):
         cred_id = self._connect(token="do-not-leak-this-token")

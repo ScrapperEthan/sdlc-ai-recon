@@ -47,6 +47,11 @@ def _raise_normalized_provider_error(error):
         raise LlmAuthError(str(error)) from None
     if isinstance(error, github_copilot_direct.CopilotForbiddenError):
         raise LlmForbiddenError(str(error)) from None
+    # A credential-shaped id that the provider can no longer resolve is the same user-visible
+    # condition as an expired/revoked token: fail closed with a 401/reconnect path, never bubble a
+    # provider-specific CredentialError into server.py's generic 500 handler.
+    if isinstance(error, github_copilot_direct.CredentialError):
+        raise LlmAuthError(str(error)) from None
     raise error
 
 

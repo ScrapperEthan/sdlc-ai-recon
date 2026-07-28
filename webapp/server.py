@@ -39,7 +39,9 @@ def _sanitize_probe_failure(error, default_status=400):
     if isinstance(error, llm.LlmForbiddenError):
         return 403, {"error": _LLM_PROBE_ERROR}
     if isinstance(error, llm.LlmRateLimitError):
-        body = {"error": _LLM_PROBE_ERROR}
+        # Keep the message sanitized, but preserve enough *non-secret* structure for the UI to
+        # offer an honest retry action instead of treating Copilot's 429 as a generic failure.
+        body = {"error": _LLM_PROBE_ERROR, "code": "copilot_rate_limit", "retryable": True}
         if error.retry_after is not None:
             body["retry_after"] = error.retry_after
         return 429, body
@@ -61,6 +63,22 @@ def _pick_default_model(listing):
     if default_model and default_model in ids:
         return default_model
     return ids[0] if ids else ""
+
+
+def _pick_token_initial_model(listing):
+    """Initial Token-mode selection: Copilot's ``auto`` if advertised, then a valid provider
+    default, then the first advertised model. ``models()`` is an authenticated discovery call but
+    does not prove an individual completion, so callers return ``model_verified=False`` rather
+    than claiming a chat probe took place."""
+    models = listing.get("models") if isinstance(listing, dict) else []
+    ids = {
+        (entry.get("id") or "").strip()
+        for entry in models or []
+        if isinstance(entry, dict)
+    }
+    if "auto" in ids:
+        return "auto"
+    return _pick_default_model(listing)
 
 
 def _probe_llm(override, tools=None):
@@ -293,10 +311,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/llm/models":
             # Model list for whichever endpoint this browser is currently bound to (tunnel, token,
             # or the shared default) -- always available, not gated by SDLC_LLM_TOKEN_MODE.
+            override = self._resolve_llm_override(self._user_token())
             try:
-                listing = _list_models(self._resolve_llm_override(self._user_token()))
+                listing = _list_models(override)
             except Exception as e:  # noqa: BLE001 -- never relay the raw provider error (may embed a URL)
                 status, body = _sanitize_probe_failure(e, default_status=502)
+                if (override and override.get("mode") == "copilot_token"
+                        and isinstance(e, (llm.LlmAuthError, llm.LlmForbiddenError))):
+                    self._auto_disconnect_on_auth_failure(override)
+                    body["reconnect_required"] = True
                 self._send_json(status, body)
             else:
                 self._send_json(200, listing)
@@ -435,7 +458,8 @@ class Handler(BaseHTTPRequestHandler):
                 base_override = {"mode": "copilot_token", "provider": "github_copilot_direct",
                                   "credential_id": credential_id, "credential_owner_uid": self._uid}
                 try:
-                    model = _pick_default_model(_list_models(base_override))
+                    listing = _list_models(base_override)
+                    model = _pick_token_initial_model(listing)
                     if not model:
                         raise RuntimeError("no available model")
                 except Exception as e:  # noqa: BLE001 -- never relay the raw provider error
@@ -444,7 +468,18 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(status, body)
                     return
                 llm_credentials.set_selected_model(credential_id, model, owner_uid=self._uid)
-                self._send_json(200, {"credential_id": credential_id, "model": model, "connected": True})
+                # Return the listing we just fetched so the browser can fill its selector without
+                # immediately issuing a redundant /api/llm/models request. Listing confirms
+                # credential access, not a successful completion for this exact model.
+                self._send_json(200, {
+                    "credential_id": credential_id,
+                    "connected": True,
+                    "models": listing.get("models") or [],
+                    "default_model": listing.get("default_model") or "",
+                    "model": model,
+                    "selected_model": model,
+                    "model_verified": False,
+                })
                 return
 
             if path == "/api/llm/disconnect-token":
@@ -488,6 +523,10 @@ class Handler(BaseHTTPRequestHandler):
                     listing = _list_models(candidate)
                 except Exception as e:  # noqa: BLE001
                     status, body = _sanitize_probe_failure(e, default_status=502)
+                    if (candidate.get("mode") == "copilot_token"
+                            and isinstance(e, (llm.LlmAuthError, llm.LlmForbiddenError))):
+                        self._auto_disconnect_on_auth_failure(candidate)
+                        body["reconnect_required"] = True
                     self._send_json(status, body)
                     return
                 available_ids = {(m.get("id") or "").strip() for m in listing.get("models") or []}
@@ -508,7 +547,8 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 else:
                     llm_credentials.set_selected_model(user_token, new_model, owner_uid=self._uid)
-                self._send_json(200, {"ok": True, "model": new_model})
+                self._send_json(200, {"ok": True, "model": new_model,
+                                      "selected_model": new_model, "model_verified": False})
                 return
 
             if path == "/api/llm/tunnel-models":

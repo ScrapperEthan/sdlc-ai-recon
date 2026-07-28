@@ -1267,7 +1267,16 @@ async function fetchJson(url, options = {}) {
   const data = raw ? JSON.parse(raw) : {};
 
   if (!response.ok) {
-    throw new Error(data.error || `Request failed (${response.status})`);
+    // Preserve HTTP semantics from the structured LLM endpoints. Callers use these attributes to
+    // refresh stale Token UI after 401/403 and to give a useful wait/retry hint for a 429; the
+    // server's message remains the user-safe, sanitized text.
+    const error = new Error(data.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    error.code = data.code || '';
+    error.retryAfter = data.retry_after;
+    error.retryable = !!data.retryable;
+    error.reconnectRequired = !!data.reconnect_required;
+    throw error;
   }
   return data;
 }
@@ -1897,6 +1906,7 @@ async function ask(text) {
     pending.querySelector('.bubble').classList.remove('loading');
     if (d.error) {
       setBubbleContent(pending.querySelector('.bubble'), 'Error: ' + d.error, false);
+      if (d.reconnect_required || r.status === 401 || r.status === 403) await refreshLlmStatus();
     } else {
       const bubble = pending.querySelector('.bubble');
       setBubbleContent(bubble, d.answer || '(empty)', true);
@@ -2051,6 +2061,7 @@ async function askStream(text) {
         } else if (event.type === 'error') {
           bubble.classList.remove('loading');
           setBubbleContent(bubble, 'Error: ' + event.error, false);
+          if (event.reconnect_required) await refreshLlmStatus();
         }
       }
     }
@@ -2135,10 +2146,17 @@ async function loadTokenModelOptions(selected, revision) {
     // just because it happens to resolve after a newer refreshLlmStatus() already started.
     if (revision !== llmStatusRevision) return;
     populateModelSelect(llmTokenModelSelect, listing.models, selected || listing.default_model);
-  } catch (error) { /* leave whatever options already exist */ }
+  } catch (error) {
+    // /models may be the first request to observe a revoked/expired credential. The server has
+    // already owner-disconnected it; fetch its authoritative state so the pill cannot remain
+    // misleadingly "Connected".
+    if (error.reconnectRequired || error.status === 401 || error.status === 403) {
+      await refreshLlmStatus();
+    }
+  }
 }
 
-async function refreshLlmStatus() {
+async function refreshLlmStatus(tokenListing = null) {
   const myRevision = ++llmStatusRevision;
   try {
     const me = await fetchJson('/api/llm/me');
@@ -2162,7 +2180,14 @@ async function refreshLlmStatus() {
     llmTokenEntry.hidden = tokenConnected;
     llmTokenConnected.hidden = !tokenConnected;
     if (tokenConnected) {
-      await loadTokenModelOptions(lastLlmModel, myRevision);
+      if (tokenListing) {
+        // POST /connect-token already returned this authenticated listing. Reuse it rather than
+        // racing a second request against the just-created credential.
+        populateModelSelect(llmTokenModelSelect, tokenListing.models,
+          lastLlmModel || tokenListing.selected_model || tokenListing.model || tokenListing.default_model);
+      } else {
+        await loadTokenModelOptions(lastLlmModel, myRevision);
+      }
     }
     if (myRevision !== llmStatusRevision) return;  // re-check: the model-list fetch above awaited
 
@@ -2229,19 +2254,40 @@ async function connectLlmToken(statusEl) {
   tokenInput.value = '';  // never leave the pasted token sitting in the DOM
   statusEl.textContent = 'Connected — your chats now use your own Copilot token'
     + (record.model ? ' (' + record.model + ')' : '') + '.';
+  return record;
+}
+
+function describeLlmError(error) {
+  if (error && error.status === 429) {
+    const wait = Number(error.retryAfter);
+    const waitHint = Number.isFinite(wait) && wait > 0 ? ` Try again in ${wait} seconds.` : '';
+    return 'Copilot is rate limited.' + waitHint
+      + (error.retryable ? ' You can retry later or choose another model.' : '');
+  }
+  return (error && error.message) || 'Request failed.';
+}
+
+async function refreshLlmStatusAfterAuthFailure(error) {
+  if (error && (error.reconnectRequired || error.status === 401 || error.status === 403)) {
+    await refreshLlmStatus();
+    return true;
+  }
+  return false;
 }
 
 async function connectLlm() {
   const statusEl = document.getElementById('llm-status');
   try {
+    let tokenListing = null;
     if (tokenModeAvailable && llmModeTokenRadio.checked) {
-      await connectLlmToken(statusEl);
+      tokenListing = await connectLlmToken(statusEl);
     } else {
       await connectLlmTunnel(statusEl);
     }
-    await refreshLlmStatus();
+    await refreshLlmStatus(tokenListing);
   } catch (error) {
-    statusEl.textContent = 'Failed: ' + error.message;
+    statusEl.textContent = 'Failed: ' + describeLlmError(error);
+    await refreshLlmStatusAfterAuthFailure(error);
   }
 }
 
@@ -2277,7 +2323,9 @@ async function switchModel(selectEl, statusEl) {
     await refreshLlmStatus();
   } catch (error) {
     selectEl.value = previous;  // failed switch keeps the previously-confirmed model active
-    statusEl.textContent = 'Failed: ' + error.message + ' — kept using ' + (previous || 'the previous model') + '.';
+    statusEl.textContent = 'Failed: ' + describeLlmError(error)
+      + ' — kept using ' + (previous || 'the previous model') + '.';
+    await refreshLlmStatusAfterAuthFailure(error);
   }
 }
 

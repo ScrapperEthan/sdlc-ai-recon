@@ -408,6 +408,7 @@ class LlmErrorNormalizationTests(unittest.TestCase):
         for provider_error, neutral_error in (
             (github_copilot_direct.CopilotAuthError("nope"), llm.LlmAuthError),
             (github_copilot_direct.CopilotForbiddenError("nope"), llm.LlmForbiddenError),
+            (github_copilot_direct.CredentialError("credential is gone"), llm.LlmAuthError),
         ):
             def raising_chat(messages, tools=None, temperature=0, _error=provider_error):
                 raise _error
@@ -796,15 +797,15 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
             config.reset_llm_override(otoken)
         self.assertNotIn("do-not-leak-this-token", str(caught.exception))
 
-    def test_no_credential_id_in_context_raises_credential_error(self):
+    def test_no_credential_id_in_context_maps_to_neutral_auth_error(self):
         otoken = config.set_llm_override({"provider": "github_copilot_direct"})  # no credential_id
         try:
-            with self.assertRaises(github_copilot_direct.CredentialError):
+            with self.assertRaises(llm.LlmAuthError):
                 llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
 
-    def test_stale_credential_id_fails_closed(self):
+    def test_stale_credential_id_fails_closed_as_neutral_auth_error(self):
         """Acceptance criterion #5, provider layer: a disconnected credential_id must not silently
         proceed (e.g. by falling through to some other endpoint) -- it must raise."""
         cred_id = self._connect()
@@ -812,7 +813,7 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
         self._ids.remove(cred_id)
         otoken = self._bind(cred_id)
         try:
-            with self.assertRaises(github_copilot_direct.CredentialError):
+            with self.assertRaises(llm.LlmAuthError):
                 llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
@@ -909,6 +910,24 @@ class FrontendModelSelectorSourceTests(unittest.TestCase):
         dom_write_position = body.index("populateModelSelect")
         self.assertLess(guard_position, dom_write_position)
 
+    def test_frontend_preserves_structured_llm_errors_and_refreshes_on_auth_failure(self):
+        source = self._index_html_source()
+        fetch_start = source.index("async function fetchJson(")
+        fetch_end = source.index("async function refreshSessions", fetch_start)
+        fetch_body = source[fetch_start:fetch_end]
+        for field in ("error.status", "error.code", "error.retryAfter", "error.retryable",
+                      "error.reconnectRequired"):
+            self.assertIn(field, fetch_body)
+        self.assertIn("refreshLlmStatusAfterAuthFailure(error)", source)
+        self.assertIn("d.reconnect_required", source)
+
+    def test_connect_reuses_its_returned_models_listing(self):
+        body = self._function_body(self._index_html_source(), "connectLlm")
+        self.assertIn("refreshLlmStatus(tokenListing)", body)
+        refresh_body = self._function_body(self._index_html_source(), "refreshLlmStatus")
+        self.assertLess(refresh_body.index("if (tokenListing)"),
+                        refresh_body.index("await loadTokenModelOptions"))
+
 
 class PickDefaultModelTests(unittest.TestCase):
     """server._pick_default_model -- the model to try first out of an llm.models() listing."""
@@ -935,6 +954,10 @@ class PickDefaultModelTests(unittest.TestCase):
     def test_ignores_malformed_entries(self):
         listing = {"models": ["not-a-dict", {"id": ""}, {"id": "m1"}], "default_model": ""}
         self.assertEqual(webserver._pick_default_model(listing), "m1")
+
+    def test_token_initial_model_prefers_auto_before_provider_default(self):
+        listing = {"models": [{"id": "m1"}, {"id": "auto"}], "default_model": "m1"}
+        self.assertEqual(webserver._pick_token_initial_model(listing), "auto")
 
 
 class ProbeLlmTests(unittest.TestCase):
@@ -1300,15 +1323,21 @@ class DynamicModelSelectorTests(unittest.TestCase):
 
     # ---- connect-token: probe success/failure lifecycle -----------------------------------------
 
-    def test_connect_token_probes_and_selects_default_model(self):
+    def test_connect_token_returns_listing_and_selects_initial_model_without_a_chat_probe(self):
         listing = {"models": [{"id": "m1", "label": "Model One"}, {"id": "m2", "label": "Model Two"}],
                    "default_model": "m2"}
-        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+        with mock.patch.object(llm, "models", return_value=listing), \
+             mock.patch.object(llm, "chat") as chat_spy:
             status, body = self.browser.post("/api/llm/connect-token", {"token": "tok-a"})
         self.assertEqual(status, 200)
         self.assertTrue(body["connected"])
         self.assertEqual(body["model"], "m2")
+        self.assertEqual(body["selected_model"], "m2")
+        self.assertFalse(body["model_verified"])
+        self.assertEqual(body["models"], listing["models"])
+        self.assertEqual(body["default_model"], "m2")
         self.assertEqual(llm_credentials.resolve(body["credential_id"])["selected_model"], "m2")
+        chat_spy.assert_not_called()
 
     def test_connect_token_probe_failure_cleans_up_credential(self):
         before = llm_credentials.count()
@@ -1358,6 +1387,17 @@ class DynamicModelSelectorTests(unittest.TestCase):
         override = handler._resolve_llm_override(cred_id)
         self.assertEqual(override["provider"], "github_copilot_direct")  # still fail-closed, not None
 
+        # Run a chat through the real facade/provider seam, not a pre-raised facade mock: the
+        # provider sees the dead credential and raises CredentialError, llm.py normalizes it, and
+        # server.py returns 401/reconnect instead of its generic 500 path.
+        self.browser.user_token = cred_id
+        with mock.patch.object(agent, "answer",
+                               side_effect=lambda *_args, **_kwargs: llm.chat(
+                                   [{"role": "user", "content": "hello"}])):
+            status, chat_body = self.browser.post("/api/chat", {"question": "hello"})
+        self.assertEqual(status, 401)
+        self.assertTrue(chat_body["reconnect_required"])
+
     def test_auth_disconnect_status_requires_reconnect(self):
         """A live chat call that gets rejected (401) mid-session must disconnect the credential --
         so the NEXT /api/llm/me check reports reconnect_required, not a stale "Connected"."""
@@ -1389,6 +1429,8 @@ class DynamicModelSelectorTests(unittest.TestCase):
             status, chat_body = self.browser.post("/api/chat", {"question": "hello"})
         self.assertEqual(status, 429)
         self.assertEqual(chat_body.get("retry_after"), 15)
+        self.assertEqual(chat_body.get("code"), "copilot_rate_limit")
+        self.assertTrue(chat_body.get("retryable"))
         # a rate limit is not an auth failure -- the credential must stay connected
         self.assertIsNotNone(llm_credentials.resolve(cred_id, owner_uid=self.browser.uid))
 
@@ -1464,6 +1506,8 @@ class DynamicModelSelectorTests(unittest.TestCase):
             status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
         self.assertEqual(status, 200)
         self.assertEqual(body["model"], "m2")
+        self.assertEqual(body["selected_model"], "m2")
+        self.assertFalse(body["model_verified"])
         self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m2")
         # Token mode: the models() listing IS the real authenticated check -- no separate chat()
         # probe, so switching models never spends a Copilot completion.
@@ -1629,6 +1673,25 @@ class DynamicModelSelectorTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, listing)
 
+    def test_models_auth_failure_disconnects_token_credential(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        with mock.patch.object(llm, "models", side_effect=llm.LlmAuthError("expired")):
+            status, body = self.browser.get("/api/llm/models")
+        self.assertEqual(status, 401)
+        self.assertTrue(body["reconnect_required"])
+        self.assertIsNone(llm_credentials.resolve(cred_id, owner_uid=self.browser.uid))
+        status, me = self.browser.get("/api/llm/me")
+        self.assertEqual(status, 200)
+        self.assertTrue(me["reconnect_required"])
+
+    def test_select_auth_failure_disconnects_token_credential(self):
+        cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        with mock.patch.object(llm, "models", side_effect=llm.LlmForbiddenError("forbidden")):
+            status, body = self.browser.post("/api/llm/select-model", {"model": "m1"})
+        self.assertEqual(status, 403)
+        self.assertTrue(body["reconnect_required"])
+        self.assertIsNone(llm_credentials.resolve(cred_id, owner_uid=self.browser.uid))
+
     # ---- sanitized errors: never leak secrets/URLs/upstream bodies -------------------------------
 
     def test_connect_token_error_never_leaks_upstream_detail(self):
@@ -1714,11 +1777,11 @@ class DynamicModelSelectorTests(unittest.TestCase):
         self.assertEqual(override["credential_owner_uid"], "bob-uid")
         self.assertNotIn("model", override)
 
-    def test_disconnect_then_stale_credential_fails_closed_not_shared(self):
+    def test_disconnect_then_stale_credential_fails_closed_as_neutral_auth_not_shared(self):
         """Acceptance: after disconnect, a request that still carries the old credential_id must
-        FAIL -- through the real, unmodified github_copilot_direct provider's own CredentialError --
-        never silently fall back to the shared/default LLM just because the credential lookup came
-        back empty."""
+        FAIL -- through the real facade's neutral LlmAuthError (from the provider's CredentialError)
+        -- never silently fall back to the shared/default LLM just because the credential lookup
+        came back empty."""
         with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
              self._ok_chat():
             _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
@@ -1737,7 +1800,7 @@ class DynamicModelSelectorTests(unittest.TestCase):
 
         otoken = config.set_llm_override(override)
         try:
-            with self.assertRaises(github_copilot_direct.CredentialError):
+            with self.assertRaises(llm.LlmAuthError):
                 llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)

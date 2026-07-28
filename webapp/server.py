@@ -27,6 +27,25 @@ INDEX = os.path.join(HERE, "static", "index.html")
 _LLM_PROBE_ERROR = "could not verify that endpoint/model -- check the connection and try again"
 
 
+def _sanitize_probe_failure(error, default_status=400):
+    """(status, body) for a failed connect/select/register probe or models() listing -- maps the
+    provider-NEUTRAL `llm.Llm*Error` taxonomy (never a `llm_providers/*` exception type -- this file
+    must not import one, see docs/specs/copilot-dynamic-model-selector-external-diff-zh.md §6.4) to
+    real HTTP semantics: 401/403/429 (with `retry_after` when the provider supplied one). Anything
+    else collapses to a flat, sanitized `default_status` -- the message is always the same generic
+    string, never the raw exception (which can embed a URL or upstream body)."""
+    if isinstance(error, llm.LlmAuthError):
+        return 401, {"error": _LLM_PROBE_ERROR}
+    if isinstance(error, llm.LlmForbiddenError):
+        return 403, {"error": _LLM_PROBE_ERROR}
+    if isinstance(error, llm.LlmRateLimitError):
+        body = {"error": _LLM_PROBE_ERROR}
+        if error.retry_after is not None:
+            body["retry_after"] = error.retry_after
+        return 429, body
+    return default_status, {"error": _LLM_PROBE_ERROR}
+
+
 def _pick_default_model(listing):
     """From an `llm.models()` result, the model to try first: the provider's own default -- but only
     if it's actually one of the listed ids (a provider's `default_model` and its `models` list can
@@ -149,6 +168,15 @@ class Handler(BaseHTTPRequestHandler):
         if credential.get("connected"):
             return {"registered": True, "mode": "copilot_token", "label": "Copilot (token mode)",
                     "token_mode_available": True, "model": credential.get("selected_model") or ""}
+        if llm_credentials.is_credential_id(user_token):
+            # This browser's token LOOKS like one of our credentials but doesn't resolve (RAM
+            # cleared by a restart, disconnected elsewhere, or a 401/403 auto-disconnect -- these
+            # all look identical on purpose, no oracle for which one it was). Reporting "shared"
+            # here would be misleading: chat requests for this token are still pinned to the direct
+            # provider and fail closed (see _resolve_llm_override), NOT silently using the shared
+            # default -- the UI needs to say "reconnect", not imply nothing is wrong.
+            return {"registered": False, "mode": "copilot_token", "label": "Copilot token",
+                    "token_mode_available": True, "model": "", "reconnect_required": True}
         return {"registered": False, "mode": "shared", "token_mode_available": True,
                 "model": config.llm_default_model()}
 
@@ -186,6 +214,17 @@ class Handler(BaseHTTPRequestHandler):
                 override["selected_model"] = model
             return override
         return None
+
+    def _auto_disconnect_on_auth_failure(self, override):
+        """A previously-connected Token-mode credential that starts getting rejected (401/403) by
+        the real Copilot endpoint mid-session -- e.g. revoked after connecting, or the RAM store
+        restarted and something raced a stale id back in -- must not keep reporting "Connected"
+        while every real chat silently fails. Disconnect it (owner-bound) so the next
+        `/api/llm/me` check reports `reconnect_required` instead of a stale/misleading state."""
+        if override and override.get("mode") == "copilot_token":
+            credential_id = override.get("credential_id")
+            if credential_id:
+                llm_credentials.disconnect(credential_id, owner_uid=self._uid)
 
     def _resolve_uid(self):
         """Who owns this browser's sessions/feedback — separate from `_user_token` (which LLM to
@@ -256,8 +295,9 @@ class Handler(BaseHTTPRequestHandler):
             # or the shared default) -- always available, not gated by SDLC_LLM_TOKEN_MODE.
             try:
                 listing = _list_models(self._resolve_llm_override(self._user_token()))
-            except Exception:  # noqa: BLE001 -- never relay the raw provider error (may embed a URL)
-                self._send_json(502, {"error": _LLM_PROBE_ERROR})
+            except Exception as e:  # noqa: BLE001 -- never relay the raw provider error (may embed a URL)
+                status, body = _sanitize_probe_failure(e, default_status=502)
+                self._send_json(status, body)
             else:
                 self._send_json(200, listing)
         elif path.startswith("/api/sessions/"):
@@ -321,6 +361,20 @@ class Handler(BaseHTTPRequestHandler):
                 model = (req.get("model") or "").strip()
                 api_key = req.get("api_key") or ""
                 provider = (req.get("provider") or "").strip()
+
+                route_token = (req.get("token") or "").strip()
+                previous_credential_id = (req.get("previous_credential_id") or "").strip()
+                # Defense in depth: a credential-shaped token must NEVER become a tunnel route
+                # token's identity -- llm_routes.register()'s token namespace and
+                # llm_credentials.connect()'s ct_-prefixed namespace must stay disjoint. Whether it
+                # arrived as `previous_credential_id` (the current frontend, switching Token ->
+                # Tunnel) or -- an older frontend, or a manual API caller -- still riding in `token`,
+                # treat it the same way: "the token-mode credential to retire", never "reuse this id
+                # for the new route".
+                if llm_credentials.is_credential_id(route_token):
+                    previous_credential_id = route_token
+                    route_token = ""
+
                 candidate = {"base_url": base_url}
                 if model:
                     candidate["model"] = model
@@ -337,18 +391,25 @@ class Handler(BaseHTTPRequestHandler):
                         candidate["model"] = model
                 try:
                     _probe_llm(candidate, tools=agent.tools.TOOLS)
-                except Exception:  # noqa: BLE001 -- never relay the raw provider error
-                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
+                except Exception as e:  # noqa: BLE001 -- never relay the raw provider error
+                    status, body = _sanitize_probe_failure(e)
+                    self._send_json(status, body)
                     return
                 try:
                     record = llm_routes.register(
                         base_url, model, api_key,
-                        req.get("label") or "", provider, req.get("token") or None,
+                        req.get("label") or "", provider, route_token or None,
                     )
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
-                else:
-                    self._send_json(200, record)
+                    return
+                # Only once the new tunnel route is actually persisted: retire the old Token-mode
+                # credential it's replacing (owner-bound -- never someone else's). If probe/register
+                # above had failed, the old credential is untouched, so the user isn't locked out of
+                # both.
+                if llm_credentials.is_credential_id(previous_credential_id):
+                    llm_credentials.disconnect(previous_credential_id, owner_uid=self._uid)
+                self._send_json(200, record)
                 return
 
             if path == "/api/llm/connect-token":
@@ -358,10 +419,14 @@ class Handler(BaseHTTPRequestHandler):
                 # back as its X-SDLC-User-Token, same header/pairing-token mechanism tunnel mode
                 # already uses (see _resolve_llm_override).
                 #
-                # Only report "Connected" once a REAL llm.chat() probe against a real model has
-                # succeeded -- a token that merely looks non-blank (e.g. copy-pasted wrong, revoked,
-                # no Copilot entitlement) must never be reported as connected. On any failure the
-                # freshly-created credential is deleted, not left dangling in RAM.
+                # Only report "Connected" once a REAL llm.models() call against this credential has
+                # succeeded (an authenticated call in its own right -- a bad/revoked token fails it
+                # exactly as it would a chat call) -- a token that merely looks non-blank (e.g.
+                # copy-pasted wrong, revoked, no Copilot entitlement) must never be reported as
+                # connected. Deliberately does NOT also spend a real llm.chat() completion here --
+                # that would burn the user's Copilot quota on every connect for no additional
+                # verification. On any failure the freshly-created credential is deleted, not left
+                # dangling in RAM.
                 try:
                     credential_id = llm_credentials.connect(req.get("token"), owner_uid=self._uid)
                 except ValueError as e:
@@ -373,11 +438,10 @@ class Handler(BaseHTTPRequestHandler):
                     model = _pick_default_model(_list_models(base_override))
                     if not model:
                         raise RuntimeError("no available model")
-                    probe_override = dict(base_override, model=model, selected_model=model)
-                    _probe_llm(probe_override, tools=agent.tools.TOOLS)
-                except Exception:  # noqa: BLE001 -- never relay the raw provider error
+                except Exception as e:  # noqa: BLE001 -- never relay the raw provider error
                     llm_credentials.disconnect(credential_id, owner_uid=self._uid)
-                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
+                    status, body = _sanitize_probe_failure(e)
+                    self._send_json(status, body)
                     return
                 llm_credentials.set_selected_model(credential_id, model, owner_uid=self._uid)
                 self._send_json(200, {"credential_id": credential_id, "model": model, "connected": True})
@@ -392,8 +456,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/llm/select-model":
                 # Switch the model for whichever endpoint this browser is currently bound to (tunnel
                 # route or, in token mode, its credential). Re-confirms the model is still in the
-                # provider's own list, then re-probes with a real llm.chat() call BEFORE persisting
-                # anything -- a failed switch leaves the previously-confirmed model untouched.
+                # provider's own list BEFORE persisting anything -- a failed switch leaves the
+                # previously-confirmed model untouched. Tunnel switches also re-probe with a real
+                # llm.chat() call (an arbitrary user-supplied endpoint, same as register()); Token
+                # mode does not -- the models() listing check above is already a real authenticated
+                # call, so switching models never spends a Copilot completion.
                 user_token = self._user_token()
                 new_model = (req.get("model") or "").strip()
                 if not new_model:
@@ -419,21 +486,22 @@ class Handler(BaseHTTPRequestHandler):
 
                 try:
                     listing = _list_models(candidate)
-                except Exception:  # noqa: BLE001
-                    self._send_json(502, {"error": _LLM_PROBE_ERROR})
+                except Exception as e:  # noqa: BLE001
+                    status, body = _sanitize_probe_failure(e, default_status=502)
+                    self._send_json(status, body)
                     return
                 available_ids = {(m.get("id") or "").strip() for m in listing.get("models") or []}
                 if new_model not in available_ids:
                     self._send_json(400, {"error": "model is no longer available; refresh the model list"})
                     return
 
-                try:
-                    _probe_llm(candidate, tools=agent.tools.TOOLS)
-                except Exception:  # noqa: BLE001 -- never relay the raw provider error; old model stays active
-                    self._send_json(400, {"error": _LLM_PROBE_ERROR})
-                    return
-
                 if tunnel_override is not None:
+                    try:
+                        _probe_llm(candidate, tools=agent.tools.TOOLS)
+                    except Exception as e:  # noqa: BLE001 -- never relay the raw provider error; old model stays active
+                        status, body = _sanitize_probe_failure(e)
+                        self._send_json(status, body)
+                        return
                     llm_routes.register(
                         tunnel_override["base_url"], new_model, tunnel_override.get("api_key") or "",
                         "", tunnel_override.get("provider") or "", user_token,
@@ -498,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/chat/stream":
                 otoken = config.set_llm_override(override)
                 try:
-                    self._send_chat_stream(session_id, question, history, self._uid)
+                    self._send_chat_stream(session_id, question, history, self._uid, override)
                 finally:
                     config.reset_llm_override(otoken)
                 return
@@ -506,6 +574,17 @@ class Handler(BaseHTTPRequestHandler):
             otoken = config.set_llm_override(override)
             try:
                 result = agent.answer(question, history)
+            except (llm.LlmAuthError, llm.LlmForbiddenError) as e:
+                # Revoked/expired mid-session (or forbidden) -- disconnect so the credential stops
+                # claiming "Connected" while every real chat would keep silently failing.
+                self._auto_disconnect_on_auth_failure(override)
+                status, body = _sanitize_probe_failure(e)
+                self._send_json(status, {**body, "reconnect_required": True})
+                return
+            except llm.LlmRateLimitError as e:
+                status, body = _sanitize_probe_failure(e)
+                self._send_json(status, body)
+                return
             finally:
                 config.reset_llm_override(otoken)
             session = session_store.append_exchange(
@@ -532,7 +611,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send_json(500, {"error": str(e)})
 
-    def _send_chat_stream(self, session_id, question, history, uid):
+    def _send_chat_stream(self, session_id, question, history, uid, override=None):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -570,6 +649,19 @@ class Handler(BaseHTTPRequestHandler):
                         "href": f"/api/sessions/{quote(session['id'])}",
                     }
                 emit(event)
+        except (llm.LlmAuthError, llm.LlmForbiddenError) as e:
+            self._auto_disconnect_on_auth_failure(override)
+            _status, body = _sanitize_probe_failure(e)
+            try:
+                emit({"type": "error", **body, "reconnect_required": True})
+            except Exception:
+                pass
+        except llm.LlmRateLimitError as e:
+            _status, body = _sanitize_probe_failure(e)
+            try:
+                emit({"type": "error", **body})
+            except Exception:
+                pass
         except Exception as e:  # noqa: BLE001
             try:
                 emit({"type": "error", "error": str(e)})

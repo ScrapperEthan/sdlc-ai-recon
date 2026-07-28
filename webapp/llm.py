@@ -12,6 +12,55 @@ from . import config
 from .llm_providers import copilot_responses, openai_chat, github_copilot_direct
 
 
+class LlmAuthError(RuntimeError):
+    """Provider-neutral 401: the credential/token was rejected. Callers (server.py) catch THIS, not
+    any `llm_providers/*` exception type -- see `_raise_normalized_provider_error` below, the one
+    place provider-specific errors are translated so nothing downstream needs to import a provider
+    module just to handle its errors."""
+
+
+class LlmForbiddenError(RuntimeError):
+    """Provider-neutral 403: the credential is valid but lacks access/entitlement."""
+
+
+class LlmRateLimitError(RuntimeError):
+    """Provider-neutral 429. `retry_after` (seconds, optional) is carried through when the
+    provider supplied one -- `getattr(error, "retry_after", None)` so this works whether or not the
+    underlying provider exception has grown that attribute yet."""
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _raise_normalized_provider_error(error):
+    """Translate a `github_copilot_direct` (or any future provider's) auth/forbidden/rate-limit
+    exception into the provider-neutral types above; anything else is re-raised unchanged.
+
+    This is the ONLY place in the external-owned codebase that imports a provider exception type --
+    `server.py` must never do so (see docs/specs/copilot-dynamic-model-selector-external-diff-zh.md
+    §6.4): a provider being refactored, split, or lazily imported should never be able to break
+    webapp startup, and every provider's errors reach callers through the SAME small vocabulary."""
+    if isinstance(error, github_copilot_direct.CopilotRateLimitError):
+        raise LlmRateLimitError(str(error), retry_after=getattr(error, "retry_after", None)) from None
+    if isinstance(error, github_copilot_direct.CopilotAuthError):
+        raise LlmAuthError(str(error)) from None
+    if isinstance(error, github_copilot_direct.CopilotForbiddenError):
+        raise LlmForbiddenError(str(error)) from None
+    raise error
+
+
+def _call_provider_chat(messages, tools, temperature):
+    """provider.chat() with normalized errors -- the ONE place both `chat()` and `chat_stream()`'s
+    blocking fallback path go through, so a raw provider exception never reaches a caller via either
+    route (chat_stream's own internal fallback used to call `provider.chat` directly, bypassing
+    whatever normalization `chat()` did)."""
+    try:
+        return _provider_module().chat(messages, tools, temperature)
+    except Exception as error:  # noqa: BLE001 -- classify or re-raise, never swallow
+        _raise_normalized_provider_error(error)
+
+
 def _provider_module():
     """Override-aware: `config.LLM_PROVIDER` resolves per-request (see config.py), so a token-mode
     caller can get `github_copilot_direct` in the same process where everyone else gets the env
@@ -42,7 +91,10 @@ def models():
     provider = _provider_module()
     lister = getattr(provider, "models", None)
     if lister:
-        return lister()
+        try:
+            return lister()
+        except Exception as error:  # noqa: BLE001 -- classify or re-raise, never swallow
+            _raise_normalized_provider_error(error)
     model = config.LLM_MODEL
     return {"models": [{"id": model, "label": model}] if model else [], "default_model": model}
 
@@ -52,7 +104,7 @@ def chat(messages, tools=None, temperature=0):
     if config.LLM_MOCK:
         return _mock(messages, tools)
 
-    return _provider_module().chat(messages, tools, temperature)
+    return _call_provider_chat(messages, tools, temperature)
 
 
 def chat_stream(messages, tools=None, temperature=0):
@@ -75,15 +127,17 @@ def chat_stream(messages, tools=None, temperature=0):
                     emitted = True
                 yield item
             return
-        except Exception:  # noqa: BLE001 — endpoint can't stream / mid-stream drop
+        except Exception:  # noqa: BLE001 — endpoint can't stream / mid-stream drop (broad on
+                           # purpose: ANY streaming failure falls back to the blocking call, which
+                           # is itself normalized via _call_provider_chat below)
             if emitted:
                 # Already showed partial text; finish with a clean blocking result so the answer
                 # is complete (rare: a mid-stream connection drop).
-                yield ("final", provider.chat(messages, tools, temperature))
+                yield ("final", _call_provider_chat(messages, tools, temperature))
                 return
             # nothing shown yet -> clean fall-through to the blocking call below
 
-    yield ("final", provider.chat(messages, tools, temperature))
+    yield ("final", _call_provider_chat(messages, tools, temperature))
 
 
 def stream_text(message):

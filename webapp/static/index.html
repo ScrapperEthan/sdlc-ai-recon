@@ -2095,6 +2095,7 @@ const llmButton = document.getElementById('llm-button'),
 let tokenModeAvailable = false;
 let lastLlmMode = 'shared';
 let lastLlmModel = '';
+let lastLlmReconnectRequired = false;
 
 // Dynamic model selector: refreshLlmStatus can be in flight more than once (panel reopen, a
 // connect/select-model call awaiting its own follow-up refresh, a slow network) -- only the LATEST
@@ -2127,9 +2128,12 @@ function populateModelSelect(select, models, selected) {
   if (selected) select.value = selected;
 }
 
-async function loadTokenModelOptions(selected) {
+async function loadTokenModelOptions(selected, revision) {
   try {
     const listing = await fetchJson('/api/llm/models');
+    // Check BEFORE touching the DOM: a slower, now-superseded call must never mutate the dropdown
+    // just because it happens to resolve after a newer refreshLlmStatus() already started.
+    if (revision !== llmStatusRevision) return;
     populateModelSelect(llmTokenModelSelect, listing.models, selected || listing.default_model);
   } catch (error) { /* leave whatever options already exist */ }
 }
@@ -2142,6 +2146,7 @@ async function refreshLlmStatus() {
     tokenModeAvailable = !!(me && me.token_mode_available);
     lastLlmMode = (me && me.mode) || (me && me.registered ? 'tunnel' : 'shared');
     lastLlmModel = (me && me.model) || '';
+    lastLlmReconnectRequired = !!(me && me.reconnect_required);
     // Sync the radio choice to what the server actually reports -- otherwise a page reload after
     // connecting in Token mode shows the confirmed state in the pill/panel fields while the radio
     // (and therefore which fields are visible) silently defaults back to Tunnel.
@@ -2150,9 +2155,15 @@ async function refreshLlmStatus() {
     applyLlmModeVisibility();
 
     const isTokenMode = lastLlmMode === 'copilot_token';
-    llmTokenEntry.hidden = isTokenMode;
-    llmTokenConnected.hidden = !isTokenMode;
-    if (isTokenMode) await loadTokenModelOptions(lastLlmModel);
+    // A credential-shaped token that no longer resolves reports mode=copilot_token WITHOUT
+    // registered=true (reconnect_required instead) -- that must show the paste-token entry again,
+    // not the "connected" summary view.
+    const tokenConnected = isTokenMode && !!(me && me.registered);
+    llmTokenEntry.hidden = tokenConnected;
+    llmTokenConnected.hidden = !tokenConnected;
+    if (tokenConnected) {
+      await loadTokenModelOptions(lastLlmModel, myRevision);
+    }
     if (myRevision !== llmStatusRevision) return;  // re-check: the model-list fetch above awaited
 
     if (me && me.registered) {
@@ -2162,6 +2173,12 @@ async function refreshLlmStatus() {
         ? 'Your requests use your own Copilot token (no tunnel)'
         : 'Your requests route to ' + (me.base_url || 'your endpoint'))
         + (lastLlmModel ? ' — model: ' + lastLlmModel : '');
+    } else if (lastLlmReconnectRequired) {
+      llmButton.textContent = 'LLM: token reconnect required';
+      llmButton.title = 'The in-memory Copilot credential is gone. Reconnect or click Disconnect.';
+      document.getElementById('llm-status').textContent =
+        'Token connection expired or the server restarted. Paste the token again, ' +
+        'or click Disconnect to use the shared LLM.';
     } else {
       llmButton.textContent = 'LLM: shared' + (lastLlmModel ? ' · ' + lastLlmModel : '');
       llmButton.title = 'Using the server default'
@@ -2177,9 +2194,19 @@ async function connectLlmTunnel(statusEl) {
   const model = document.getElementById('llm-model').value.trim();
   if (!base_url) { statusEl.textContent = 'Enter your endpoint first.'; return; }
   statusEl.textContent = 'Connecting (checking the endpoint + model)...';
+  // Reuse the existing route token only when ALREADY in tunnel mode (updating our own
+  // registration); when switching FROM Token mode, `userToken` holds a credential_id, which must
+  // never become a route token -- send it as previous_credential_id instead, so the server retires
+  // it (only after the new tunnel registration actually succeeds).
+  const tunnelToken = lastLlmMode === 'tunnel' ? (userToken || undefined) : undefined;
+  const previousCredentialId = lastLlmMode === 'copilot_token' ? (userToken || undefined) : undefined;
   const record = await fetchJson('/api/llm/register', {
     method: 'POST',
-    body: JSON.stringify({base_url, label, model, token: userToken || undefined})
+    body: JSON.stringify({
+      base_url, label, model,
+      token: tunnelToken,
+      previous_credential_id: previousCredentialId,
+    })
   });
   userToken = record.token;
   localStorage.setItem('sdlc_user_token', userToken);

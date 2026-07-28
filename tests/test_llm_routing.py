@@ -386,6 +386,86 @@ class LlmModelsFacadeTests(unittest.TestCase):
         self.assertEqual(listing["default_model"], "overridden-model")
 
 
+class LlmErrorNormalizationTests(unittest.TestCase):
+    """llm.py must be the ONLY place a `llm_providers/*` exception type is imported/caught --
+    everything downstream (server.py) depends on the small llm.Llm*Error vocabulary instead, so a
+    provider being refactored, split, or lazily imported can never break webapp startup or force
+    server.py to couple to provider internals (see the "错误归一化" section of the internal review)."""
+
+    def test_facade_maps_provider_rate_limit_and_retry_after(self):
+        fake_error = github_copilot_direct.CopilotRateLimitError("slow down")
+        fake_error.retry_after = 30
+
+        def raising_chat(messages, tools=None, temperature=0):
+            raise fake_error
+
+        with mock.patch.object(copilot_responses, "chat", side_effect=raising_chat):
+            with self.assertRaises(llm.LlmRateLimitError) as caught:
+                llm.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(caught.exception.retry_after, 30)
+
+    def test_facade_maps_auth_and_forbidden_errors(self):
+        for provider_error, neutral_error in (
+            (github_copilot_direct.CopilotAuthError("nope"), llm.LlmAuthError),
+            (github_copilot_direct.CopilotForbiddenError("nope"), llm.LlmForbiddenError),
+        ):
+            def raising_chat(messages, tools=None, temperature=0, _error=provider_error):
+                raise _error
+
+            with mock.patch.object(copilot_responses, "chat", side_effect=raising_chat):
+                with self.assertRaises(neutral_error):
+                    llm.chat([{"role": "user", "content": "hi"}])
+
+    def test_facade_maps_models_listing_errors_too(self):
+        def raising_models():
+            raise github_copilot_direct.CopilotAuthError("nope")
+
+        with mock.patch.object(copilot_responses, "models", create=True, side_effect=raising_models):
+            with self.assertRaises(llm.LlmAuthError):
+                llm.models()
+
+    def test_unrecognized_provider_errors_pass_through_unchanged(self):
+        """Not every provider failure is auth/forbidden/rate-limit -- e.g. a plain network error --
+        those must reach the caller as-is, not get coerced into one of the three neutral types."""
+        with mock.patch.object(copilot_responses, "chat", side_effect=RuntimeError("network blip")):
+            with self.assertRaises(RuntimeError) as caught:
+                llm.chat([{"role": "user", "content": "hi"}])
+        self.assertNotIsInstance(caught.exception, (llm.LlmAuthError, llm.LlmForbiddenError,
+                                                       llm.LlmRateLimitError))
+
+    def test_chat_stream_blocking_fallback_is_also_normalized(self):
+        """chat_stream()'s own blocking fallback used to call provider.chat() directly, bypassing
+        whatever normalization chat() did -- must go through the same normalized path."""
+        with mock.patch.object(config, "LLM_STREAM", False), \
+             mock.patch.object(copilot_responses, "chat",
+                                side_effect=github_copilot_direct.CopilotAuthError("nope")):
+            with self.assertRaises(llm.LlmAuthError):
+                list(llm.chat_stream([{"role": "user", "content": "hi"}]))
+
+    def test_server_does_not_import_or_reference_provider_exception_types(self):
+        """Acceptance: server.py depends only on llm.Llm*Error, never a llm_providers/* exception
+        class. `"github_copilot_direct"` legitimately appears as a plain STRING VALUE (the provider
+        selector, e.g. `"provider": "github_copilot_direct"`) -- that's just naming which provider to
+        route to, the same string a tunnel's `provider` field can already hold, not a code coupling
+        -- and mentioning a provider module by name in a comment is fine too. What must never exist
+        is an actual `import` of a `llm_providers.*` module -- parsed via `ast` (not a text grep, so
+        comments/docstrings/string literals can't produce a false positive)."""
+        import ast
+        server_path = os.path.join(os.path.dirname(webserver.__file__), "server.py")
+        with open(server_path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=server_path)
+        imported_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported_names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                imported_names.update(alias.name.split(".")[0] for alias in node.names)
+        self.assertNotIn("github_copilot_direct", imported_names)
+        self.assertNotIn("copilot_responses", imported_names)
+        self.assertFalse(hasattr(webserver, "github_copilot_direct"))
+        self.assertFalse(hasattr(webserver, "copilot_responses"))
+
+
 class LlmCredentialsStoreTests(unittest.TestCase):
     """4c: webapp/llm_credentials.py -- RAM-only, connect/resolve/disconnect lifecycle, fails closed
     on a stale id, and genuinely never touches disk."""
@@ -667,12 +747,14 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
         self.assertEqual(len(exchange_calls), 1)
 
     def test_401_maps_to_auth_error(self):
+        """llm.chat() normalizes the raw provider exception to the provider-neutral llm.LlmAuthError
+        -- callers (server.py) must never need to import github_copilot_direct to catch this."""
         cred_id = self._connect()
         fake_open = self._fake_open(token_body={"error": "bad creds"}, token_status=401)
         otoken = self._bind(cred_id)
         try:
             with mock.patch.object(github_copilot_direct, "_open", fake_open):
-                with self.assertRaises(github_copilot_direct.CopilotAuthError):
+                with self.assertRaises(llm.LlmAuthError):
                     llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
@@ -683,7 +765,7 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
         otoken = self._bind(cred_id)
         try:
             with mock.patch.object(github_copilot_direct, "_open", fake_open):
-                with self.assertRaises(github_copilot_direct.CopilotForbiddenError):
+                with self.assertRaises(llm.LlmForbiddenError):
                     llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
@@ -694,10 +776,13 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
         otoken = self._bind(cred_id)
         try:
             with mock.patch.object(github_copilot_direct, "_open", fake_open):
-                with self.assertRaises(github_copilot_direct.CopilotRateLimitError):
+                with self.assertRaises(llm.LlmRateLimitError) as caught:
                     llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
+        # the underlying CopilotRateLimitError doesn't (yet) carry retry_after -- must degrade to
+        # None, not blow up.
+        self.assertIsNone(caught.exception.retry_after)
 
     def test_401_error_message_never_contains_the_oauth_token(self):
         cred_id = self._connect(token="do-not-leak-this-token")
@@ -705,7 +790,7 @@ class GithubCopilotDirectProviderTests(unittest.TestCase):
         otoken = self._bind(cred_id)
         try:
             with mock.patch.object(github_copilot_direct, "_open", fake_open):
-                with self.assertRaises(github_copilot_direct.CopilotAuthError) as caught:
+                with self.assertRaises(llm.LlmAuthError) as caught:
                     llm.chat([{"role": "user", "content": "hi"}])
         finally:
             config.reset_llm_override(otoken)
@@ -785,6 +870,44 @@ class NoSecretLoggingTests(unittest.TestCase):
         self.assertNotIn(service_token, captured)
         self.assertNotIn("Authorization: Bearer", captured)
         self.assertNotIn("token " + raw_oauth_token, captured)  # the stage-1 auth header shape
+
+
+class FrontendModelSelectorSourceTests(unittest.TestCase):
+    """Static checks on webapp/static/index.html's inline JS -- for a race-condition class of bug
+    that's easiest (and, for statement ORDER within a function body, only practically possible) to
+    pin at the source level rather than by driving a real browser."""
+
+    @staticmethod
+    def _index_html_source():
+        path = os.path.join(os.path.dirname(webserver.__file__), "static", "index.html")
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    @staticmethod
+    def _function_body(source, name):
+        """Extract one `function <name>(...) { ... }`'s body via brace matching (a regex alone
+        can't handle the nested braces a real function body has)."""
+        marker = "function " + name + "("
+        start = source.index(marker)
+        brace_start = source.index("{", start)
+        depth = 0
+        for i in range(brace_start, len(source)):
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[brace_start:i + 1]
+        raise AssertionError(f"unbalanced braces in function {name}")
+
+    def test_stale_model_listing_cannot_mutate_dropdown_before_revision_check(self):
+        """Acceptance: loadTokenModelOptions() must check `revision !== llmStatusRevision` BEFORE
+        calling populateModelSelect() -- otherwise a slower, now-superseded model-list response
+        writes to the dropdown before it discovers it's stale."""
+        body = self._function_body(self._index_html_source(), "loadTokenModelOptions")
+        guard_position = body.index("revision !== llmStatusRevision")
+        dom_write_position = body.index("populateModelSelect")
+        self.assertLess(guard_position, dom_write_position)
 
 
 class PickDefaultModelTests(unittest.TestCase):
@@ -1212,6 +1335,118 @@ class DynamicModelSelectorTests(unittest.TestCase):
         self.assertEqual(llm_credentials.resolve(alice_body["credential_id"])["selected_model"], "m1")
         self.assertEqual(llm_credentials.resolve(bob_body["credential_id"])["selected_model"], "m9")
 
+    # ---- stale credential -> reconnect_required, never silently "shared" ------------------------
+
+    def test_stale_credential_status_requires_reconnect_but_chat_stays_fail_closed(self):
+        """A credential-shaped token that no longer resolves (RAM cleared, disconnected elsewhere,
+        etc.) must report reconnect_required=True, mode=copilot_token -- NOT mode=shared, which
+        would wrongly imply nothing is wrong. Chat routing independently stays pinned to the direct
+        provider (fail closed), matching what /api/llm/me now says instead of contradicting it."""
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+        llm_credentials.disconnect(cred_id, owner_uid=self.browser.uid)  # simulate RAM cleared
+
+        status, me = self.browser.get("/api/llm/me", {"X-SDLC-User-Token": cred_id})
+        self.assertEqual(status, 200)
+        self.assertEqual(me, {"registered": False, "mode": "copilot_token", "label": "Copilot token",
+                               "token_mode_available": True, "model": "", "reconnect_required": True})
+
+        handler = webserver.Handler.__new__(webserver.Handler)
+        handler._uid = self.browser.uid
+        override = handler._resolve_llm_override(cred_id)
+        self.assertEqual(override["provider"], "github_copilot_direct")  # still fail-closed, not None
+
+    def test_auth_disconnect_status_requires_reconnect(self):
+        """A live chat call that gets rejected (401) mid-session must disconnect the credential --
+        so the NEXT /api/llm/me check reports reconnect_required, not a stale "Connected"."""
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+        self.browser.user_token = cred_id  # so /api/chat actually binds to THIS credential
+
+        with mock.patch.object(agent, "answer", side_effect=llm.LlmAuthError("token rejected")):
+            status, chat_body = self.browser.post("/api/chat", {"question": "hello"})
+        self.assertEqual(status, 401)
+        self.assertTrue(chat_body.get("reconnect_required"))
+
+        status, me = self.browser.get("/api/llm/me")
+        self.assertEqual(status, 200)
+        self.assertTrue(me.get("reconnect_required"))
+        self.assertFalse(me["registered"])
+
+    def test_rate_limit_during_chat_reports_retry_after(self):
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+        self.browser.user_token = cred_id
+
+        rate_limit_error = llm.LlmRateLimitError("slow down", retry_after=15)
+        with mock.patch.object(agent, "answer", side_effect=rate_limit_error):
+            status, chat_body = self.browser.post("/api/chat", {"question": "hello"})
+        self.assertEqual(status, 429)
+        self.assertEqual(chat_body.get("retry_after"), 15)
+        # a rate limit is not an auth failure -- the credential must stay connected
+        self.assertIsNotNone(llm_credentials.resolve(cred_id, owner_uid=self.browser.uid))
+
+    # ---- Token -> Tunnel credential migration ----------------------------------------------------
+
+    def test_token_to_tunnel_gets_new_route_token_and_disconnects_old_credential(self):
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+        self.browser.user_token = cred_id
+
+        with self._ok_chat():
+            status, record = self.browser.post(
+                "/api/llm/register",
+                {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "previous_credential_id": cred_id})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(record["token"], cred_id)
+        self.assertFalse(llm_credentials.is_credential_id(record["token"]))
+        self.assertTrue(llm_routes.resolve(record["token"]))
+        # the old Token credential is gone -- retired only AFTER the new route persisted
+        self.assertIsNone(llm_credentials.resolve(cred_id))
+
+    def test_token_to_tunnel_probe_failure_keeps_old_credential(self):
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+        self.browser.user_token = cred_id
+
+        with mock.patch.object(llm, "chat", side_effect=RuntimeError("connection refused")):
+            status, _ = self.browser.post(
+                "/api/llm/register",
+                {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "previous_credential_id": cred_id})
+        self.assertEqual(status, 400)
+        # neither side effect happened: no tunnel persisted, old credential untouched
+        self.assertFalse(os.path.exists(config.LLM_ROUTES_STORE))
+        self.assertIsNotNone(llm_credentials.resolve(cred_id, owner_uid=self.browser.uid))
+
+    def test_register_never_persists_a_credential_shaped_route_token(self):
+        """Defense in depth: even if a caller (an old frontend, or a manual API call) puts a
+        credential-shaped id directly in `token` instead of `previous_credential_id`, it must never
+        become the new route's identity -- it's redirected to "credential to retire" instead."""
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             self._ok_chat():
+            _, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        cred_id = body["credential_id"]
+
+        with self._ok_chat():
+            status, record = self.browser.post(
+                "/api/llm/register",
+                {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "token": cred_id})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(record["token"], cred_id)
+        self.assertFalse(llm_credentials.is_credential_id(record["token"]))
+        # treated as if it had arrived via previous_credential_id: retired after success
+        self.assertIsNone(llm_credentials.resolve(cred_id))
+
     # ---- select-model: switch commit/rollback --------------------------------------------------
 
     def _connect(self, browser, models_list, default_model):
@@ -1224,20 +1459,40 @@ class DynamicModelSelectorTests(unittest.TestCase):
     def test_select_model_success_commits_new_model(self):
         cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
         listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
-        with mock.patch.object(llm, "models", return_value=listing), self._ok_chat():
+        with mock.patch.object(llm, "models", return_value=listing), \
+             mock.patch.object(llm, "chat") as chat_spy:
             status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
         self.assertEqual(status, 200)
         self.assertEqual(body["model"], "m2")
         self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m2")
+        # Token mode: the models() listing IS the real authenticated check -- no separate chat()
+        # probe, so switching models never spends a Copilot completion.
+        chat_spy.assert_not_called()
 
     def test_select_model_failure_keeps_old_model(self):
+        """For a TOKEN-mode credential, a failed switch can only come from the models() listing
+        itself -- there is no separate chat probe (see test_select_model_success_commits_new_model)."""
         cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
+        with mock.patch.object(llm, "models", side_effect=RuntimeError("boom")):
+            status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
+        self.assertEqual(status, 502)
+        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m1")  # unchanged
+
+    def test_select_model_for_tunnel_failure_keeps_old_model(self):
+        """Tunnel switches DO still re-probe with a real llm.chat() call (an arbitrary user-supplied
+        endpoint, same as register()) -- a failed probe must leave the tunnel's previously-confirmed
+        model untouched."""
+        with self._ok_chat():
+            status, record = self.browser.post(
+                "/api/llm/register", {"base_url": "http://127.0.0.1:24101/v1", "model": "m1", "label": "alice"})
+        self.assertEqual(status, 200)
+        self.browser.user_token = record["token"]
         listing = {"models": [{"id": "m1"}, {"id": "m2"}], "default_model": "m1"}
         with mock.patch.object(llm, "models", return_value=listing), \
              mock.patch.object(llm, "chat", side_effect=RuntimeError("boom")):
             status, body = self.browser.post("/api/llm/select-model", {"model": "m2"})
         self.assertEqual(status, 400)
-        self.assertEqual(llm_credentials.resolve(cred_id)["selected_model"], "m1")  # unchanged
+        self.assertEqual(llm_routes.resolve(record["token"])["model"], "m1")  # unchanged
 
     def test_select_model_rejects_model_not_in_current_list(self):
         cred_id = self._connect(self.browser, [{"id": "m1"}], "m1")
@@ -1320,20 +1575,30 @@ class DynamicModelSelectorTests(unittest.TestCase):
         self.assertIn("openai_chat", seen_providers)
         self.assertEqual(llm_routes.resolve(record["token"])["provider"], "openai_chat")
 
-    def test_connect_token_probe_uses_the_real_mdc_tool_schema(self):
-        """Acceptance: the connect probe must exercise the same tools shape real chat turns use, not
-        a bare no-tools call that could pass even where the real tool-calling request shape fails."""
+    def test_register_probe_uses_the_real_mdc_tool_schema(self):
+        """Acceptance: the tunnel register probe must exercise the same tools shape real chat turns
+        use, not a bare no-tools call that could pass even where the real tool-calling request shape
+        fails."""
         seen_tools = []
 
         def fake_chat(messages, tools=None, temperature=0):
             seen_tools.append(tools)
             return {"role": "assistant", "content": "OK"}
 
-        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
-             mock.patch.object(llm, "chat", side_effect=fake_chat):
-            self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        with mock.patch.object(llm, "chat", side_effect=fake_chat):
+            self.browser.post("/api/llm/register",
+                               {"base_url": "http://127.0.0.1:24101/v1", "model": "m1"})
         self.assertTrue(seen_tools)
         self.assertEqual(seen_tools[-1], agent.tools.TOOLS)
+
+    def test_connect_token_never_calls_chat(self):
+        """Acceptance: Token Connect must not spend a real inference request -- llm.models() (a
+        real authenticated call in its own right) is sufficient confirmation on its own."""
+        with mock.patch.object(llm, "models", return_value={"models": [{"id": "m1"}], "default_model": "m1"}), \
+             mock.patch.object(llm, "chat") as chat_spy:
+            status, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
+        self.assertEqual(status, 200)
+        chat_spy.assert_not_called()
 
     def test_tunnel_models_lists_without_registering(self):
         body_bytes = json.dumps({"data": [{"id": "m1"}, {"id": "m2", "label": "Model Two"}]}).encode("utf-8")
@@ -1392,9 +1657,13 @@ class DynamicModelSelectorTests(unittest.TestCase):
         pattern, as described by the internal review: it reads config.LLM_CREDENTIAL_OWNER_UID (not
         just LLM_CREDENTIAL_ID), and calls llm_credentials.resolve(credential_id, owner_uid=...),
         .update_service_token(..., owner_uid=...), and .is_valid_model_id(). Only ONE attribute on
-        the real (otherwise untouched) provider module is monkeypatched for this one test --
-        llm.py's facade, config.py's override plumbing, and llm_credentials.py are all exercised for
-        real, through a real HTTP request end-to-end."""
+        the real (otherwise untouched) provider module is monkeypatched for this one test.
+
+        Connect-token itself no longer calls llm.chat() (see test_connect_token_never_calls_chat),
+        so this exercises the contract the way a REAL chat turn would: bind the just-connected
+        credential's override (exactly what _resolve_llm_override hands agent.answer()) and call
+        llm.chat() directly -- llm.py's facade, config.py's override plumbing, and
+        llm_credentials.py are all exercised for real."""
 
         def contract_stub_chat(messages, tools=None, temperature=0):
             credential_id = config.LLM_CREDENTIAL_ID
@@ -1409,12 +1678,23 @@ class DynamicModelSelectorTests(unittest.TestCase):
             return {"role": "assistant", "content": "contract ok"}
 
         listing = {"models": [{"id": "m1"}], "default_model": "m1"}
-        with mock.patch.object(llm, "models", return_value=listing), \
-             mock.patch.object(github_copilot_direct, "chat", side_effect=contract_stub_chat):
+        with mock.patch.object(llm, "models", return_value=listing):
             status, body = self.browser.post("/api/llm/connect-token", {"token": "tok"})
-
         self.assertEqual(status, 200)
         cred_id = body["credential_id"]
+
+        handler = webserver.Handler.__new__(webserver.Handler)
+        handler._uid = self.browser.uid
+        override = handler._resolve_llm_override(cred_id)
+
+        otoken = config.set_llm_override(override)
+        try:
+            with mock.patch.object(github_copilot_direct, "chat", side_effect=contract_stub_chat):
+                message = llm.chat([{"role": "user", "content": "hi"}])
+        finally:
+            config.reset_llm_override(otoken)
+
+        self.assertEqual(message["content"], "contract ok")
         self.assertEqual(llm_credentials.resolve(cred_id)["service_token"], "stub-service-token")
 
     def test_bob_cannot_chat_through_alices_credential(self):

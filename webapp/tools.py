@@ -3,7 +3,7 @@ Add a tool by adding a schema here and a branch in dispatch()."""
 import impact_report
 import outage_report
 from retriever import (graph, messages as msg, code, flow, unified_impact, arch_focus,
-                        usecase_consistency, usecase_master, repo_tags)
+                        usecase_consistency, usecase_master, repo_tags, incident)
 
 # Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
 # (dependency closure), so the inline view's repo sample leads with what actually breaks.
@@ -252,6 +252,27 @@ TOOLS = [
             "'show me config problems', '有哪些 use case 配置有问题'.",
             {"severity": {"type": "string"}, "offset": {"type": "integer"},
              "limit": {"type": "integer"}}, []),
+    _schema("incident_impact",
+            "INCIDENT triage: paste a raw production ALERT / alarm string and get who is affected. "
+            "Call this whenever the user pastes something that looks like an alert — "
+            "'prodECS_<repo>_service_CPUUtilizationMINOR[80percent]', 'MDC Alert - General SHP API "
+            "Error - <repo>', 'MDC Error Counts Alert ... Delivery Job - <某条 Path>' — or asks "
+            "'这个告警影响了谁', 'who does this incident affect', '出事了要通知谁', 'what business "
+            "breaks if this service is down'. Pass the alert text VERBATIM in `alert_text`; do not "
+            "clean it up, the repo id is usually embedded in it. Returns: the repos it identified "
+            "(and WHY — `confirmed` = the exact repo id was present in the text, `candidate` = a "
+            "hand-asserted resource mapping, say which), their message topics, the business use "
+            "cases routed onto those topics with snapshot citations, and the channels. "
+            "IMPORTANT — report these honestly: (1) this reads NOTHING from production — no logs, "
+            "no AWS, no MCP — so never present it as root cause, only as blast radius; (2) use "
+            "cases come from the dev/SCT snapshot, so say 'verify against production' before "
+            "anyone tells a business team their traffic stopped; (3) if `ok` is false the repo "
+            "could NOT be identified — say so and ask which service, NEVER guess; (4) `vendor` is "
+            "always null for now (the router table isn't ingested) — do not infer a vendor from "
+            "repo names; (5) a `delivery_path.phrase` is reported verbatim but NOT resolved, "
+            "because delivery_path is a numeric enum whose name mapping we don't have yet.",
+            {"alert_text": {"type": "string"}, "max_use_cases": {"type": "integer"}},
+            ["alert_text"]),
 ]
 
 
@@ -389,6 +410,11 @@ def dispatch(name, a):
             offset=int(a.get("offset") or 0),
             limit=int(a.get("limit") or 50),
         )
+    if name == "incident_impact":
+        text = (a.get("alert_text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
+        return incident.incident_impact(text, max_use_cases=int(a.get("max_use_cases") or 40))
     if name == "show_coverage":
         return _coverage_view(a.get("kind"), a.get("value"))
     return {"error": f"unknown tool: {name}"}

@@ -1,0 +1,80 @@
+{
+  "_README": [
+    "告警文本解析的词表 —— 内网 Codex 维护(AGENTS.md §2:环境变了就改这里,不改代码)。",
+    "",
+    "【最重要的一件事】仓库识别不靠这个文件里的任何规则。",
+    "  真正的识别方式是:拿 460 个已知仓库名去告警文本里做全名匹配。",
+    "  RUNBOOK-55 实测:500 条 CloudWatch 告警里 466 条(93.2%)直接内嵌完整仓库名。",
+    "  所以告警名格式以后怎么变都不影响识别 —— 只要仓库名还写在里面。",
+    "  下面这些词表只负责【补充说明】(哪个环境、什么资源、多严重),识别不到仓库时也不会瞎猜。",
+    "",
+    "【什么时候要改这个文件】",
+    "  - AWS 那边告警命名规则变了 -> environments / resource_types / severities",
+    "  - 出现没见过的指标名 -> metrics",
+    "  - 告警里出现新的时区写法 -> timezones",
+    "  - 某个资源(数据库/队列)不带仓库名,但你知道它属于哪些仓库 -> resource_repo_hints",
+    "",
+    "【不要往这里写】任何客户数据、任何真实事故内容、任何人名。这个文件会进公网仓库。"
+  ],
+
+  "environments": {
+    "_note": "告警名开头的环境前缀。长的写前面(preproc 必须排在 prod 前面,否则会误判)。",
+    "prefixes": ["preproc", "prod", "uat", "sit", "dev"]
+  },
+
+  "resource_types": {
+    "_note": "RUNBOOK-55 实测首批 500 条:ECS 494、sidecar 4、DynamoDB 2。",
+    "tokens": ["ECS", "RDS", "DynamoDB", "SQS", "Lambda", "ALB", "MSK", "sidecar"]
+  },
+
+  "severities": {
+    "_note": "从告警名尾部识别严重度。全大写匹配。",
+    "tokens": ["CRITICAL", "MAJOR", "MINOR", "WARNING", "WARN", "INFO"]
+  },
+
+  "metrics": {
+    "_note": "已见过的指标名。没列出的指标不会导致解析失败,只是 metric 字段为空。",
+    "tokens": [
+      "CPUUtilization",
+      "MemoryUsage",
+      "FreeableMemoryTooLow",
+      "RequestsExceedingThroughput",
+      "cpu-utilization-high"
+    ]
+  },
+
+  "timezones": {
+    "_note": [
+      "RUNBOOK-55 实测三个时区并存,这是本项目最容易出的错:",
+      "  CloudWatch = UTC / LogDream 默认 = Asia/Hong_Kong / 服务器 = GMT",
+      "告警文本里的时间【只要没写时区就当作不确定】,绝不默认成本地时间。"
+    ],
+    "aliases": {
+      "HKT": "Asia/Hong_Kong",
+      "HK": "Asia/Hong_Kong",
+      "CST": "Asia/Hong_Kong",
+      "UTC": "UTC",
+      "GMT": "UTC",
+      "Z": "UTC"
+    }
+  },
+
+  "delivery_path": {
+    "_note": [
+      "告警名里出现的文字投递路径,例如 'WPB Servicing Realtime High Risk Path'。",
+      "RUNBOOK-55/56:tbl_use_case_router.delivery_path 是数字枚举(1-6,8,9),",
+      "文字名和数字的对照【还没拿到】。所以现在只【识别并原样报出】,不做任何连接。",
+      "拿到对照后填进 name_to_id,这条链路才会亮起来 —— 在那之前助手会明说'还连不上'。"
+    ],
+    "name_to_id": {}
+  },
+
+  "resource_repo_hints": {
+    "_note": [
+      "给那 6.8% 不带仓库名的告警用的兜底(例如 RDS/DynamoDB 这类共享资源)。",
+      "格式: {'资源名片段': ['仓库1', '仓库2']}。",
+      "【这是人工断言,不是推导出来的】,所以命中时助手会标成 candidate 而不是 confirmed。",
+      "例: 'hase-mdc-prod-db-cluster': ['哪些仓库连这个库'] —— 知道了再填,不知道就留空。"
+    ]
+  }
+}

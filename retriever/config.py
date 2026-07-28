@@ -57,6 +57,12 @@ USECASE_DATASET_DIR = _p("SDLC_USECASE_DATASET", "index", "usecase-snapshots", "
 RULE_TEXT_SEMANTICS_JSON = _cfg(
     "SDLC_RULE_TEXT_SEMANTICS", "rule_text_semantics.json", "index", "rule_text_semantics.json"
 )
+# Incident (AIOps) alert-text vocabulary: environment/resource/severity/metric tokens, timezone
+# aliases, and the not-yet-supplied delivery_path name->id map. Committed knob dir, intranet-owned
+# (AGENTS.md §2) — an AWS renaming should never require an engine edit. Missing file is harmless:
+# retriever/incident.py falls back to built-in defaults, and repo identification does not depend on
+# this file at all (it scans for known repo ids in the alert text).
+ALARM_PATTERNS_JSON = _cfg("SDLC_ALARM_PATTERNS", "alarm_patterns.json")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

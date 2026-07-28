@@ -17,17 +17,28 @@ EXPECTED_MODEL_TOOLS = {
     "impact", "hubs", "message_flow", "usecase_routing", "list_repos", "search_code",
     "read_file", "unified_impact", "show_arch", "source_system_impact", "usecase_impact",
     "search_usecases", "usecase_quality_findings",
+    # The 13 above are the Q&A surface and MUST stay 13 — that consolidation is the whole point of
+    # this file. Anything added below is a DELIBERATE new capability, listed separately so the count
+    # of the Q&A surface stays auditable and a merge can't quietly regrow it.
+    "incident_impact",   # incident triage (phase 1: local artefacts only, no MCP) — 2026-07-28
 }
+_QA_SURFACE = 13
 
 
 class ModelToolSurfaceTests(unittest.TestCase):
     """Guard against accidental regrowth (an old name sneaking back in) or removal (a merged tool
     silently dropped) of the model-visible TOOLS list."""
 
-    def test_tools_list_is_exactly_the_13_merged_tools(self):
+    def test_tools_list_is_exactly_the_expected_set(self):
         names = {entry["function"]["name"] for entry in tools.TOOLS}
         self.assertEqual(names, EXPECTED_MODEL_TOOLS)
-        self.assertEqual(len(tools.TOOLS), 13, "TOOLS should have no duplicate names")
+        self.assertEqual(len(tools.TOOLS), len(EXPECTED_MODEL_TOOLS),
+                         "TOOLS should have no duplicate names")
+
+    def test_the_qa_surface_itself_has_not_regrown(self):
+        """Adding an incident tool must not be a side door for re-adding retired Q&A tools."""
+        names = {entry["function"]["name"] for entry in tools.TOOLS}
+        self.assertEqual(len(names - {"incident_impact"}), _QA_SURFACE)
 
 
 class LegacyToolBackwardCompatTests(unittest.TestCase):

@@ -204,6 +204,40 @@ because the question is a little vague — a stated assumption beats an interrog
     eyeballing or manually tallying a `repos`/`items` list** — this is what fixed a prior bug where the
     answer said "22" when the actual returned list had 21.
 
+## Incident alerts — call `incident_impact`, and stay in your lane
+
+When the user pastes something that looks like a production alert (`prodECS_<repo>_service_...`,
+`MDC Alert - ...`, `MDC Error Counts Alert ... Delivery Job - <某条 Path>`, a CloudWatch alarm
+name) or asks "这个告警影响了谁 / who does this incident affect / 出事了要通知谁", call
+`incident_impact` with the alert text **verbatim** — do not tidy it up first, the repo id is
+usually embedded in the raw string.
+
+**What you can and cannot claim.** This tool reads local artefacts only — no logs, no AWS, no MCP.
+So you can answer *"who is affected and who should be told"*. You **cannot** answer *"why it
+broke"*: you have no log line, no metric, no CloudTrail event. If the user asks for root cause,
+say plainly that you can scope the impact but not diagnose the cause yet, and offer the impact.
+Never dress up a blast radius as a root cause — in an incident that is the most damaging thing
+you can do.
+
+**Four things to report honestly every time:**
+
+1. **How the repo was identified.** `confirmed` = the exact repo id was present in the alert text.
+   `candidate` = a hand-asserted resource→repo mapping from `config/alarm_patterns.json`; say it is
+   an assertion, not evidence.
+2. **`ok: false` means STOP.** The repo could not be identified. Say which parts of the alert you
+   could and could not read, and ask which service it is. **Never guess a repo from a resource
+   name that looks similar** — a wrong service in an incident sends people to the wrong place.
+3. **The use cases are a dev/SCT snapshot.** Before anyone tells a business team their messages
+   stopped, say "verify against production". Likewise, zero use cases means "not visible in this
+   snapshot", never "affects nobody".
+4. **`vendor` is always null right now** (the router table is not ingested) and a
+   `delivery_path.phrase` is reported verbatim but **not resolved** (that column is a numeric enum
+   and we do not have the name mapping). Do not infer either from repo names.
+
+If a timestamp in the alert has no timezone, say so. Three coexist here — CloudWatch is UTC,
+LogDream defaults to Asia/Hong_Kong, the server is GMT — so an unlabelled time is genuinely
+ambiguous, and guessing it is how you end up looking at the wrong half hour.
+
 ## Answer shape (the UI relies on this)
 
 Structure every answer in this order so the reader sees the conclusion first and

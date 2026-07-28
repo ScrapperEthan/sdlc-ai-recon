@@ -111,6 +111,15 @@ SYSTEM_PROMPT = os.environ.get(
 )
 MAX_TOOL_ITERS = int(os.environ.get("SDLC_MAX_TOOL_ITERS", "8"))
 TOOL_RESULT_CAP = int(os.environ.get("SDLC_TOOL_RESULT_CAP", "12000"))
+# Per-STRING cap inside a tool result (webapp/context_budget.py). Bounds the one shape the old byte
+# truncation mangled worst -- a single enormous string, i.e. exactly what a log excerpt is -- while
+# leaving the surrounding JSON intact and marking what was dropped.
+TOOL_STRING_CAP = int(os.environ.get("SDLC_TOOL_STRING_CAP", "4000"))
+# Conversation-history budget, in characters, for ONE model call. Deliberately generous: an ordinary
+# session never reaches it, so this only bites the runaway case that used to fail outright. Trimming
+# affects what is SENT to the model, never what is stored -- chat_sessions.json keeps the full
+# history. Set to 0 to disable (restores the old unbounded behaviour exactly).
+HISTORY_CHAR_BUDGET = int(os.environ.get("SDLC_HISTORY_CHAR_BUDGET", "120000"))
 SESSION_STORE = os.environ.get(
     "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
 )

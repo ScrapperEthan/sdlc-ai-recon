@@ -1,0 +1,61 @@
+{
+  "_README": [
+    "谁能改哪些文件 —— AGENTS.md 那张表的机器可读版本。",
+    "",
+    "【为什么要有这个文件】AGENTS.md 是一段散文,人看得懂,但它会烂:",
+    "新文件加进来,没人记得回去更新那张表,几个月后表和现实对不上,边界就形同虚设。",
+    "这个文件配了一个测试(tests/test_ownership.py):任何一个已提交的文件如果没有归属,测试就红。",
+    "所以它烂不掉 —— 想加新文件,就必须顺手声明它归谁。",
+    "",
+    "【判断归属只看一件事】什么事件会让这个文件需要改?(和 AGENTS.md §1 同一条规则)",
+    "  - 数据/表结构/环境/命名变了        -> intranet (内网 Codex)",
+    "  - 想让助手多会一件事                -> external (Claude / 外部)",
+    "  - 两边都会改、或纯记录性             -> shared",
+    "",
+    "【规则怎么写】pattern 是 glob,越具体的写在越前面(第一个匹配上的生效)。",
+    "改归属之前先想清楚:归错了会导致两边互相覆盖对方的修改。"
+  ],
+
+  "owners": {
+    "intranet": "内网 Codex —— 数据摄取与环境适配。产出留在内网 github,真实数据永不出内网。",
+    "external": "Claude / 外部 —— 引擎:检索、工具、prompt、前端、规格。推公网 github。",
+    "shared": "两边都会读写,或纯记录性文件(runbook、状态文档、台账)。改之前看一眼对方有没有在改。"
+  },
+
+  "rules": [
+    {"pattern": "config/*",              "owner": "intranet",
+     "why": "旋钮:列名映射、渠道/厂商词表、告警词表。99% 的数据变化只改这里"},
+    {"pattern": "mdc_sheet_schema.json", "owner": "intranet",
+     "why": "MDC 业务表的列映射"},
+
+    {"pattern": "webapp/**",             "owner": "external", "why": "助手引擎与前端"},
+    {"pattern": "retriever/**",          "owner": "external", "why": "检索层"},
+    {"pattern": "change/**",             "owner": "external", "why": "改码流水线"},
+    {"pattern": "scaffold/**",           "owner": "external", "why": "脚手架"},
+    {"pattern": "tests/**",              "owner": "external", "why": "引擎的测试"},
+    {"pattern": "evals/**",              "owner": "external", "why": "评测集"},
+    {"pattern": "static/**",             "owner": "external", "why": "架构图骨架"},
+    {"pattern": "prompts/*",             "owner": "external", "why": "系统提示词"},
+    {"pattern": "docs/**",               "owner": "external", "why": "规格与设计文档"},
+    {"pattern": "product-design-audit/**", "owner": "external", "why": "设计审查"},
+    {"pattern": "*.py",                  "owner": "external", "why": "根目录的构建/检索脚本"},
+    {"pattern": "*.sh",                  "owner": "external"},
+    {"pattern": "*.bat",                 "owner": "external"},
+
+    {"pattern": "RUNBOOK*",              "owner": "shared",
+     "why": "外部写、内网执行并回报"},
+    {"pattern": "FACTS.md",              "owner": "shared",
+     "why": "两边共用的已确认事实账 —— 谁确认的谁往里加"},
+    {"pattern": "AGENTS.md",             "owner": "shared", "why": "分工本身"},
+    {"pattern": "OWNERSHIP.json",        "owner": "shared", "why": "本文件"},
+    {"pattern": "PROJECT-STATE.md",      "owner": "shared"},
+    {"pattern": "BACKLOG.md",            "owner": "shared"},
+    {"pattern": "README.md",             "owner": "shared"},
+    {"pattern": "RETRIEVER.md",          "owner": "shared"},
+    {"pattern": "WEBAPP.md",             "owner": "shared"},
+    {"pattern": "*.xlsx",                "owner": "shared", "why": "测试题库/清单"},
+    {"pattern": ".gitignore",            "owner": "shared"},
+    {"pattern": ".claude/**",            "owner": "shared"},
+    {"pattern": ".claude",               "owner": "shared"}
+  ]
+}

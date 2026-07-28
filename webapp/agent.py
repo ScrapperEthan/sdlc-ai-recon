@@ -4,7 +4,7 @@ is aggregated across the (possibly several) model calls one question triggers.""
 import json
 import re
 from retriever import citations
-from . import llm, tools, config, llm_usage
+from . import llm, tools, config, llm_usage, context_budget
 
 
 # The model sometimes narrates the inline view it already triggered, e.g.
@@ -126,8 +126,17 @@ def answer(question, history=None):
 
 def answer_events(question, history=None):
     """Yield chat protocol events; finish with a terminal done event."""
+    # The store keeps the FULL conversation; this only decides what fits in THIS model call. The
+    # budget is generous enough that an ordinary session is untouched (fit_history returns the list
+    # unchanged and dropped == 0), so behaviour is identical until a session actually runs away.
+    kept_history, dropped = context_budget.fit_history(history or [])
     messages = [{"role": "system", "content": _system_prompt()}]
-    messages += history or []
+    if dropped:
+        messages.append({"role": "system", "content": (
+            f"[context] {dropped} earlier turn(s) of this conversation were dropped to fit the "
+            f"context budget; the opening question was kept. If you need something from the "
+            f"dropped middle, ask the user to restate it rather than assuming.")})
+    messages += kept_history
     messages.append({"role": "user", "content": question})
 
     trace = []
@@ -190,7 +199,9 @@ def answer_events(question, history=None):
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
-                "content": json.dumps(result, ensure_ascii=False)[:config.TOOL_RESULT_CAP],
+                # Structure-aware, not a byte slice: a cut mid-JSON used to hand the model a
+                # fragment it could not recognise as incomplete. See webapp/context_budget.py.
+                "content": context_budget.shrink_tool_result(result),
             })
 
     # tool budget exhausted — force a final answer

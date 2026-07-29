@@ -134,7 +134,13 @@ def usecase_impact(use_case_id: str) -> dict:
     channels + endpoint repos, the rule_text decision expression as a STRUCTURAL tree
     (rule_text_ast — never read as an asserted fallback/parallel order while semantics is
     "unconfirmed"), validation_findings (rule_text vs channel_rule consistency), upstream/
-    downstream repos and the channel chain."""
+    downstream repos and the channel chain.
+
+    `delivery_chain` carries the last mile all the way to the exit — topics -> delivery jobs ->
+    outbound APIs -> carrier -> what the customer receives. Obey `vendor_selection.method`:
+    `channel_upper_bound` = at most these carriers (tbl_use_case_router is not ingested, so the
+    exact one is unknown), `route_hint` = a route/router value names one, still a hint.
+    `use_case_master` says whether master data was found and, when not, why."""
     try:
         return impact_report.build_report(f"use-case:{use_case_id}")
     except (FileNotFoundError, ValueError) as error:

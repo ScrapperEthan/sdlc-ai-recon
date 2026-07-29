@@ -166,5 +166,43 @@ class DynamicBusinessSourceTests(unittest.TestCase):
         self.assertNotIn("endpoint_repos", result)
 
 
+class UseCaseExitSpineTests(unittest.TestCase):
+    """Focusing a use case used to light the INGRESS half only (gutter + ingress + decision) and go
+    dark exactly where the reader's question usually starts: what goes out, and through whom."""
+
+    def _focus(self, rules):
+        with mock.patch.object(usecase_master, "master_for", return_value={"source_system": "PEGA"}), \
+             mock.patch.object(usecase_master, "ext_by_use_case_id", return_value={}), \
+             mock.patch.object(usecase_master, "rules_by_use_case_id",
+                               return_value={"uc123": rules} if rules else {}):
+            return arch_focus.focus("use-case", "UC123")
+
+    def test_declared_channel_lights_the_chain_through_to_the_carrier_terminal(self):
+        result = self._focus([{"channel": "SMS", "route": "CSL_SVC_RT_SMS", "citation": "a:1"}])
+        ids = result["affected_node_ids"]
+        self.assertIn("ingress-api", ids)       # ingress half still there
+        self.assertIn("sms-topics", ids)
+        self.assertIn("sms-deli", ids)
+        self.assertIn("sms-csl", ids)
+        self.assertIn("ext-csl-smsc", ids)      # the exit
+        self.assertNotIn("ext-3hk-smsc", ids)   # narrowed by the route hint
+        self.assertIn("CSL SMSC", result["summary"])
+
+    def test_highlighted_exit_nodes_travel_in_the_url_so_the_page_agrees(self):
+        """The page recomputes a source-system highlight from the URL and knows only the ingress
+        half; without an explicit node list the diagram would contradict the answer text."""
+        result = self._focus([{"channel": "SMS", "route": "CSL_SVC_RT_SMS", "citation": "a:1"}])
+        self.assertIn("&nodes=", result["url"])
+        self.assertIn("ext-csl-smsc", result["url"])
+
+    def test_no_channel_rule_keeps_the_ingress_only_highlight_and_says_why(self):
+        """No rules means no basis for picking a channel — lighting every channel would tell the
+        reader this use case sends on all of them."""
+        result = self._focus([])
+        self.assertNotIn("&nodes=", result["url"])
+        self.assertNotIn("ext-csl-smsc", result["affected_node_ids"])
+        self.assertIn("没有渠道规则行", result["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()

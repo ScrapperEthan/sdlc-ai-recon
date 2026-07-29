@@ -196,9 +196,10 @@ TOOLS = [
             "`kind` is 'channel', 'vendor', 'source-system', or 'use-case'; `value` is the channel "
             "(sms/email/push/mms/whatsapp/wechat/letter), the vendor (sinch/csl/3hk/…), the upstream "
             "system name (source-system), or a use_case_id (use-case, resolved to its declared "
-            "source_system). The user then SEES the highlighted diagram in your reply — they never "
-            "open a page or click a node themselves. Still write the affected-path explanation in "
-            "text too.",
+            "source_system AND, when it has channel rules, highlighted all the way through topics/"
+            "delivery jobs/outbound APIs to the carrier terminal). The user then SEES the "
+            "highlighted diagram in your reply — they never open a page or click a node themselves. "
+            "Still write the affected-path explanation in text too.",
             {"kind": {"type": "string"}, "value": {"type": "string"}}, ["kind", "value"]),
     _schema("source_system_impact",
             "Business-upstream blast radius for an upstream system (PEGA/MDC/eAlert/L400/…): which "
@@ -222,8 +223,19 @@ TOOLS = [
             "semantics=='unconfirmed' — the default — NEVER read this as an asserted fallback/"
             "parallel order, only as structure), validation_findings (rule_text vs channel_rule "
             "consistency, severity-ranked), plus upstream/downstream repos and the channel chain. "
+            "`delivery_chain` is the FULL last mile — topics -> delivery jobs -> outbound APIs -> "
+            "CARRIER -> what the customer actually receives (CSL/3HK SMSC, APNs/FCM, ProofPoint, "
+            "print/mail) — with a `path_summary` line per channel; quote it for 全链路 / 出口 / 厂商 "
+            "/ 最终发送 questions, and obey `vendor_selection.method`: `channel_upper_bound` means "
+            "'at most these carriers' (tbl_use_case_router is NOT ingested, so the exact carrier is "
+            "unknown — never write 'it sends via X'), `route_hint` means a route/router value names "
+            "one, still a hint, cite the rule row. `use_case_master` says whether master data was "
+            "found and, when not, WHY (dataset not configured vs id absent from that snapshot) — "
+            "read it before writing 无法确认, so you name which half is missing instead of implying "
+            "the use case has no channels or no owner. "
             "Call this for 'what is use case X', 'tell me about M2050', 'M2050 的渠道/上游/owner 是"
-            "什么', or before answering any question about one specific use_case_id's configuration.",
+            "什么', 'M2050 的完整配置与渠道', or before answering any question about one specific "
+            "use_case_id's configuration.",
             {"use_case_id": {"type": "string"}}, ["use_case_id"]),
     _schema("search_usecases",
             "Use Case CATALOG search across the full ~2,800-row master dataset, server-side "

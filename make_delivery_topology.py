@@ -8,6 +8,13 @@ import re
 from collections import defaultdict
 
 from retriever import config
+from retriever.vendors import (  # noqa: F401 — re-exported: callers/tests use these names here
+    KNOWN_VENDORS,
+    UNKNOWN_VENDOR,
+    VENDOR_ALIASES,
+    canon_vendor,
+    pick_vendor as _pick_vendor,
+)
 
 CHANNELS = ("sms", "mms", "email", "letter", "whatsapp", "wechat", "push")
 _CHANNEL_RE = "|".join(CHANNELS)
@@ -22,58 +29,10 @@ DELIVERY_RE = re.compile(
 )
 OUTBOUND_RE = re.compile(r"-(?P<vendor>[a-z0-9-]+)-outbound-api$", re.I)
 
-# A few vendors appear under more than one token in repo names. 3HK's repos carry its legal name
-# "htcl" (Hutchison Telecommunications) while the diagram and the business call it "3hk"; left
-# unaliased they split into two vendor buckets, so the "3HK" outbound/SMSC nodes (vendor="3hk")
-# bind an empty set while a channel-only node swallowed every SMS vendor instead (RUNBOOK-49).
-# Canonicalize to one token per vendor. Extend as new aliases surface — keep values lowercase.
-VENDOR_ALIASES = {"htcl": "3hk"}
-
-# The real last-mile carriers/vendors that legitimately appear as a token in a delivery-job name.
-# The vendor is chosen as the RIGHTMOST *known* token (see _pick_vendor); a name whose only
-# pre-channel tokens are segment/mode/system words (hase, hr, rt, bat, svc, gen, …) has NO vendor
-# and buckets under "unknown" rather than mis-promoting one of those words. This both stops phantom
-# vendor buckets (`hr`, `iccm*` — RUNBOOK-50/51) and the `mc-hk-hase-sms-deli-job` → "hase"
-# regression that let every mc-hk-hase outbound API be grabbed into a bogus bucket. Names are
-# CANONICAL (post-canon_vendor): htcl folds to 3hk, the iccm* family folds to iccm.
-KNOWN_VENDORS = frozenset({
-    "csl", "sinch", "3hk", "cm", "lx", "aurora", "awssg", "awshk",  # sms / push carriers
-    "pfp", "pps", "sfmc",                                            # email
-    "iccm", "otx",                                                  # letter
-    "haro",                                                         # whatsapp
-    "sns", "apns", "fcm",                                           # push infra / terminals
-})
-UNKNOWN_VENDOR = "unknown"
-
-
-def canon_vendor(vendor):
-    """Fold a raw vendor token onto its canonical name (identity when no alias applies).
-
-    The ICCM letter platform appears under family variants in repo names (iccms, iccmh, iccmt,
-    iccmv, iccmpt); collapse the whole `iccm*` family to `iccm` so they don't split into phantom
-    per-variant vendor buckets (RUNBOOK-51).
-
-    RUNBOOK-52 investigated whether `iccm` and `3hk` should really be one vendor for SMS (an
-    earlier finding suggested some ICCM-SMS jobs silently route through 3HK's gateway). CLOSED,
-    kept separate: real HTCL/CSL/Sinch/CM traffic goes straight into its own topic/job, never
-    through an ICCM job. Only 2 of 13 ICCM-SMS repos have a default-only fallback to
-    HUTCHISON_GW_SMS (triggers on an empty/unrecognized router), the fallback's own live-ness is
-    unconfirmed (no matching Router bean found), and the real DB config snapshot showed 0/79 empty
-    routers — the trigger condition doesn't occur in practice. Do not re-merge iccm into 3hk on a
-    future re-read of this same evidence; see RUNBOOK-52 for the full trace."""
-    if vendor.startswith("iccm"):
-        return "iccm"
-    return VENDOR_ALIASES.get(vendor, vendor)
-
-
-def _pick_vendor(pre_channel_tokens):
-    """The vendor is the rightmost token whose canonical form is a KNOWN carrier; if none of the
-    tokens is a known vendor, the job has no identifiable carrier and buckets under "unknown"."""
-    for token in reversed(pre_channel_tokens):
-        canon = canon_vendor(token.lower())
-        if canon in KNOWN_VENDORS:
-            return canon
-    return UNKNOWN_VENDOR
+# The vendor vocabulary (KNOWN_VENDORS / VENDOR_ALIASES / canon_vendor / _pick_vendor) moved to
+# `retriever/vendors.py` and is re-exported above: the consumption side needs the same fold at
+# query time (retriever/delivery_chain.py), and two copies of a carrier whitelist is exactly how a
+# vendor silently splits into two buckets again. See that module for the RUNBOOK-49/51/52 history.
 
 
 def load_json(path):

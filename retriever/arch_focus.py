@@ -8,11 +8,17 @@ a page or click a node themselves.
 import json
 import urllib.parse
 
-from . import config, usecase_master
+from . import config, delivery_chain, usecase_master
 
 ROUTERS = ("decision-topics", "decision-job")
 # The business-source gutter's downstream chain when no precise adapter edge is known (Tier 1
 # will resolve the real source_system -> DSP/File/MQ/Kafka adapter split).
+#
+# EARLY_SPINE is the INGRESS half only. Focusing a use case used to stop here — the diagram lit up
+# columns 0-2 and went dark exactly where the reader's question usually starts ("so what actually
+# goes out, through whom?"). `_exit_spine` below carries the highlight through topics, delivery
+# jobs, outbound APIs and on to the carrier terminal; see retriever/delivery_chain.py for what is
+# fact (the stages) and what is an upper bound (which carrier this particular use case uses).
 EARLY_SPINE = ("ingress-api",) + ROUTERS
 
 
@@ -126,6 +132,32 @@ def _endpoint_evidence_for_source_system(source_system):
     return {"top_repos": top, "edge_confidence": confidence, "sample_size": len(items)}
 
 
+def _exit_spine(use_case_id):
+    """Node ids for a use case's last mile, plus a one-line summary of where it exits.
+
+    Channels come from the use case's channel rules when it has them, and are otherwise inferred
+    from nothing at all — no rules means no basis for lighting a specific channel, and lighting
+    every channel would tell the reader that this use case sends on all of them. Returns an empty
+    spine in that case, and the caller keeps the ingress-only highlight it had before.
+    """
+    rules = usecase_master.rules_by_use_case_id().get((use_case_id or "").strip().lower()) or []
+    channels = sorted({rule["channel"] for rule in rules if rule.get("channel")})
+    if not channels:
+        return set(), None
+    path = delivery_chain.exit_path(channels, rules=rules)
+    if not path.get("available"):
+        return set(), None
+    node_ids = {stage["node_id"] for item in path["by_channel"] for stage in item["stages"]
+                if stage.get("node_id")}
+    exits = "、".join(path["terminals"]) or "未在架构图上绘出"
+    carriers = "、".join(path["vendors"]) or "未识别"
+    bound = "（按渠道取上界，非该用例实际厂商）" if any(
+        item["vendor_selection"]["method"] == "channel_upper_bound" for item in path["by_channel"]
+    ) else "（由 route/router 收窄，属线索）"
+    summary = f"出口：{exits}；厂商：{carriers}{bound}。"
+    return node_ids, summary
+
+
 def _focus_business_source(kind, value):
     """kind='source-system' focuses that system directly; kind='use-case' resolves the id's
     declared source_system via usecase_master.master_for first. Honesty note: this lights up the
@@ -175,20 +207,31 @@ def _focus_business_source(kind, value):
     hit = {match["id"], *EARLY_SPINE}
     if match.get("edge_to"):
         hit.add(match["edge_to"])
+    exit_nodes, exit_summary = _exit_spine(value) if kind == "use-case" else (set(), None)
+    hit |= exit_nodes
     highlight = f"source-system:{resolved.lower()}"
     summary = f"已在架构图左侧高亮业务上游「{resolved}」的声明入口（非发现的代码边，来自 Use Case 主数据）。"
     if extra_note:
         summary += extra_note
+    if exit_summary:
+        summary += "已一路高亮到最终出口。" + exit_summary
+    elif kind == "use-case":
+        summary += "该用例没有渠道规则行，无法确定它走哪条渠道，因此只高亮到 Decision，未点亮任何出口。"
     # Carry the properly-cased display label through the URL — arch.html reconstructs the gutter
     # node client-side purely from the URL (no callback to this function), so without this a
     # dynamically-synthesized node (match["label"], set above) would fall back to the raw
     # lower-cased `value` and show e.g. "powercard" instead of "PowerCard".
     label_param = urllib.parse.quote(match.get("label") or resolved, safe="")
+    # The page recomputes a source-system highlight from the URL alone and only knows the ingress
+    # half; the exit half depends on this use case's channel rules, which the page cannot see. Pass
+    # the resolved ids explicitly so the diagram and the answer text agree (arch.html applyDeepLink).
+    nodes_param = ("&nodes=" + urllib.parse.quote(",".join(sorted(exit_nodes)), safe=",")
+                   if exit_nodes else "")
     result = {
         "ok": True,
         "view": "arch",
         "highlight": highlight,
-        "url": f"/arch.html?embed=1&highlight={highlight}&label={label_param}",
+        "url": f"/arch.html?embed=1&highlight={highlight}&label={label_param}{nodes_param}",
         "kind": "source-system",
         "value": resolved.lower(),
         "affected_node_ids": sorted(hit),

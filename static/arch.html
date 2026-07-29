@@ -798,6 +798,15 @@
       const hl = parseHighlightParam(params);
       if (hl && hl.value) {
         const hit = computeHighlight(hl.kind, hl.value);
+        // `nodes=` carries an explicit extra node-id list the server already resolved. Used by the
+        // use-case focus, whose last mile depends on that use case's channel rules and carrier
+        // hints — data this page doesn't have, so it cannot recompute the exit half itself. Without
+        // it the diagram would light the ingress half only while the answer text talked about the
+        // carrier and the exit (retriever/arch_focus.py::_exit_spine).
+        (params.get("nodes") || "").split(",").forEach((id) => {
+          const trimmed = id.trim();
+          if (trimmed && state.nodeById[trimmed]) hit.add(trimmed);
+        });
         if (hit.size) {
           applyHighlight(hit);
           const banner = document.getElementById("hlBanner");

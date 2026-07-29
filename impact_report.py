@@ -6,8 +6,8 @@ import csv
 import os
 import re
 
-from retriever import (config, flow, glossary, graph, messages, repo_tags, rule_text,
-                        usecase_consistency, usecase_master)
+from retriever import (config, delivery_chain, flow, glossary, graph, messages, repo_tags,
+                        rule_text, usecase_consistency, usecase_master)
 
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
 EDGE_FIELDS = ("producer_repo", "destination", "consumer_repo", "routing_source", "evidence")
@@ -483,6 +483,77 @@ def build_topic_report(topic, tags):
     }
 
 
+def usecase_master_provenance(use_case_id, master, rules, ext, route):
+    """Why the master half of this report is (or isn't) populated — stated, never left to silence.
+
+    A missing master row used to be invisible: `if master:` simply skipped identity, governance and
+    channels_declared, and the report carried no trace of the dataset it had looked in. The reader
+    then could not tell apart three very different situations — the dataset isn't configured, the
+    id isn't in it, or the id is there and genuinely has no channel rules — and the honest-sounding
+    "cannot confirm" that came out of it hid a one-line configuration problem just as easily as a
+    real data gap. Same failure mode as RUNBOOK-57: an empty result that reads like an answer.
+
+    The route snapshot and the master dataset are DIFFERENT populations (353 dev/SCT route ids vs
+    2,810 UAT master ids, intersection 297), so "known to the route snapshot, absent from master"
+    is an expected state with a specific meaning, and it says so.
+    """
+    manifest = usecase_master.snapshot_manifest()
+    # snapshot_manifest() has no boolean for this — "no dataset" is signalled by its caveat text
+    # (and only by that: row_count 0 also happens for an unreadable file, which is a different
+    # problem and must not be reported as a missing configuration).
+    dataset_available = not manifest.get("caveat", "").startswith("no Use Case dataset configured")
+    provenance = {
+        "found": bool(master),
+        "dataset_available": dataset_available,
+        "has_channel_rules": bool(rules),
+        "has_ext": bool(ext),
+        "source": manifest,
+    }
+    if master:
+        return provenance
+    if not dataset_available:
+        provenance["note"] = (
+            "Use Case master dataset is NOT configured on this instance "
+            f"({display_path(config.USECASE_DATASET_DIR)}/manifest.json absent), so NO use case can "
+            "resolve identity/owner/declared channels — this is an environment gap, not a fact "
+            "about this use case. Do not report it as 'no data for this use case'.")
+        return provenance
+    row_count = manifest.get("row_count")
+    scale = f", which holds {row_count} rows" if row_count else ""
+    seen_in_route = bool((route or {}).get("matches"))
+    provenance["note"] = (
+        f"`{use_case_id}` is NOT in the {manifest.get('environment', 'unknown')} Use Case master "
+        f"snapshot{scale}"
+        + (", but IS in the route snapshot — the two are different populations/environments, so "
+           "identity, owner, declared channels and governance are genuinely unavailable for it "
+           "here, while its routing is real." if seen_in_route else
+           ", and has no channel-rule or ext row either.")
+        + " Say which half is missing and why; never present this as the use case having no "
+          "channels or no owner.")
+    return provenance
+
+
+def usecase_delivery_chain(rules, chain, topics):
+    """The exit half of the chain: declared channels -> … -> carrier -> what the customer receives.
+
+    Channels come from `tbl_use_case_channel_rule.channel` when the use case has rules (a FACT).
+    When it doesn't — a route-snapshot-only use case, or a catalog gap — the channels inferred by
+    `channel_chain` from repo tags and topic names are used instead, and the payload says so:
+    a weaker basis still beats stopping the chain at ingress, but only if the reader is told.
+    """
+    declared = sorted({rule["channel"] for rule in rules if rule.get("channel")})
+    inferred = [item["channel"] for item in chain or []]
+    channels, source = (declared, "declared") if declared else (inferred, "inferred")
+    result = delivery_chain.exit_path(channels, rules=rules, topics=topics)
+    result["channel_source"] = source if channels else "none"
+    if source == "inferred" and channels:
+        result.setdefault("caveats", []).insert(0, (
+            "channels here are INFERRED from repo tags / topic names, not declared in "
+            "tbl_use_case_channel_rule (this use case has no rule row). The exit path is therefore "
+            "'what this channel's last mile looks like', not 'what this use case sends'."))
+    return result
+
+
 def build_usecase_report(use_case_id, tags):
     trace = flow.trace(use_case_id=use_case_id)
     usecase = messages.usecase_route(use_case_id=use_case_id)
@@ -493,10 +564,9 @@ def build_usecase_report(use_case_id, tags):
     # knows it; the route dimension being empty is a missing-dimension note, not a missing target.
     master = usecase_master.master_for(use_case_id)
     catalog_key = use_case_id.strip().lower()
-    known_to_catalog = bool(master) or bool(
-        usecase_master.rules_by_use_case_id().get(catalog_key)
-        or usecase_master.ext_by_use_case_id().get(catalog_key)
-    )
+    rules = usecase_master.rules_by_use_case_id().get(catalog_key) or []
+    ext = usecase_master.ext_by_use_case_id().get(catalog_key)
+    known_to_catalog = bool(master) or bool(rules or ext)
     if usecase.get("available") and not usecase.get("matches") and not known_to_catalog:
         raise FileNotFoundError(f"unknown target: use-case:{use_case_id}")
 
@@ -560,6 +630,15 @@ def build_usecase_report(use_case_id, tags):
             note_citations=usecase_cites[:1],
         ),
     }
+    report["use_case_master"] = usecase_master_provenance(use_case_id, master, rules, ext, usecase)
+    if report["use_case_master"].get("note"):
+        report["risk_callouts"].append({
+            "type": "use-case-master-lookup",
+            "message": report["use_case_master"]["note"],
+            "citations": [],
+        })
+    report["delivery_chain"] = usecase_delivery_chain(rules, chain, topics)
+
     # Additive + null-safe: no master row (or no snapshot at all) -> byte-identical to today.
     if master:
         target["description"] = f"{master['use_case_id']} — {master['name']}" if master["name"] else use_case_id
@@ -590,9 +669,6 @@ def build_usecase_report(use_case_id, tags):
         extra_cites.update(check["citation"] for check in consent.get("checks") or [])
         # Round A fact-only channels (tbl_use_case_channel_rule.channel) + declared endpoint repos
         # (tbl_use_case_ext.endpoint) — additive; absent tables leave the report unchanged.
-        key = use_case_id.strip().lower()
-        rules = usecase_master.rules_by_use_case_id().get(key) or []
-        ext = usecase_master.ext_by_use_case_id().get(key)
         if rules:
             target["channels_declared"] = usecase_master.channels_for_use_case(use_case_id)
             report["channel_rules"] = rules
@@ -855,6 +931,28 @@ def render_rule_text_ast(ast, interpretation=None):
     return lines
 
 
+def render_delivery_chain(payload):
+    """The exit half, rendered so the carrier and the terminal are impossible to miss."""
+    if not payload:
+        return ["- not computed"]
+    if not payload.get("available"):
+        return [f"- unavailable — {payload.get('reason') or payload.get('note') or 'no exit path'}"]
+    lines = [f"- channels are **{payload.get('channel_source')}** "
+             f"({'tbl_use_case_channel_rule fact' if payload.get('channel_source') == 'declared' else 'inferred from repo tags / topic names'})"]
+    for item in payload["by_channel"]:
+        lines.append(f"- **{item['channel'].upper()}** ({', '.join(item['declared_as'])}) — "
+                     f"carrier selection: {item['vendor_selection']['method']}")
+        lines.append(f"  - path: {item['path_summary']}")
+        lines.append(f"  - carriers: {', '.join(item['vendors']) or 'none identified'}")
+        lines.append(f"  - exit / terminal: {', '.join(item['terminals']) or 'not drawn on the diagram'}")
+        if item.get("vendors_off_diagram"):
+            lines.append("  - not on the static diagram: " + ", ".join(item["vendors_off_diagram"]))
+    if payload.get("note"):
+        lines.append(f"- note: {payload['note']}")
+    lines.extend(f"- caveat: {caveat}" for caveat in payload.get("caveats") or [])
+    return lines
+
+
 def render_validation_findings(findings):
     if not findings:
         return ["- none"]
@@ -881,6 +979,11 @@ def render_markdown(report):
         lines.append("- Matched topics: " + ", ".join(target["matched_topics"]))
     if target.get("citations"):
         lines.append("- Citations: " + ", ".join(target["citations"]))
+    if report.get("use_case_master", {}).get("note"):
+        lines.extend(["", "## Use Case Master Lookup", f"- {report['use_case_master']['note']}"])
+    if report.get("delivery_chain"):
+        lines.extend(["", "## Delivery Chain (to the exit)"])
+        lines.extend(render_delivery_chain(report["delivery_chain"]))
     if report.get("endpoint_repos"):
         lines.extend(["", "## Endpoint Repos (declared source_system entrypoint)"])
         lines.extend(render_endpoint_repos(report["endpoint_repos"]))

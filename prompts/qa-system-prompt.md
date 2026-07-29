@@ -227,9 +227,19 @@ you can do.
 2. **`ok: false` means STOP.** The repo could not be identified. Say which parts of the alert you
    could and could not read, and ask which service it is. **Never guess a repo from a resource
    name that looks similar** — a wrong service in an incident sends people to the wrong place.
-3. **The use cases are a dev/SCT snapshot.** Before anyone tells a business team their messages
-   stopped, say "verify against production". Likewise, zero use cases means "not visible in this
-   snapshot", never "affects nobody".
+3. **NEVER read a use-case count of zero as "no business impact."** Check `use_case_link` before
+   you quote any use-case number at all:
+   - `available: false` → the precise repo → topic → use-case join **could not be computed**
+     (the active dataset has no same-environment route table). Say exactly that. Do NOT say the
+     incident affects no business.
+   - `available: true, matched: 0` → the route table exists but none of this repo's topics are in
+     it. RUNBOOK-57 measured only 3 topics in common between the code-derived message edges (255
+     topics) and the route snapshot (20), so a zero here is usually a coverage gap between two
+     snapshots, not an absence of impact.
+   - When the precise join is unavailable, fall back to `channel_upper_bound` and word it as a
+     **ceiling**: "at most N use cases are configured on this channel" — never as the affected set.
+   Also: use cases come from a snapshot, so before anyone tells a business team their messages
+   stopped, say "verify against production".
 4. **`vendor` is always null right now** (the router table is not ingested) and a
    `delivery_path.phrase` is reported verbatim but **not resolved** (that column is a numeric enum
    and we do not have the name mapping). Do not infer either from repo names.

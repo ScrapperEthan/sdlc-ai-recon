@@ -51,7 +51,8 @@
 | **仓库识别在真实数据上复现:466/500=93.2%,和 RB55 完全一致,抽查 10 条 0 认错** | RB-57 |
 | 34 条未命中 = 28 条(7 个不在 460 名册里的服务)+ 4 条 sidecar + 2 条 DynamoDB —— **都是仓库名不在名册,不是解析器的问题** | RB-57 |
 | ⚠️**指标词表覆盖不足**:247/500 识别,253 空,其中 242 条来自两个没配的指标(`RunningTaskCountLowerthanDesired`、`StorageUsage`)。**已修**:补进 `config/alarm_patterns.json` | RB-57,已修 |
-| 🔴**⭐use case 链路在真实数据上基本不可用**:`message_edges.csv` 412 行/255 个不同 topic,用例快照 355 行/20 个不同 topic,**两边精确重合只有 3 个 topic,而且这 3 个都不属于任何一个告警命中的仓库**。三条真实告警端到端测试,use case 全部得到 **0**。**这不是代码 bug,是两份快照的 topic 覆盖面几乎不相交**——原因待查(命名规范不同?环境不同?用例快照本身就窄?) | RB-57,**尚未修复,下一步待查** |
+| ⭐**use case 链路在真实数据上返回 0** —— **根因已找到,是代码 bug,不是数据问题**:`incident.py` 直接调 `messages.reverse_lookup_use_cases()`,**绕过了 `usecase_catalog` 里已有的同环境保护**(那段代码的注释里写着这正是它以前的 "defect #2:UAT 覆盖率算到了过期的 dev/SCT 路由表上")。已修:先过 `route_dimension()` 闸门,**算不出来就明说算不出来,绝不返回一个会被读成"无业务影响"的 0**;并补了 `channel_upper_bound`(渠道级上界,今天就能用)| RB-57 → **已修 2026-07-29** |
+| ⚠️ 但**底层数据缺口仍在**:`message_edges.csv` 255 个 topic vs 用例路由快照 20 个 topic,精确重合仅 3 个且都不属于告警仓库。所以**精确的 repo→use case 答案目前仍然拿不到**,只是现在会**如实说"拿不到"**而不是假装是 0。真正的解法是 `tbl_use_case_router` 摄取(RB-54)| RB-57 |
 | Fail-closed 三条全部通过(`something broke`/`CMB Postman V3 failing`/空字符串 → 全部拒绝,没有猜仓库) | RB-57 |
 | 真实聊天里助手会自动调用工具,并如实声明"只是影响面不是根因"等安全声明 | RB-57 |
 | `config/alarm_patterns.json` 这个旋钮改了之后**确认生效** | RB-57 |
@@ -98,7 +99,7 @@
 | `delivery_path` 1–9 ↔ 文字路径的对照 | **先 grep 镜像**,搜不到再问业务方 | RB-56 Q3 |
 | ~~三个读日志工具的确切参数~~ | ✅**不用问了。** 改成 `config/mcp_tools.json` 的 `"?"` 占位,内网对着 `tools/list` 直接填,不用来回拍照 | 负责人建议 2026-07-29 |
 | `Route=CSL_SVC_RT_SMS` 是不是 `route` 列的取值 | 可自查 | 截图 2026-07-29 |
-| 🔴**为什么 `message_edges.csv` 和用例路由快照的 topic 几乎不相交(255 个 vs 20 个,只重合 3 个)** —— 这直接决定 `incident_impact` 能不能真的答出"影响哪些业务用例",现在答不出来 | 待查(疑似两份快照命名规范不同,或用例快照本身覆盖面窄) | RB-57 |
+| 🔴**为什么 `message_edges.csv`(255 topic)和用例路由快照(20 topic)几乎不相交** —— 代码侧的误用已修,但**数据缺口还在**:精确的 repo→use case 仍然算不出来 | 大概率要靠 `tbl_use_case_router` 摄取(RB-54)补上这一跳,而不是修 topic 命名 | RB-57 |
 | `business_category` 33/37 是什么 | 缺数据 | RB-53 |
 | 日志里到底有没有客户数据(100 行抽样没命中,**但按"有"处理**) | 待内网 | RB-55 D10 |
 | 事故结论能不能落盘、存哪、留多久 | 待合规 | RB-55 D11 |

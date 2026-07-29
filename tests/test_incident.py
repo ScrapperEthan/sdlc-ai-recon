@@ -63,6 +63,16 @@ class _Fixture(unittest.TestCase):
             json.dump({repo: {"channel": ["LETTER"], "business_line": "WPB",
                               "time_critical": False} for repo in REPOS}, handle)
 
+        # A minimal legacy use-case master. Its presence is what makes active_dataset() resolve,
+        # which is what makes the topic -> use-case route dimension AVAILABLE. Without it the
+        # route dimension is correctly reported as uncomputable (see RouteDimensionGuardTests).
+        master = os.path.join(root, "tbl_use_case.csv")
+        with open(master, "w", encoding="utf-8", newline="") as handle:
+            handle.write("use_case_id,use_case_name,source_system,status\n")
+            handle.write("C9508,Letter servicing,MDC,Y\n")
+            handle.write("C9509,Letter servicing 2,MDC,Y\n")
+            handle.write("C1000,Marketing batch,PEGA,Y\n")
+
         patterns = os.path.join(root, "alarm_patterns.json")
         with open(patterns, "w", encoding="utf-8") as handle:
             json.dump({
@@ -83,6 +93,8 @@ class _Fixture(unittest.TestCase):
             mock.patch.object(config, "USECASE_SNAPSHOT_CSV", snapshot),
             mock.patch.object(config, "REPO_TAGS_JSON", tags),
             mock.patch.object(config, "ALARM_PATTERNS_JSON", patterns),
+            mock.patch.object(config, "USECASE_MASTER_CSV", master),
+            mock.patch.object(config, "USECASE_DATASET_DIR", os.path.join(root, "no-manifest")),
         ]
         for patch in self._patches:
             patch.start()
@@ -271,3 +283,61 @@ class UseCaseEntryPointTests(_Fixture):
         out = incident.incident_impact("CMB Postman V3 failing", repos=REPOS)
         self.assertFalse(out["ok"])
         self.assertIn("use case", out["error"])
+
+
+class RouteDimensionGuardTests(_Fixture):
+    """RUNBOOK-57 regression: three real alerts each returned 0 use cases with no explanation.
+
+    Root cause was not the data — it was this module calling messages.reverse_lookup_use_cases()
+    directly, bypassing the same-environment guard usecase_catalog already had (its "defect #2":
+    UAT coverage computed off the stale dev/SCT route file). In an incident, a silent zero reads as
+    "no business impact", which is the most dangerous direction to be wrong in.
+    """
+
+    def _no_route_dimension(self):
+        """Remove the master CSV so active_dataset() -> None -> no route table."""
+        return mock.patch.object(config, "USECASE_MASTER_CSV",
+                                 os.path.join(self._tmp.name, "absent.csv"))
+
+    def test_missing_route_table_says_cannot_compute_not_zero(self):
+        with self._no_route_dimension():
+            out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
+        link = out["use_case_link"]
+        self.assertFalse(link["available"])
+        self.assertIn("NOT computable", link["reason"])
+        self.assertIn("NOT 'no use cases affected'", link["do_not_conclude"])
+
+    def test_topics_and_channels_still_work_without_the_route_table(self):
+        """The half that works must keep working — RUNBOOK-57 confirmed repo->topic->channel is
+        solid on real data even where the use-case join is not."""
+        with self._no_route_dimension():
+            out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
+        self.assertEqual(len(out["topics"]), 2)
+        self.assertEqual(out["channels"], ["LETTER"])
+
+    def test_zero_matches_with_a_present_route_table_is_still_explained(self):
+        """A repo whose topics simply are not in the route table must say so, citing the measured
+        255-vs-20 topic mismatch, rather than reporting a bare zero."""
+        out = incident.blast_radius("amet-mdc-hsbc-cm-outbound-job")   # no message edges at all
+        link = out["use_case_link"]
+        self.assertTrue(link["available"])
+        self.assertEqual(link["matched"], 0)
+        self.assertIn("NOT evidence of zero business impact", link["do_not_conclude"])
+
+    def test_a_working_join_reports_matched_without_a_scare_note(self):
+        out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
+        link = out["use_case_link"]
+        self.assertTrue(link["available"])
+        self.assertEqual(link["matched"], 3)
+        self.assertNotIn("do_not_conclude", link)
+
+    def test_channel_upper_bound_is_always_labelled_as_an_upper_bound(self):
+        out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
+        bound = out["channel_upper_bound"]
+        self.assertEqual(bound["method"], "channel_upper_bound")
+        self.assertIn("UPPER BOUND", bound["caveat"])
+        self.assertIn("at most", bound["caveat"])
+
+    def test_caveats_tell_the_reader_to_check_the_link_before_quoting_a_number(self):
+        out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
+        self.assertTrue(any("use_case_link" in c for c in out["caveats"]))

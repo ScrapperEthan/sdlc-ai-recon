@@ -19,7 +19,7 @@ Fail-closed, as everywhere else in this project: an alert whose repo cannot be i
 import json
 import re
 
-from . import config, messages, repo_tags
+from . import config, messages, repo_tags, usecase_catalog
 
 # Built-in fallbacks so a missing/rubbish config/alarm_patterns.json degrades to "fewer commentary
 # fields", never to a crash. The committed knob file is authoritative when present.
@@ -302,6 +302,42 @@ def parse_alert(text, repos=None):
     return result
 
 
+def _channel_bound(channels, per_channel_sample=5):
+    """Channel-level UPPER BOUND on business impact, straight from the UAT use-case catalog.
+
+    The precise answer is repo -> topic -> use case, but that join needs a same-environment route
+    table and RUNBOOK-57 showed the only one present is a stale dev/SCT export whose topics barely
+    intersect the code-derived message edges. Falling back to "every use case configured on this
+    repo's channel" is coarse — it over-counts, because not every SMS use case flows through every
+    SMS repo — but it is TRUE and it is an upper bound, which in an incident is the safe direction
+    to be wrong in. Reporting nothing at all would read as "no business impact", which is the
+    dangerous direction."""
+    out = {"method": "channel_upper_bound", "by_channel": [], "total_upper_bound": 0,
+           "caveat": ("UPPER BOUND, not the affected set: these are all use cases configured on "
+                      "this repo's channel(s), including ones that do not flow through this "
+                      "particular service. Say 'at most N' and never read a number here as the "
+                      "confirmed blast radius.")}
+    seen_total = 0
+    for channel in channels or []:
+        try:
+            found = usecase_catalog.search_usecases(channel=channel, limit=per_channel_sample)
+        except Exception:  # noqa: BLE001 — a missing catalog must not break incident triage
+            continue
+        if not found.get("available"):
+            continue
+        total = int(found.get("total") or 0)
+        seen_total += total
+        out["by_channel"].append({
+            "channel": channel,
+            "use_case_count": total,
+            "sample": [item.get("use_case_id") for item in (found.get("items") or [])
+                       if item.get("use_case_id")],
+        })
+    out["total_upper_bound"] = seen_total
+    out["available"] = bool(out["by_channel"])
+    return out
+
+
 def blast_radius(repo, max_topics=_MAX_TOPICS, max_use_cases=_MAX_USE_CASES_LISTED):
     """Repo -> message topics it is wired to -> the business use cases routed onto those topics.
 
@@ -324,24 +360,55 @@ def blast_radius(repo, max_topics=_MAX_TOPICS, max_use_cases=_MAX_USE_CASES_LIST
 
     topics = sorted(directions)
     listed_topics = topics[:max_topics]
+
+    # The topic -> use-case join is only meaningful when the active dataset ships its OWN route
+    # table. usecase_catalog guards this (its "defect #2": UAT coverage computed off the stale
+    # dev/SCT route file) — calling messages.reverse_lookup_use_cases directly bypassed that guard,
+    # which is how RUNBOOK-57 ended up with 0 use cases on every real alert and no explanation.
+    # Zero must never be reported as "no business impact" when the truth is "wrong table".
+    route = usecase_catalog.route_dimension()
     use_cases, seen = [], set()
     snapshot_source = None
-    for topic in listed_topics:
-        found = messages.reverse_lookup_use_cases(topic, exact=True, limit=0)
-        snapshot_source = snapshot_source or found.get("source")
-        if not found.get("available"):
-            continue
-        for item in found.get("items") or []:
-            key = (item.get("use_case"), item.get("topic"))
-            if key in seen:
+    if route.get("available"):
+        for topic in listed_topics:
+            found = messages.reverse_lookup_use_cases(topic, exact=True, limit=0)
+            snapshot_source = snapshot_source or found.get("source")
+            if not found.get("available"):
                 continue
-            seen.add(key)
-            use_cases.append(item)
+            for item in found.get("items") or []:
+                key = (item.get("use_case"), item.get("topic"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                use_cases.append(item)
 
     tags = repo_tags.for_repo(repo)
     channels = sorted({c for c in (list(tags.get("channel") or [])
                                    + list(tags.get("msg_channels") or [])
                                    + list(tags.get("serves_channels") or [])) if c})
+
+    # Why the precise use-case answer is or is not available — never a bare zero.
+    if not route.get("available"):
+        use_case_link = {
+            "method": "topic", "available": False,
+            "reason": (f"no same-environment use-case route table in the active dataset "
+                       f"({route.get('reason') or 'unavailable'}). The precise repo -> topic -> "
+                       f"use-case join is therefore NOT computable right now."),
+            "do_not_conclude": ("This is 'cannot compute', NOT 'no use cases affected'. Do not "
+                                "tell anyone this incident has no business impact on the strength "
+                                "of this field."),
+        }
+    elif not use_cases:
+        use_case_link = {
+            "method": "topic", "available": True, "matched": 0,
+            "reason": ("the route table is present but none of this repo's topics appear in it. "
+                       "RUNBOOK-57 measured only 3 topics in common between the code-derived "
+                       "message edges (255 topics) and the route snapshot (20 topics), so a zero "
+                       "here usually means the two snapshots do not cover the same ground."),
+            "do_not_conclude": "Zero matches is NOT evidence of zero business impact.",
+        }
+    else:
+        use_case_link = {"method": "topic", "available": True, "matched": len(use_cases)}
 
     return {
         "repo": repo,
@@ -349,9 +416,12 @@ def blast_radius(repo, max_topics=_MAX_TOPICS, max_use_cases=_MAX_USE_CASES_LIST
         "topics": [{"topic": topic, "direction": sorted(directions[topic])} for topic in listed_topics],
         "topic_count": len(topics),
         "topics_truncated": len(topics) > len(listed_topics),
+        "use_case_link": use_case_link,
         "use_case_total": len(use_cases),
         "use_cases": use_cases[:max_use_cases],
         "use_cases_truncated": len(use_cases) > max_use_cases,
+        # Coarse but real, and available today — see _channel_bound.
+        "channel_upper_bound": _channel_bound(channels),
         "channels": channels,
         "business_line": tags.get("business_line") or "",
         "time_critical": bool(tags.get("time_critical")),
@@ -361,10 +431,12 @@ def blast_radius(repo, max_topics=_MAX_TOPICS, max_use_cases=_MAX_USE_CASES_LIST
                         "authoritative vendor column) is not ingested. Do NOT infer a vendor from "
                         "repo names in an incident answer."),
         "caveats": [
-            "use cases come from the dev/SCT routing snapshot — indicative, verify against "
-            "production before telling anyone their traffic stopped.",
+            "use cases come from the routing snapshot — indicative, verify against production "
+            "before telling anyone their traffic stopped.",
             "topics come from the message-edge snapshot; a repo with no edges yields no use cases, "
             "which means 'not visible in this snapshot', NOT 'affects nobody'.",
+            "read `use_case_link` before quoting any use-case number: it says whether the precise "
+            "join was computable at all. A zero there is never proof of no impact.",
         ],
     }
 

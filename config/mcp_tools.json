@@ -159,9 +159,27 @@
   "never_expose": {
     "_note": [
       "永远不允许接入的工具 —— 会产生真实业务动作。",
-      "这个清单是【硬性】的:即使有人把它写进 operations,注册表也会拒绝。"
+      "这个清单是【硬性】的:即使有人把它写进 operations,注册表也会拒绝。",
+      "",
+      "⚠️ 模式要【精确】,不要图省事写 `*resend*`:",
+      "  2026-07-29 的截图显示 `check_sms_resend_need` / `check_htcl_sms_resend_need` 是",
+      "  【只读的判断】工具(返回 resend / do_not_resend,自己不发送任何东西)。",
+      "  `*resend*` 会把它们一起封掉,以后想用的时候会浪费半天去查为什么调不动。",
+      "  所以按【动作动词】封,不按关键词封。"
     ],
     "tools": ["open_portal_login"],
-    "patterns": ["*resend*", "*submit*", "*send*", "*delete*", "*update*", "*create*"]
+    "patterns": [
+      "do_*", "execute_*", "perform_*", "trigger_*",
+      "*_resend", "resend_*", "*_submit", "submit_*", "*_send", "send_*",
+      "delete_*", "remove_*", "update_*", "create_*", "login*", "*_login"
+    ],
+    "read_only_but_not_exposed": {
+      "_note": [
+        "这些是【只读】的,技术上可以接,但我们【当前选择不接】(见 RUNBOOK-55 的决定:",
+        "重发判断是 Portal MCP 的透传,我们的代码图帮不上忙,且是唯一有真实业务后果的一条)。",
+        "以后如果决定要接,把工具加进 operations 即可 —— deny 列表不会挡住它们。"
+      ],
+      "tools": ["check_sms_resend_need", "check_htcl_sms_resend_need", "check_email_resend_need"]
+    }
   }
 }

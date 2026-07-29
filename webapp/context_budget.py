@@ -168,10 +168,20 @@ class Budget:
         """How much this one tool result may use: what's left, shared with the calls still to come.
 
         An early call that under-spends leaves more for later ones, and a greedy one cannot eat the
-        whole turn — the old per-call cap allowed exactly that, eight times over."""
+        whole turn — the old per-call cap allowed exactly that, eight times over.
+
+        ``lane_left`` is a HARD ceiling — never returned above it, even when that leaves less than
+        ``_MIN_TOOL_TOKENS``. An earlier version wrapped the whole expression in one more
+        ``max(_MIN_TOOL_TOKENS, ...)``, which meant a nearly-exhausted lane (say 30 tokens left)
+        still handed back 200 — a real, if small, hole in the "the total never exceeds the budget"
+        guarantee. Once the lane is genuinely spent, callers get whatever is left, even zero;
+        ``shrink_tool_result`` already degrades to a self-describing empty-ish preview rather than
+        failing when handed a tiny allowance."""
         lane_left = self.remaining("tools")
+        if lane_left <= 0:
+            return 0
         share = lane_left // max(1, int(calls_remaining))
-        return max(_MIN_TOOL_TOKENS, min(lane_left, max(share, _MIN_TOOL_TOKENS)))
+        return min(lane_left, max(share, _MIN_TOOL_TOKENS))
 
     def fit_tool_result(self, result, calls_remaining=1):
         text = shrink_tool_result(result, max_tokens=self.tool_allowance(calls_remaining))

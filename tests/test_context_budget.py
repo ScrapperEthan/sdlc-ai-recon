@@ -328,3 +328,42 @@ class TokenEstimateTests(unittest.TestCase):
         self.assertEqual(context_budget.estimate_tokens(""), 0)
         self.assertEqual(context_budget.estimate_tokens(None), 0)
         self.assertGreater(context_budget.estimate_tokens(12345), 0)
+
+
+class ToolAllowanceCeilingTests(unittest.TestCase):
+    """Regression for the bug the owner's question surfaced: tool_allowance used to return
+    _MIN_TOOL_TOKENS even when the lane had far less than that left, letting the cumulative spend
+    quietly overshoot the budget by up to _MIN_TOOL_TOKENS per remaining call."""
+
+    def _budget(self, total=100000):
+        budget = context_budget.Budget(total=total, output_reserve=4096)
+        budget.reserve_system("short prompt")
+        return budget
+
+    def test_allowance_never_exceeds_what_is_actually_left_in_the_lane(self):
+        budget = self._budget()
+        # Burn the lane down to a sliver well under _MIN_TOOL_TOKENS.
+        budget.charge("tools", "z" * (budget.lanes["tools"] * 4 - 40))
+        sliver = budget.remaining("tools")
+        self.assertLess(sliver, context_budget._MIN_TOOL_TOKENS)
+        self.assertLessEqual(budget.tool_allowance(calls_remaining=3), sliver)
+
+    def test_exhausted_lane_returns_zero_not_the_old_floor(self):
+        budget = self._budget()
+        budget.charge("tools", "z" * (budget.lanes["tools"] * 4))
+        self.assertEqual(budget.remaining("tools"), 0)
+        self.assertEqual(budget.tool_allowance(calls_remaining=5), 0)
+
+    def test_eight_greedy_calls_near_exhaustion_do_not_overshoot_the_lane(self):
+        """The exact scenario: MAX_TOOL_ITERS=8 calls, each trying to return something huge, with
+        the lane already almost spent before the last few calls run."""
+        budget = self._budget()
+        fat = {"rows": [{"pad": "p" * 900} for _ in range(6000)]}
+        budget.charge("tools", "z" * int(budget.lanes["tools"] * 0.97))   # pre-exhaust the lane
+        for call in range(8):
+            budget.fit_tool_result(fat, calls_remaining=8 - call)
+        # Old buggy code could overshoot by up to _MIN_TOOL_TOKENS per remaining call (~1600
+        # tokens here). Fixed code should track the lane almost exactly, plus only the small fixed
+        # envelope overhead each fallback preview costs.
+        overshoot = budget.spent["tools"] - budget.lanes["tools"]
+        self.assertLess(overshoot, 400, f"tools lane overshot by {overshoot} tokens")

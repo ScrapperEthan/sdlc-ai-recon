@@ -39,7 +39,9 @@
       "MemoryUsage",
       "FreeableMemoryTooLow",
       "RequestsExceedingThroughput",
-      "cpu-utilization-high"
+      "cpu-utilization-high",
+      "RunningTaskCountLowerthanDesired",
+      "StorageUsage"
     ]
   },
 

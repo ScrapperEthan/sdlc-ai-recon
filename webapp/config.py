@@ -110,16 +110,39 @@ SYSTEM_PROMPT = os.environ.get(
     "SDLC_SYSTEM_PROMPT", os.path.join(os.getcwd(), "prompts", "qa-system-prompt.md")
 )
 MAX_TOOL_ITERS = int(os.environ.get("SDLC_MAX_TOOL_ITERS", "8"))
-TOOL_RESULT_CAP = int(os.environ.get("SDLC_TOOL_RESULT_CAP", "12000"))
-# Per-STRING cap inside a tool result (webapp/context_budget.py). Bounds the one shape the old byte
-# truncation mangled worst -- a single enormous string, i.e. exactly what a log excerpt is -- while
-# leaving the surrounding JSON intact and marking what was dropped.
+TOOL_RESULT_CAP = int(os.environ.get("SDLC_TOOL_RESULT_CAP", "12000"))  # legacy char cap, unused
+
+# ---- context budget (webapp/context_budget.py) ----
+# ONE budget per turn, divided into lanes. Independent per-thing caps cannot prevent running out of
+# context: their worst cases just add up and nothing watches the total. Everything below is
+# estimated (no tokenizer offline) and deliberately pessimistic.
+#
+# Sized for the deployment's model. 128k is a safe floor for the Copilot models in use; raise it
+# when the model is known to be larger, lower it if requests start getting rejected for length.
+CONTEXT_TOKENS = int(os.environ.get("SDLC_CONTEXT_TOKENS", "128000"))
+# Kept empty so the model has room to answer. Matches the output cap it is given.
+OUTPUT_RESERVE_TOKENS = int(os.environ.get("SDLC_OUTPUT_RESERVE", os.environ.get("LLM_MAX_TOKENS", "4096")))
+# Estimates run high on purpose: over-estimating costs a slightly shorter answer, under-estimating
+# costs a failed request.
+TOKEN_SAFETY_FACTOR = float(os.environ.get("SDLC_TOKEN_SAFETY", "1.15"))
+# How the working budget (total - system prompt - output reserve) is divided. `compaction` is
+# RESERVED, not yet filled: summarizing dropped turns needs an extra model call, so it is deferred,
+# but the lane exists now so adding it later fills a hole instead of re-plumbing the budget.
+# `subagent` is for the phase-2 incident investigator's evidence packet.
+CONTEXT_LANE_SHARES = {
+    "history": float(os.environ.get("SDLC_LANE_HISTORY", "0.25")),
+    "compaction": float(os.environ.get("SDLC_LANE_COMPACTION", "0.05")),
+    "tools": float(os.environ.get("SDLC_LANE_TOOLS", "0.50")),
+    "subagent": float(os.environ.get("SDLC_LANE_SUBAGENT", "0.20")),
+}
+# History is bounded twice: by tokens (protects the request) and by rounds (protects answer
+# quality -- forty turns of context makes the model worse at the question actually being asked,
+# even when it all fits). 0 disables the round cap.
+HISTORY_MAX_ROUNDS = int(os.environ.get("SDLC_HISTORY_MAX_ROUNDS", "10"))
+# Per-STRING cap inside a tool result, in characters. Bounds the one shape a byte truncation
+# mangled worst -- a single enormous string, i.e. exactly what a log excerpt is -- while leaving
+# the surrounding JSON intact and marking what was dropped.
 TOOL_STRING_CAP = int(os.environ.get("SDLC_TOOL_STRING_CAP", "4000"))
-# Conversation-history budget, in characters, for ONE model call. Deliberately generous: an ordinary
-# session never reaches it, so this only bites the runaway case that used to fail outright. Trimming
-# affects what is SENT to the model, never what is stored -- chat_sessions.json keeps the full
-# history. Set to 0 to disable (restores the old unbounded behaviour exactly).
-HISTORY_CHAR_BUDGET = int(os.environ.get("SDLC_HISTORY_CHAR_BUDGET", "120000"))
 SESSION_STORE = os.environ.get(
     "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
 )

@@ -126,11 +126,16 @@ def answer(question, history=None):
 
 def answer_events(question, history=None):
     """Yield chat protocol events; finish with a terminal done event."""
-    # The store keeps the FULL conversation; this only decides what fits in THIS model call. The
-    # budget is generous enough that an ordinary session is untouched (fit_history returns the list
-    # unchanged and dropped == 0), so behaviour is identical until a session actually runs away.
-    kept_history, dropped = context_budget.fit_history(history or [])
-    messages = [{"role": "system", "content": _system_prompt()}]
+    # ONE budget for the whole turn, divided into lanes (webapp/context_budget.py). The system
+    # prompt and the reserved output come off the top first; history and tool results then spend
+    # against their own lanes, so a greedy tool result can no longer quietly eat the room the
+    # answer needs. The store keeps the FULL conversation either way — this only decides what is
+    # SENT this turn.
+    system_prompt = _system_prompt()
+    budget = context_budget.Budget()
+    budget.reserve_system(system_prompt)
+    kept_history, dropped = budget.fit_history(history or [])
+    messages = [{"role": "system", "content": system_prompt}]
     if dropped:
         messages.append({"role": "system", "content": (
             f"[context] {dropped} earlier turn(s) of this conversation were dropped to fit the "
@@ -142,7 +147,7 @@ def answer_events(question, history=None):
     trace = []
     emitted_views = []
     usage = llm_usage.empty_usage()
-    for _ in range(config.MAX_TOOL_ITERS):
+    for iteration in range(config.MAX_TOOL_ITERS):
         message = None
         streamed = False
         for kind, payload in llm.chat_stream(messages, tools.TOOLS):
@@ -171,10 +176,11 @@ def answer_events(question, history=None):
                 "usage": usage,
                 "citations": citations.verify(answer_text),
                 "views": emitted_views,
+                "context": budget.report(),
             }
             return
 
-        for call in calls:
+        for position, call in enumerate(calls):
             fn = call.get("function", {})
             name = fn.get("name", "")
             try:
@@ -201,7 +207,14 @@ def answer_events(question, history=None):
                 "tool_call_id": call.get("id", ""),
                 # Structure-aware, not a byte slice: a cut mid-JSON used to hand the model a
                 # fragment it could not recognise as incomplete. See webapp/context_budget.py.
-                "content": context_budget.shrink_tool_result(result),
+                # This call's slice of the SHARED tools lane, not a fixed per-call cap: what is
+                # left, divided by the calls still to come (the rest of this batch, plus roughly
+                # one per remaining iteration). An early greedy result therefore cannot starve
+                # the rest of the turn — which is exactly what the old flat cap allowed, 8x over.
+                "content": budget.fit_tool_result(
+                    result,
+                    calls_remaining=(len(calls) - position)
+                    + (config.MAX_TOOL_ITERS - iteration - 1)),
             })
 
     # tool budget exhausted — force a final answer
@@ -227,4 +240,5 @@ def answer_events(question, history=None):
         "usage": usage,
         "citations": citations.verify(answer_text),
         "views": emitted_views,
+        "context": budget.report(),
     }

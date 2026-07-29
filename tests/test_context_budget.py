@@ -28,20 +28,20 @@ class ShrinkToolResultTests(unittest.TestCase):
             [{"a": "b" * 900} for _ in range(300)],
             {"nested": {"deep": {"rows": list(range(50000))}}},
         ):
-            text = context_budget.shrink_tool_result(result, cap=2000)
+            text = context_budget.shrink_tool_result(result, max_tokens=600)
             json.loads(text)                       # must not raise
-            self.assertLessEqual(len(text), 2000)
+            self.assertLessEqual(context_budget.estimate_tokens(text), 600)
 
     def test_long_string_is_capped_with_an_explicit_marker(self):
         out = json.loads(context_budget.shrink_tool_result(
-            {"ok": True, "log": "x" * 50000}, cap=4000, string_cap=500))
+            {"ok": True, "log": "x" * 50000}, max_tokens=1200, string_cap=500))
         self.assertTrue(out["log"].endswith("chars total]"))
         self.assertIn("50000", out["log"])
         self.assertTrue(any(n["kind"] == "string" for n in out["_truncated"]))
 
     def test_long_list_is_shortened_and_the_loss_is_recorded(self):
         out = json.loads(context_budget.shrink_tool_result(
-            {"ok": True, "use_cases": [{"id": f"C{i}"} for i in range(2000)]}, cap=3000))
+            {"ok": True, "use_cases": [{"id": f"C{i}"} for i in range(2000)]}, max_tokens=900))
         self.assertLess(len(out["use_cases"]), 2000)
         note = next(n for n in out["_truncated"] if n["kind"] == "list")
         self.assertEqual(note["total"], 2000)
@@ -49,7 +49,7 @@ class ShrinkToolResultTests(unittest.TestCase):
         self.assertIn("use_cases", note["path"])
 
     def test_indivisible_payload_falls_back_to_a_self_describing_envelope(self):
-        out = json.loads(context_budget.shrink_tool_result({"blob": "q" * 200000}, cap=1200,
+        out = json.loads(context_budget.shrink_tool_result({"blob": "q" * 200000}, max_tokens=400,
                                                             string_cap=190000))
         self.assertTrue(out["_truncated"])
         self.assertIn("PREVIEW", out["_note"])
@@ -61,16 +61,16 @@ class ShrinkToolResultTests(unittest.TestCase):
         naive = json.dumps(result, ensure_ascii=False)[:1500]
         with self.assertRaises(json.JSONDecodeError):
             json.loads(naive)
-        json.loads(context_budget.shrink_tool_result(result, cap=1500))
+        json.loads(context_budget.shrink_tool_result(result, max_tokens=400))
 
     def test_top_level_list_is_wrapped_rather_than_losing_the_truncation_note(self):
         out = json.loads(context_budget.shrink_tool_result(
-            [{"id": i, "pad": "p" * 200} for i in range(500)], cap=2000))
+            [{"id": i, "pad": "p" * 200} for i in range(500)], max_tokens=600))
         self.assertIn("_result", out)
         self.assertTrue(out["_truncated"])
 
     def test_unserializable_result_does_not_raise(self):
-        out = json.loads(context_budget.shrink_tool_result({"fn": object()}, cap=1000))
+        out = json.loads(context_budget.shrink_tool_result({"fn": object()}, max_tokens=300))
         self.assertTrue(out["_truncated"])
 
 
@@ -90,14 +90,15 @@ class FitHistoryTests(unittest.TestCase):
 
     def test_oldest_turns_go_first_and_the_recent_ones_survive(self):
         history = self._history(40, size=200)
-        kept, dropped = context_budget.fit_history(history, budget=3000)
+        kept, dropped = context_budget.fit_history(history, budget=800)   # tokens, not chars
         self.assertGreater(dropped, 0)
         self.assertEqual(kept[-1], history[-1])
-        self.assertLessEqual(sum(len(m["content"]) + 32 for m in kept), 3000)
+        self.assertLessEqual(
+            sum(context_budget.estimate_tokens(m["content"]) + 8 for m in kept), 800)
 
     def test_the_opening_question_is_always_kept(self):
         history = self._history(40, size=200)
-        kept, _ = context_budget.fit_history(history, budget=3000)
+        kept, _ = context_budget.fit_history(history, budget=800)
         self.assertEqual(kept[0], history[0])
 
     def test_zero_budget_restores_the_old_unbounded_behaviour(self):
@@ -134,7 +135,7 @@ class AgentWiringTests(unittest.TestCase):
     def test_runaway_conversation_is_trimmed_and_the_model_is_told(self):
         history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "z" * 4000}
                    for i in range(200)]
-        with mock.patch.object(config, "HISTORY_CHAR_BUDGET", 20000):
+        with mock.patch.object(config, "CONTEXT_TOKENS", 20000):
             sent = self._run(history)
         notice = [m for m in sent if m["role"] == "system" and "[context]" in (m["content"] or "")]
         self.assertEqual(len(notice), 1)
@@ -220,3 +221,110 @@ class StoredFormatUnchangedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetLaneTests(unittest.TestCase):
+    """The point of a budget: the lanes are carved out of ONE total, and the total holds.
+
+    Independent caps could not do this — a history cap and a per-tool-call cap know nothing about
+    each other, so their worst cases simply added up with nothing watching the sum.
+    """
+
+    def _budget(self, total=100000, system="short prompt"):
+        budget = context_budget.Budget(total=total, output_reserve=4096)
+        budget.reserve_system(system)
+        return budget
+
+    def test_lanes_never_exceed_the_working_budget(self):
+        budget = self._budget()
+        self.assertLessEqual(sum(budget.lanes.values()), budget.working)
+
+    def test_system_prompt_and_output_reserve_come_off_the_top(self):
+        budget = context_budget.Budget(total=100000, output_reserve=4096)
+        budget.reserve_system("x" * 36000)                     # ~10k tokens
+        self.assertGreater(budget.system_tokens, 9000)
+        self.assertEqual(budget.working,
+                         100000 - budget.system_tokens - 4096)
+        self.assertLess(budget.working, 100000 - 4096)
+
+    def test_the_tools_lane_is_cumulative_not_per_call(self):
+        """Eight greedy calls used to cost 8x the per-call cap. Now they share one lane."""
+        budget = self._budget()
+        lane = budget.lanes["tools"]
+        fat = {"rows": [{"i": i, "pad": "p" * 400} for i in range(4000)]}
+        for call in range(8):
+            budget.fit_tool_result(fat, calls_remaining=8 - call)
+        self.assertLessEqual(budget.spent["tools"], lane * 1.1)   # 10% slack for the min floor
+
+    def test_allowance_shrinks_as_the_lane_is_consumed(self):
+        budget = self._budget()
+        first = budget.tool_allowance(calls_remaining=4)
+        budget.charge("tools", "z" * (budget.lanes["tools"] * 3))  # burn most of the lane
+        self.assertLess(budget.tool_allowance(calls_remaining=4), first)
+
+    def test_a_greedy_first_call_cannot_starve_the_rest_of_the_turn(self):
+        budget = self._budget()
+        huge = {"rows": [{"pad": "p" * 800} for _ in range(9000)]}
+        budget.fit_tool_result(huge, calls_remaining=8)
+        self.assertGreater(budget.remaining("tools"), budget.lanes["tools"] * 0.5)
+
+    def test_history_is_bounded_by_rounds_as_well_as_tokens(self):
+        budget = self._budget()
+        history = []
+        for i in range(40):
+            history.append({"role": "user", "content": f"q{i}"})
+            history.append({"role": "assistant", "content": f"a{i}"})
+        kept, dropped = budget.fit_history(history, max_rounds=10)
+        self.assertLessEqual(len(kept), 10 * 2 + 1)     # +1 for the retained opening question
+        self.assertGreater(dropped, 0)
+        self.assertEqual(kept[-1], history[-1])
+
+    def test_subagent_lane_is_reserved_even_though_nothing_fills_it_yet(self):
+        budget = self._budget()
+        self.assertGreater(budget.lanes["subagent"], 0)
+        self.assertEqual(budget.spent["subagent"], 0)
+
+    def test_compaction_lane_is_reserved_for_the_summarizer_we_have_not_built(self):
+        budget = self._budget()
+        self.assertGreater(budget.lanes["compaction"], 0)
+
+    def test_report_says_the_numbers_are_estimates(self):
+        report = self._budget().report()
+        self.assertTrue(report["estimated"])
+        self.assertIn("ESTIMATES", report["note"])
+        self.assertEqual(set(report["lanes"]), set(config.CONTEXT_LANE_SHARES))
+
+    def test_whole_turn_stays_under_the_total(self):
+        """The end-to-end guarantee: history + every tool result + the prompt still leaves room
+        for the reserved output."""
+        budget = self._budget(total=60000)
+        history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "文字" * 3000}
+                   for i in range(60)]
+        kept, _ = budget.fit_history(history)
+        fat = {"rows": [{"pad": "p" * 500} for _ in range(5000)]}
+        for call in range(8):
+            budget.fit_tool_result(fat, calls_remaining=8 - call)
+        used = budget.system_tokens + sum(budget.spent.values())
+        self.assertLessEqual(used, budget.total - budget.output_reserve + 500)
+        self.assertTrue(kept)
+
+
+class TokenEstimateTests(unittest.TestCase):
+    def test_cjk_costs_about_one_token_per_character(self):
+        tokens = context_budget.estimate_tokens("消息平台事故根因分析" * 10)
+        self.assertGreater(tokens, 90)
+        self.assertLess(tokens, 140)
+
+    def test_latin_costs_far_fewer_tokens_per_character(self):
+        latin = context_budget.estimate_tokens("a" * 100)
+        cjk = context_budget.estimate_tokens("文" * 100)
+        self.assertLess(latin, cjk / 2)
+
+    def test_estimate_errs_high_not_low(self):
+        """Under-estimating costs a failed request; over-estimating costs a shorter answer."""
+        self.assertGreater(context_budget.estimate_tokens("a" * 360), 360 / 3.6)
+
+    def test_empty_and_non_string_are_safe(self):
+        self.assertEqual(context_budget.estimate_tokens(""), 0)
+        self.assertEqual(context_budget.estimate_tokens(None), 0)
+        self.assertGreater(context_budget.estimate_tokens(12345), 0)

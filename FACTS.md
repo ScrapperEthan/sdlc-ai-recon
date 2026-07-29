@@ -59,6 +59,20 @@
 | 那 9 个文字 Path 名(`WPB Servicing Realtime High Risk Path` 等)是 **9 个,不是 8 个**。9 个名字 vs 1–9 枚举(7 在 UAT 快照里没用例)—— **假设,未证实** | RB-56,我数的 |
 | 告警分布那份 Confluence 是**同事个人整理的,可能不全**。"338 条 / 53%" **不能用来做决策** | 负责人 2026-07-28 |
 | 那 9 份 AIOps `SKILL.md` **在我们镜像里 0/9** —— 镜像版本停在 2026-04~05,它们不在我们镜像的仓库里 | RB-55 |
+| **`hk1` 和 `hkp3` 都是生产**,但放的日志不一样。所以默认**两个都查**,每条证据标明来自哪个 source(具体哪类日志在哪边,待内网查实) | 负责人 2026-07-29 |
+
+### 2026-07-29 的 Task_Scope 截图读到的(照片,标注为"读到"而非"实测")
+
+| 事实 | 为什么重要 |
+| --- | --- |
+| **最大的告警家族(General SHP API Error)走的是 Portal MCP,不是 CloudWatch,也不是 LogDream。** 流程 = `trackId` → MDC Portal → `check_sms_resend_need` → resend / do_not_resend | ⚠️**Portal (8094) 现在是 404**。所以"Portal 挂了不影响我们"这句话**只在我们不碰最大家族时成立**。要覆盖它,得先有人修 Portal |
+| 排在前三的告警家族(338 / 78 / 69)**全部**都是重发判断,不是根因分析 | 同事那套 AIOps 的主线就是重发判断。我们**不重建**它,我们做他们答不了的**聚合**层(78 条告警涉及哪些用例/渠道/要不要通知业务方) |
+| ⭐**他们的输出里带 useCase ID** —— 读到 `[M2101] FPS Inward credit Success`、`[M9114] Add Registered Payee Notification`、`[N0278] DSP timecritical sms & email` | **这是 SHP 家族的入口。** 那类告警文本里没有仓库名,但有 useCase ID → 直接接进我们的用例目录 → 渠道/业务含义/该通知谁。已实现:`incident_impact` 现在也认 useCase ID |
+| 输出里的 `Route=CSL_SVC_RT_SMS` / `Route=CM_HTTP_SMS` | 长得像 `route` 列的取值 —— 可能是 RB-54 问题 1 那个连接键的实物。**待验证** |
+| 输出里的 `Template=LST2.GEN.RBWM_FPS_ICT_SUC` / `Template=DSP` | 模板名,我们目前没有这一维 |
+| 厂商以文字出现:`CSL outbound API` / `CM gateway` / `HTCL outbound proxy` | 对应我们白名单里的 csl / cm / htcl(→3hk) |
+| 决策枚举实物确认为 `resend` / `do_not_resend` | 和我们设计里的三值(含 `unknown`)一致 |
+| remark 列里有 SQL 兜底:`SELECT * FROM schema01.tbl_csl_sms_segment WHERE mdc_tracking_id=... AND created_day=...` | 说明除 Portal 外还有一条 DB 校验路径 |
 
 ---
 
@@ -66,10 +80,12 @@
 
 | 问题 | 卡在哪 | 出处 |
 | --- | --- | --- |
-| **`hk1` 和 `hkp3` 分别是什么?哪个是生产?** 查错 source = 一条日志都查不到,然后模型会自信地说"未发现异常" | 待内网 | RB-56 Q1 |
-| **`MDC Alert - General SHP API Error` 是谁发的?什么格式?** 它是最大的告警家族,我们连来源都不知道 | 待内网 | RB-56 Q2 |
+| ~~`hk1` / `hkp3` 哪个是生产~~ | ✅**已答:两个都是生产,日志不同。** 剩下的小问题:哪类日志在哪边 | 负责人 2026-07-29 |
+| ~~`MDC Alert - General SHP API Error` 是谁发的~~ | ✅**已答(照片):走 Portal MCP + `check_sms_resend_need`。** 剩下的:告警原始文本长什么样、谁投递给人 | 截图 2026-07-29 |
+| **Portal MCP (8094) 什么时候能修好** —— 现在挡着最大的告警家族 | 待对方团队 | RB-55 A1 |
 | `delivery_path` 1–9 ↔ 文字路径的对照 | **先 grep 镜像**,搜不到再问业务方 | RB-56 Q3 |
-| 三个读日志工具的确切参数(时间格式?有没有时区参数?返回上限?) | 待内网 | RB-56 Q5 |
+| ~~三个读日志工具的确切参数~~ | ✅**不用问了。** 改成 `config/mcp_tools.json` 的 `"?"` 占位,内网对着 `tools/list` 直接填,不用来回拍照 | 负责人建议 2026-07-29 |
+| `Route=CSL_SVC_RT_SMS` 是不是 `route` 列的取值 | 可自查 | 截图 2026-07-29 |
 | `business_category` 33/37 是什么 | 缺数据 | RB-53 |
 | 日志里到底有没有客户数据(100 行抽样没命中,**但按"有"处理**) | 待内网 | RB-55 D10 |
 | 事故结论能不能落盘、存哪、留多久 | 待合规 | RB-55 D11 |

@@ -205,7 +205,7 @@ class IncidentImpactTests(_Fixture):
         out = incident.incident_impact(ALARM_ECS, repos=REPOS)
         self.assertTrue(out["ok"])
         self.assertEqual(out["totals"]["repos"], 1)
-        self.assertEqual(out["totals"]["use_cases"], 3)
+        self.assertEqual(out["totals"]["use_cases_from_repos"], 3)
         self.assertEqual(out["affected"][0]["identified_via"], "confirmed")
 
     def test_unidentifiable_alert_fails_closed_with_a_next_step(self):
@@ -221,3 +221,53 @@ class IncidentImpactTests(_Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The real "MDC Alert - General SHP API Error" shape, read off the 2026-07-29 Task_Scope
+# screenshots: no repo name anywhere, but the colleagues' analysis output quotes the use case.
+ALERT_SHP_USECASE = (
+    "Alert classification: MDC Alert - General SHP API Error, SMS, CSL outbound API; "
+    "Payload history: payloadUuid=C6S03401259, useCase=[M2101] FPS Inward credit Success; "
+    "Route=CSL_SVC_RT_SMS")
+
+
+class UseCaseEntryPointTests(_Fixture):
+    """The second way in: the biggest alert family names no repo, only a use case."""
+
+    def test_use_case_id_in_the_alert_is_verified_against_the_snapshot(self):
+        parsed = incident.parse_alert("useCase=[C9508] something", repos=REPOS)
+        self.assertEqual([u["use_case"] for u in parsed["use_cases"]], ["C9508"])
+        self.assertEqual(parsed["use_cases"][0]["topics"], [TOPIC_A])
+        self.assertTrue(parsed["identified"])
+
+    def test_an_id_shaped_string_that_is_not_a_real_use_case_is_refused(self):
+        parsed = incident.parse_alert("error code A1234 on the gateway", repos=REPOS)
+        self.assertEqual(parsed["use_cases"], [])
+        self.assertFalse(parsed["identified"])
+        self.assertTrue(any("not in the routing snapshot" in n for n in parsed["notes"]))
+
+    def test_repo_less_alert_still_produces_impact_via_the_use_case(self):
+        parsed = incident.parse_alert(ALERT_SHP_USECASE.replace("M2101", "C9508"), repos=REPOS)
+        self.assertEqual(parsed["repos"], [])          # no repo id anywhere in the text
+        self.assertTrue(parsed["identified"])          # but still identified, via the use case
+
+    def test_use_case_route_reports_repos_as_candidate_not_confirmed(self):
+        out = incident.blast_radius_for_use_case("C9508", [TOPIC_A])
+        repos = {r["repo"]: r for r in out["repos"]}
+        self.assertIn("mc-hk-hase-batch-letter-postman-job", repos)
+        self.assertIn("mc-hk-hase-pfp-outbound-api", repos)
+        for entry in repos.values():
+            self.assertEqual(entry["confidence"], "candidate")
+        self.assertTrue(any("not 'this repo failed'" in c for c in out["caveats"]))
+
+    def test_end_to_end_counts_both_entry_points_separately(self):
+        out = incident.incident_impact(
+            ALARM_ECS + " useCase=[C9508]", repos=REPOS)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["totals"]["repos"], 1)
+        self.assertEqual(out["totals"]["use_cases_named_in_alert"], 1)
+
+    def test_still_fails_closed_when_neither_route_finds_anything(self):
+        out = incident.incident_impact("CMB Postman V3 failing", repos=REPOS)
+        self.assertFalse(out["ok"])
+        self.assertIn("use case", out["error"])

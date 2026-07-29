@@ -1,0 +1,167 @@
+{
+  "_README": [
+    "我们的抽象操作 ↔ 同事三套 MCP 的真实工具名/参数名 —— 内网 Codex 维护。",
+    "",
+    "【为什么是这样分的】",
+    "  外部这边定义『我们想做什么』(找日志文件、读一段日志、查一个告警的历史…),",
+    "  这个文件负责说『在他们那边这叫什么、参数叫什么名』。",
+    "  这样他们那边改了工具名或参数名,**改这个文件就行,不用改代码、不用等外部开发**。",
+    "  RUNBOOK-49/50/51 三次线上修复改的全是同一个硬编码词表 —— 同样的错不犯第二次。",
+    "",
+    "【怎么填】在盒子上对每个端点调一次 MCP `tools/list`,把真实的工具名和参数名填进来。",
+    "  - `tool`  = 他们那边的工具名(必须和 tools/list 返回的一字不差)",
+    "  - `args`  = {我们的字段名: 他们的参数名}。**左边不要改**(代码按左边写死),只改右边。",
+    "  - `const` = 每次调用都要带的固定参数(比如某个 source 名),没有就留空 {}",
+    "  - 值写 \"?\" 表示【还没填】—— 没填完的操作助手会明确说『这个还没接通』,",
+    "    **绝不会拿错参数去瞎调**。所以填一个能用一个,不用一次填完。",
+    "",
+    "【安全】只有这里声明过的工具才允许被调用(白名单)。",
+    "  `tools/list` 只用来发现和核对,**新出现的工具不会自动获得调用权限**。",
+    "  会产生真实动作的工具(如 open_portal_login、任何 resend/执行类)**永远不要加进来**。",
+    "",
+    "【地址和凭证不在这里】走环境变量(见下面每个 server 的 url_env),真实地址永不进 git。"
+  ],
+
+  "servers": {
+    "logdream": {
+      "url_env": "SDLC_MCP_LOGDREAM_URL",
+      "transport": "sse",
+      "enabled": false,
+      "_note": "RUNBOOK-55 实测:旧式 SSE,6 个工具,客户端不需要 token。",
+      "sources": {
+        "_note": [
+          "RUNBOOK-56 问题 1 已答:hk1 和 hkp3 【都是生产】,但放的日志不一样。",
+          "所以默认【两个都查】,并且每条证据都要标明来自哪一个。",
+          "『哪类日志在哪个 source』请内网 Codex 查实后写在下面 description 里。"
+        ],
+        "hk1":  {"query_by_default": true, "description": "?"},
+        "hkp3": {"query_by_default": true, "description": "?"}
+      },
+      "log_files": {
+        "_note": "RUNBOOK-55 实测。注意真名是 otx_trace.log,不是同事 SKILL 里写的 trace.log。",
+        "trace": "otx_trace.log",
+        "exception": "exception.log",
+        "other": ["sftp.log"],
+        "history_suffix": "_YYYYMMDD",
+        "path_pattern": "/apps/<app>/log"
+      }
+    },
+    "cloudwatch": {
+      "url_env": "SDLC_MCP_CLOUDWATCH_URL",
+      "transport": "streamable_http",
+      "enabled": false,
+      "_note": "RUNBOOK-55 实测:Streamable HTTP,30 个工具,客户端不需要 token。"
+    },
+    "portal": {
+      "url_env": "SDLC_MCP_PORTAL_URL",
+      "transport": "?",
+      "enabled": false,
+      "_note": [
+        "RUNBOOK-55:8094 全路径 404,MCP 没起来。",
+        "但 2026-07-29 的截图显示:最大的告警家族(General SHP API Error)的排查流程",
+        "【完全依赖这台】—— trackId → Portal → check_sms_resend_need。",
+        "所以它从『不影响我们』变成了『想覆盖最大的告警家族就得先修好』。",
+        "⚠️ 我们【只读】:只用查询类工具。open_portal_login 和任何 resend 执行类,永远不接。"
+      ]
+    }
+  },
+
+  "operations": {
+    "_README": "左边的 key 是代码里写死的操作名,不要改。右边的 tool/args 由内网填。",
+
+    "log.list_apps": {
+      "server": "logdream", "tool": "list_logdream_apps",
+      "args": {}, "const": {},
+      "_note": "RUNBOOK-55 已确认工具名。返回 hk1 98 个 / hkp3 93 个 app。"
+    },
+    "log.browse": {
+      "server": "logdream", "tool": "browse_logdream",
+      "args": {"app": "?", "source": "?", "path": "?"}, "const": {}
+    },
+    "log.search_files": {
+      "server": "logdream", "tool": "search_logdream_log_files",
+      "args": {"app": "?", "source": "?", "keyword": "?", "filename_pattern": "?", "date_hint": "?"},
+      "const": {}
+    },
+    "log.read": {
+      "server": "logdream", "tool": "read_logdream_log",
+      "args": {
+        "app": "?", "source": "?", "file": "?", "mode": "?",
+        "keyword": "?", "from_time": "?", "to_time": "?",
+        "timezone": "?", "max_lines": "?"
+      },
+      "const": {},
+      "_note": [
+        "⭐最重要的一条。要填的重点:",
+        "1) 时间参数【叫什么、什么格式】(epoch? ISO8601? 带不带时区?)",
+        "2) 有没有【时区参数】?RUNBOOK-55 说 LogDream 默认 Asia/Hong_Kong ——",
+        "   这个默认能不能显式覆盖?不能的话把 timezone 填成 null,代码会自己换算。",
+        "3) 返回有没有【行数/大小上限】?能限制就填 max_lines,不能就填 null,",
+        "   代码会自己截断(但那样更浪费,能限制最好)。",
+        "4) mode 支持哪几种(tail / keyword / range / alert_time_backtrack / auto)?",
+        "   把真实取值写在下面 modes 里。"
+      ],
+      "modes": {"tail": "?", "keyword": "?", "range": "?", "backtrack": "?", "auto": "?"}
+    },
+    "log.investigate": {
+      "server": "logdream", "tool": "investigate_logdream",
+      "args": {"app": "?", "source": "?", "symptom": "?", "keyword": "?",
+                "alert_time": "?", "date_hint": "?"},
+      "const": {},
+      "_note": "他们的综合排障接口。要填:输出是【结构化 findings】还是一段文本?"
+    },
+
+    "aws.parse_alert": {
+      "server": "cloudwatch", "tool": "parse_cloudwatch_alert",
+      "args": {"alert_text": "alertText"}, "const": {},
+      "_note": "RUNBOOK-55 已确认参数名 alertText。"
+    },
+    "aws.get_alarm": {
+      "server": "cloudwatch", "tool": "get_alarm", "args": {"alarm_name": "?"}, "const": {}
+    },
+    "aws.alarm_history": {
+      "server": "cloudwatch", "tool": "get_alarm_history",
+      "args": {"alarm_name": "?", "from_time": "?", "to_time": "?"}, "const": {}
+    },
+    "aws.metric_window": {
+      "server": "cloudwatch", "tool": "get_metric_window",
+      "args": {"resource": "?", "metric": "?", "from_time": "?", "to_time": "?"}, "const": {}
+    },
+    "aws.recent_changes": {
+      "server": "cloudwatch", "tool": "get_recent_cloudtrail_events",
+      "args": {"resource": "?", "from_time": "?", "to_time": "?"}, "const": {},
+      "_note": "CloudTrail —— 证据等级最高的一类(截图里那个 Aurora roleswap 就是这么查出来的)。"
+    },
+    "aws.log_groups_for_resource": {
+      "server": "cloudwatch", "tool": "find_log_groups_for_resource",
+      "args": {"resource": "?"}, "const": {}
+    },
+    "aws.query_logs": {
+      "server": "cloudwatch", "tool": "query_logs",
+      "args": {"log_groups": "?", "query": "?", "from_time": "?", "to_time": "?"}, "const": {}
+    },
+    "aws.resource_tags": {
+      "server": "cloudwatch", "tool": "get_resource_tags", "args": {"resource": "?"}, "const": {},
+      "_note": "RUNBOOK-55:alarm 自身无 tag;ECS service 有 10 个 key,有 owner,无 application。"
+    },
+
+    "portal.sms_by_tracking_id": {
+      "server": "portal", "tool": "query_sms_delivery_record_by_tracking_id",
+      "args": {"tracking_id": "?"}, "const": {},
+      "_note": "只读查询。截图里那条 338 的排查就是从这一步开始的。"
+    },
+    "portal.email_by_tracking_id": {
+      "server": "portal", "tool": "query_email_delivery_record_by_tracking_id",
+      "args": {"tracking_id": "?"}, "const": {}
+    }
+  },
+
+  "never_expose": {
+    "_note": [
+      "永远不允许接入的工具 —— 会产生真实业务动作。",
+      "这个清单是【硬性】的:即使有人把它写进 operations,注册表也会拒绝。"
+    ],
+    "tools": ["open_portal_login"],
+    "patterns": ["*resend*", "*submit*", "*send*", "*delete*", "*update*", "*create*"]
+  }
+}

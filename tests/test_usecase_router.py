@@ -209,6 +209,62 @@ class VendorResolutionTests(_DatasetMixin, unittest.TestCase):
         # And the module under test must not do that.
         self.assertIsNone(usecase_router.resolve_vendor("AWS HK SNS")["token"])
 
+    def test_sla_is_reported_as_milliseconds_with_its_basis_attached(self):
+        """RUNBOOK-54 q6, answered from evidence rather than by asking: the product code compares
+        `process_millisecond <= message_process_sla`. Rendering a duration is now MORE honest than a
+        bare integer — but the basis travels with it, because no owner signed it off."""
+        rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL"}
+        with ExitStack() as stack:
+            self._with_dataset(stack)
+            match = usecase_router.router_for_rule(rule, business_category="11")
+        self.assertEqual(match["sla_unit"], "milliseconds")
+        self.assertIn("process_millisecond", match["sla_note"])
+        self.assertIn("not owner-signed-off", match["sla_note"].lower())
+        self.assertIn("identical on all 247 rows", match["sla_note"])
+
+    def test_delivery_path_is_flagged_as_classification_not_a_routing_control(self):
+        """The important half is the negative finding: an answer must not imply the message travels
+        'via path 3'. The same column lives on templates, campaigns and the billing report."""
+        rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL"}
+        with ExitStack() as stack:
+            self._with_dataset(stack)
+            match = usecase_router.router_for_rule(rule, business_category="11")
+        note = match["delivery_path_note"]
+        self.assertIn("NO evidence it controls the runtime", note)
+        self.assertIn("billing", note)
+        self.assertIn("candidate guesses", note)
+
+    def test_the_display_name_is_decomposed_into_family_and_region(self):
+        """A regional outage is counted per region; an AWS-SNS-wide one merges them. Reading the two
+        off the string is a weaker, checkable claim than asserting a carrier token."""
+        hk = usecase_router.resolve_vendor("AWS HK SNS")
+        sg = usecase_router.resolve_vendor("AWS SG SNS")
+        self.assertEqual((hk["provider_family"], hk["region"]), ("sns", "hk"))
+        self.assertEqual((sg["provider_family"], sg["region"]), ("sns", "sg"))
+        self.assertEqual(hk["provider_family"], sg["provider_family"])   # same family
+        self.assertNotEqual(hk["region"], sg["region"])                  # different bucket
+        self.assertIsNone(hk["token"])                                   # still no guessed token
+
+    def test_a_row_marked_old_is_flagged_legacy_and_never_folded(self):
+        """Folding `HTCL OLD` onto `HTCL` would assert a legacy route is carrying traffic. The
+        intranet found that unprovable in either direction — 9 router rows and 2 live channel rules
+        exist, the enum is still in the code, but no dedicated delivery-job repo."""
+        old = usecase_router.resolve_vendor("HTCL OLD")
+        live = usecase_router.resolve_vendor("HTCL")
+        self.assertEqual(old["lifecycle"], "legacy")
+        self.assertEqual(live["lifecycle"], "active")
+        self.assertIn("never be folded", old["note"])
+
+    def test_a_confirmed_alias_still_reports_the_legacy_marker(self):
+        """The token answers 'which carrier'; it was never a statement about whether it is live."""
+        with ExitStack() as stack:
+            self._with_dataset(stack, columns_config={"validation": {
+                "vendor_display_aliases": {"HTCL OLD": "3hk"}}})
+            out = usecase_router.resolve_vendor("HTCL OLD")
+        self.assertEqual(out["token"], "3hk")
+        self.assertEqual(out["lifecycle"], "legacy")
+        self.assertIn("marked LEGACY", out["note"])
+
     def test_blank_vendor_is_not_recorded_not_no_carrier(self):
         vendor = usecase_router.resolve_vendor("")
         self.assertFalse(vendor["present"])

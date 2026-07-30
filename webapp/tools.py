@@ -234,9 +234,15 @@ TOOLS = [
             "`route_hint` = a route/router value names one, still a hint, cite the rule row; "
             "`channel_upper_bound` = 'at most these carriers', never 'it sends via X'. The "
             "authoritative table answers for only ~a quarter of rows and covers push/SMS only, so "
-            "the upper bound is the normal case, not a defect. SLA numbers and delivery_path codes "
-            "from that table are UNITLESS/UNNAMED — report the raw value, never a duration or a path "
-            "name. `use_case_master` says whether master data was "
+            "the upper bound is the normal case, not a defect. A vendor value also carries "
+            "`lifecycle`: `legacy` (e.g. `HTCL OLD`) must be reported as a legacy route and NEVER "
+            "merged with the unmarked value, and `provider_family`/`region` let you say 'AWS SNS, "
+            "Hong Kong region' — a regional outage counts per region, a family-wide one merges them. "
+            "SLA numbers are MILLISECONDS (inferred from the product code, not owner-signed-off): "
+            "give both, e.g. '60000 ms (1 minute)', and say the unit comes from code. delivery_path "
+            "is still a bare code — report the number, never a path name, and do not imply it "
+            "controls the route (it is template/billing classification metadata). "
+            "`use_case_master` says whether master data was "
             "found and, when not, WHY (dataset not configured vs id absent from that snapshot) — "
             "read it before writing 无法确认, so you name which half is missing instead of implying "
             "the use case has no channels or no owner. "
@@ -295,13 +301,45 @@ TOOLS = [
             "impact' — fall back to `channel_upper_bound` and word it as a ceiling ('at most N'). "
             "Say 'verify against production' before anyone tells a business team traffic stopped; "
             "(3) if `ok` is false the repo AND the use case "
-            "could NOT be identified — say so and ask which service, NEVER guess; (4) `vendor` is "
-            "always null for now (the router table isn't ingested) — do not infer a vendor from "
-            "repo names; (5) a `delivery_path.phrase` is reported verbatim but NOT resolved, "
-            "because delivery_path is a numeric enum whose name mapping we don't have yet.",
+            "could NOT be identified — say so and ask which service, NEVER guess; (4) `vendor` "
+            "here is still null — `tbl_use_case_router` IS ingested now, but reaching it needs a "
+            "use case, and this tool starts from an alert. For a carrier, go through "
+            "`usecase_impact`; do NOT infer one from repo names; (5) a `delivery_path.phrase` is "
+            "reported verbatim but NOT resolved: delivery_path is a numeric enum (1-6, 8, 9) with "
+            "no name mapping in any readable source, and it is classification metadata shared with "
+            "templates/campaigns/billing — there is no evidence it controls the runtime route.",
             {"alert_text": {"type": "string"}, "max_use_cases": {"type": "integer"}},
             ["alert_text"]),
+    _schema("incident_investigate",
+            "ROOT-CAUSE track: read the actual PRODUCTION LOGS for an alert. This is the other half "
+            "of incident response — `incident_impact` answers 'who is affected' with zero "
+            "production access, this one answers 'what does the log say'. Call it when the user "
+            "asks '看日志', 'what does the log show', '为什么挂的', 'root cause', or after "
+            "incident_impact when they want to know WHY rather than WHO. "
+            "Pass the alert text verbatim. `timezone` is only needed when the alert's own timestamp "
+            "carries no zone — then supply the one the user states, never one you assumed. "
+            "It runs in an isolated investigator that holds the raw logs in memory and returns only "
+            "a REDACTED, aggregated evidence packet: counts, exception classes, and at most 5 "
+            "short redacted lines per finding. "
+            "IMPORTANT — report these honestly: (1) read `plan` and say which app, keywords and "
+            "window were actually used; a nil result only means nil FOR THOSE, and the keywords "
+            "come from our code graph, not from the log; (2) `not_investigated` is not the same as "
+            "'nothing found' — a server that did not respond, an app name that could not be "
+            "verified, or a missing timezone all land there, and each means 'we did not look', "
+            "which you must say out loud instead of implying the logs were clean; (3) every item "
+            "carries `environment` — logs are PRODUCTION, the use-case route snapshot is dev/SCT, "
+            "so never assert production behaviour from the snapshot; (4) excerpts are redacted "
+            "(`<phone:ab12>` style) and the raw text is gone — do not offer to fetch it, there is "
+            "no code path that can; (5) exception classes and counts are evidence, but a log line "
+            "is not a root cause on its own — say what it shows, not what you infer.",
+            {"alert_text": {"type": "string"}, "timezone": {"type": "string"}},
+            ["alert_text"]),
 ]
+
+# Tools whose result is a sub-agent evidence packet, so it is charged to the `subagent` context lane
+# instead of the shared `tools` lane. A log packet arriving mid-turn must not eat the room the other
+# tools in that same turn still need.
+SUBAGENT_TOOLS = frozenset({"incident_investigate"})
 
 
 def dispatch(name, a):
@@ -443,6 +481,15 @@ def dispatch(name, a):
         if not text:
             return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
         return incident.incident_impact(text, max_use_cases=int(a.get("max_use_cases") or 40))
+    if name == "incident_investigate":
+        text = (a.get("alert_text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
+        # Imported here, not at module import time: this is the only tool that can reach production,
+        # and keeping the import local means the retrieval-only tool surface does not depend on it.
+        from . import incident_investigator
+        return incident_investigator.investigate(
+            text, timezone=(a.get("timezone") or "").strip() or None)
     if name == "show_coverage":
         return _coverage_view(a.get("kind"), a.get("value"))
     return {"error": f"unknown tool: {name}"}

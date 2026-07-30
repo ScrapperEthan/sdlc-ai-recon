@@ -51,6 +51,7 @@ call; do not "fix" this by seeding the map.
 """
 import json
 import os
+import re
 
 from . import config
 from .usecase_catalog import (
@@ -70,6 +71,34 @@ DEFAULT_NATURAL_KEY = ("business_category", "channel", "route", "router")
 
 # Deliberately empty — see the module docstring. A guessed entry here would fabricate a carrier.
 DEFAULT_VENDOR_DISPLAY_ALIASES = {}
+
+# RUNBOOK-54 question 6, answered by the intranet 2026-07-30 from evidence rather than by asking:
+# the product code compares `process_millisecond <= message_process_sla` and
+# `delivery_millisecond <= message_delivery_sla`, and every value in the export lands on a round
+# number of minutes when read as ms (60000 = 1 min … 86400000 = 24 h). Both columns are identical on
+# all 247 rows. That is strong enough to render a duration, which is far more useful than a bare
+# integer — but no owner has signed it off, so the claim travels with its basis attached.
+SLA_UNIT = "milliseconds"
+_SLA_NOTE = (
+    "SLA columns are milliseconds. Evidence: the product code compares `process_millisecond <= "
+    "message_process_sla`, and all eight distinct values are exact minutes when read as ms "
+    "(60000 = 1 min, 300000 = 5 min, 86400000 = 24 h). Not owner-signed-off, so say 'the "
+    "configured SLA is 60000 ms (1 minute)' — give the raw number alongside the duration, and note "
+    "that the unit is inferred from code, not from a business sign-off. `message_process_sla` and "
+    "`message_delivery_sla` are identical on all 247 rows, so do not present them as two "
+    "independent budgets.")
+
+# delivery_path, per the same 2026-07-30 answer. The important half is the NEGATIVE finding: it is
+# not a routing control, so an answer must not imply the message travels "via path 3".
+_DELIVERY_PATH_NOTE = (
+    "delivery_path is a raw numeric enum from tbl_use_case_router (values 1-6, 8, 9; 7 absent). It "
+    "is NOT derived from business_category — one category can carry several delivery_paths. The "
+    "same column name also appears on tbl_template, the Template API request, the ad-hoc campaign "
+    "table and the SMS billing report, so it reads as a business route/template/billing "
+    "classification; there is NO evidence it controls the runtime delivery topic or delivery job. "
+    "Report the number, never invent a name: the nine textual 'Path' strings seen in alert titles "
+    "were candidate guesses only, and no number->name table exists in the mirror, the UAT tables or "
+    "the code.")
 
 _UNCONFIRMED_ALIAS_NOTE = (
     "vendor recorded verbatim in tbl_use_case_router; the display-name -> canonical-token mapping "
@@ -165,19 +194,61 @@ def index_by_natural_key():
     }
 
 
+# Read off the display string itself, not from any mapping. `AWS HK SNS` literally contains a
+# provider family and a region, and reporting those two is a different (weaker, checkable) claim
+# than asserting which canonical carrier token the row denotes. Two layers because the intranet's
+# 2026-07-30 analysis is right about why it matters: a REGIONAL outage must be counted per region
+# (the Java side defines AWS_HK_SNS_PUSH and AWS_SG_SNS_PUSH separately, with 4 and 5 delivery jobs
+# behind them), while an AWS-SNS-wide outage merges them.
+_FAMILIES = ("sns", "smsc", "apns", "fcm")
+_REGIONS = {"hk": "hk", "sg": "sg", "hongkong": "hk", "singapore": "sg"}
+# A carrier explicitly marked OLD must never be reported as the live one. Folding `HTCL OLD` onto
+# `HTCL` would assert that a legacy route is carrying traffic; the intranet found the opposite is
+# unprovable either way (9 router rows, 2 live channel rules with status=Y, the enum
+# MessageRouterTopicEnum.HTCL_OLD_SMS still in the code, but no dedicated delivery-job repo).
+_LEGACY_MARKERS = ("old", "legacy", "deprecated")
+
+
+def _describe_display_name(text):
+    """Decompose what the string SAYS: family, region, lifecycle. Asserts no carrier identity."""
+    words = [word for word in re.split(r"[^A-Za-z0-9]+", text.lower()) if word]
+    family = next((word for word in words if word in _FAMILIES), "")
+    region = next((_REGIONS[word] for word in words if word in _REGIONS), "")
+    lifecycle = "legacy" if any(word in _LEGACY_MARKERS for word in words) else "active"
+    return {"provider_family": family, "region": region, "lifecycle": lifecycle}
+
+
 def resolve_vendor(raw):
-    """Raw `vendor` cell -> {raw, token, confirmed, note}. Never guesses a token."""
+    """Raw `vendor` cell -> {raw, token, confirmed, family, region, lifecycle, note}.
+
+    Never guesses a token. Does decompose the display name, because "family sns, region hk, marked
+    legacy" is information the raw string genuinely carries, and withholding it while an incident is
+    running would be its own kind of dishonesty.
+    """
     text = (raw or "").strip()
     if not text:
         return {"raw": "", "token": None, "confirmed": False, "present": False,
+                "provider_family": "", "region": "", "lifecycle": "",
                 "note": ("tbl_use_case_router.vendor is blank on the matched row (58.70% of the "
                           "table is). The authoritative carrier is simply not recorded — that is "
                           "not the same as 'no carrier'.")}
+    described = _describe_display_name(text)
     token = vendor_display_aliases().get(text.casefold())
-    if token:
-        return {"raw": text, "token": token, "confirmed": True, "present": True, "note": ""}
-    return {"raw": text, "token": None, "confirmed": False, "present": True,
-            "note": _UNCONFIRMED_ALIAS_NOTE}
+    out = {"raw": text, "token": token, "confirmed": bool(token), "present": True, **described}
+    if token and described["lifecycle"] == "legacy":
+        # Even an owner-confirmed alias does not license dropping the legacy marker: the token says
+        # WHO, the lifecycle says WHETHER IT IS CURRENT, and only the first was ever confirmed.
+        out["note"] = ("mapped to a canonical carrier, but this row is marked LEGACY — report both. "
+                       "A confirmed alias answers 'which carrier', not 'is this route live'.")
+    elif token:
+        out["note"] = ""
+    else:
+        out["note"] = _UNCONFIRMED_ALIAS_NOTE
+        if described["lifecycle"] == "legacy":
+            out["note"] += (" This value is also marked OLD/legacy: it must never be folded onto the "
+                            "same carrier as the un-marked value, which would assert that a legacy "
+                            "route is live.")
+    return out
 
 
 def router_for_rule(rule, business_category="", index=None):
@@ -253,16 +324,10 @@ def router_for_rule(rule, business_category="", index=None):
         "citation": row.get("citation") or "",
     })
     if result["message_process_sla"] or result["message_delivery_sla"]:
-        # RUNBOOK-54 question 6 was never answered: nobody has told us whether these are
-        # milliseconds, seconds or minutes. A bare "5" invites the reader to assume seconds, and a
-        # timeliness answer that is wrong by 1000x is worse than no timeliness answer.
-        result["sla_note"] = ("SLA values are UNITLESS in the export — ms vs s vs min is not "
-                              "confirmed (RUNBOOK-54 question 6). Quote the number with the column "
-                              "name and say the unit is unconfirmed; never render it as a duration.")
+        result["sla_note"] = _SLA_NOTE
+        result["sla_unit"] = SLA_UNIT
     if result["delivery_path"]:
-        result["delivery_path_note"] = ("delivery_path is a numeric enum (1-6, 8, 9); the "
-                                        "number->name mapping does not exist in any source we can "
-                                        "read (mirror exhausted) — report the code, not a name.")
+        result["delivery_path_note"] = _DELIVERY_PATH_NOTE
     return result
 
 

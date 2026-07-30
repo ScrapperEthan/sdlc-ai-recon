@@ -21,7 +21,12 @@ EXPECTED_MODEL_TOOLS = {
     # this file. Anything added below is a DELIBERATE new capability, listed separately so the count
     # of the Q&A surface stays auditable and a merge can't quietly regrow it.
     "incident_impact",   # incident triage (phase 1: local artefacts only, no MCP) — 2026-07-28
+    # Root-cause track. Reaches production logs, so it is only safe as a model tool because the
+    # result comes back through the investigator's redaction + exit gate — see
+    # webapp/incident_investigator.py. Default-off behind SDLC_MCP_ENABLED.
+    "incident_investigate",   # 2026-07-30
 }
+_INCIDENT_TOOLS = {"incident_impact", "incident_investigate"}
 _QA_SURFACE = 13
 
 
@@ -38,7 +43,12 @@ class ModelToolSurfaceTests(unittest.TestCase):
     def test_the_qa_surface_itself_has_not_regrown(self):
         """Adding an incident tool must not be a side door for re-adding retired Q&A tools."""
         names = {entry["function"]["name"] for entry in tools.TOOLS}
-        self.assertEqual(len(names - {"incident_impact"}), _QA_SURFACE)
+        self.assertEqual(len(names - _INCIDENT_TOOLS), _QA_SURFACE)
+
+    def test_only_the_investigator_is_charged_to_the_subagent_lane(self):
+        """The lane exists for sanitized evidence packets. A plain retrieval tool joining it would
+        quietly double the turn's tool budget."""
+        self.assertEqual(tools.SUBAGENT_TOOLS, {"incident_investigate"})
 
 
 class LegacyToolBackwardCompatTests(unittest.TestCase):

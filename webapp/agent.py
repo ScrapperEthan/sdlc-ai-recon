@@ -202,19 +202,25 @@ def answer_events(question, history=None):
                 emitted_views.append(result)
                 yield {"type": "view", "view": result}
             trace.append({"tool": name, "args": args})
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.get("id", ""),
+            if name in tools.SUBAGENT_TOOLS:
+                # A sub-agent evidence packet spends the lane reserved for it, so a log packet
+                # arriving mid-turn cannot eat the room the other tools in the same turn need.
+                content = budget.fit_subagent_result(result)
+            else:
                 # Structure-aware, not a byte slice: a cut mid-JSON used to hand the model a
                 # fragment it could not recognise as incomplete. See webapp/context_budget.py.
                 # This call's slice of the SHARED tools lane, not a fixed per-call cap: what is
                 # left, divided by the calls still to come (the rest of this batch, plus roughly
                 # one per remaining iteration). An early greedy result therefore cannot starve
                 # the rest of the turn — which is exactly what the old flat cap allowed, 8x over.
-                "content": budget.fit_tool_result(
+                content = budget.fit_tool_result(
                     result,
                     calls_remaining=(len(calls) - position)
-                    + (config.MAX_TOOL_ITERS - iteration - 1)),
+                    + (config.MAX_TOOL_ITERS - iteration - 1))
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id", ""),
+                "content": content,
             })
 
     # tool budget exhausted — force a final answer

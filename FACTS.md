@@ -50,6 +50,12 @@
 | ⚠️**当前盒子本地镜像只有 15 个 Git 仓库**(名册是 460)→ 所有"grep 镜像没找到"的结论都受这个边界限制,不等于"代码里没有";也是没跑全量 `refresh.py` 的原因(怕覆盖现有 460 仓库索引) | 内网 2026-07-29 |
 | **"全链路"现在到出口了**(主题→投递任务→出站 API→厂商→SMSC/APNs/ProofPoint/打印),`usecase_impact.delivery_chain` + 架构图高亮都通到底。但**厂商默认是渠道级上界**(`channel_upper_bound`),因为权威厂商表**虽已摄取但还没接进链路计算**(且它本身 vendor 空值率 58.7%)—— 只能说"最多这几家",**不能说"它走 X"**。`route`/`router` 里出现厂商名时收窄为 `route_hint`,仍是线索 | 2026-07-29 外部,2026-07-30 订正 |
 | 厂商白名单靠**最右侧已知厂商**解析;`iccm*` 折叠成 `iccm` 是**对的**(已复核);`hr`/`hase` = unknown | RB-51 / RB-52 |
+| ⭐**两个 SLA 列的单位 = 毫秒**(RB-54 问题 6,靠证据答出来的,不是靠问):产品代码里直接比较 `process_millisecond <= message_process_sla`;8 个取值(60000…86400000)按毫秒读全是整分钟(1 分钟…24 小时);两列 **247/247 完全相同**(所以不要当成两个独立预算)。⚠️**业主尚未正式签认** → 说法="60000 ms(1 分钟),单位由代码推定" | 内网 2026-07-30 |
+| ⭐**`delivery_path` 是分类元数据,不是运行时路由开关** —— 它是 `tbl_use_case_router` 的原始字段(1-6,8,9;缺 7),**不能从 `business_category` 推导**(一个 category 可以有多个 path);同名字段还出现在 `tbl_template` / Template API request / adhoc campaign / SMS billing report。**没有任何证据表明它控制 delivery topic 或 delivery job**。RB-56 里那 9 个文字路径名只是候选猜测 | 内网 2026-07-30 |
+| ⭐**`HTCL OLD` 不能断言已下线,也不能折叠到 `HTCL`/`3hk`**:router 表仍有 9 行,其中 2 条 channel-rule 关联成功且 **channel-rule 与 use-case 都 status=Y**;代码镜像仍有 `MessageRouterTopicEnum.HTCL_OLD_SMS` / `HTCL_RT_OLD_TRACKING` / 独立 `htcl_old_sms` topic;但 topology 里**没有**独立的 `*-htcl-old-*` delivery-job 仓库 → 结论只能是"明确标 OLD 的 legacy 线路,但不能宣称已下线"。最终确认要查生产近 30/90 天 `route=HUTCHISON_RT_SMS` / `router=HTCL_OLD_SMS` 的消息量 | 内网 2026-07-30 |
+| ⭐**AWS HK / SG 要分开算,但保留共同的 `sns` 父级**:router 表分别记录;Java 分别定义 `AWS_HK_SNS_PUSH` / `AWS_SG_SNS_PUSH`;topology 里 awshk 4 个 / awssg 5 个 delivery job;代码大体 WPB→SG、CMB/WSB→HK。口径 = `provider_family=sns` + `region=hk\|sg` + `canonical_vendor=awshk\|awssg`。**区域故障分开算,AWS SNS 全局故障再合并** | 内网 2026-07-30 |
+| ⚠️**那 3 个厂商别名仍未经业主签认** —— 内网给的是**建议**:HK→`awshk`、SG→`awssg`、HTCL→`3hk`(仓库命名那条早已确认,但 **router 表里的 `HTCL` 是否同一家仍需业主确认**)。所以外部代码**仍然 0 条内置别名**,只按显示名**字面**拆出 family/region/lifecycle(这是可核对的弱断言),不断言 canonical 厂商 | 内网建议 + 外部 2026-07-30 |
+| **RB-59 检查 1 的分母已解释**:`tbl_use_case_channel_rule` 共 **6217** 行,其中 **258 行四列键不完整**,余 **5959 行可比较** → 2967 关联成功 → 1628 关联后 vendor 非空 | 内网 2026-07-30 |
 
 ---
 
@@ -111,9 +117,10 @@
 | ~~`hk1` / `hkp3` 哪个是生产~~ | ✅**已答:两个都是生产,日志不同。** 剩下的小问题:哪类日志在哪边 | 负责人 2026-07-29 |
 | ~~`MDC Alert - General SHP API Error` 是谁发的 / 原始文本长什么样~~ | ✅**查尽了:不是 CloudWatch Alarm,LogDream 也 0 命中,镜像无模板。** 剩下的只能问监控 owner:那 338 条是哪个系统发的(Splunk?邮件规则?) | 截图 + 内网 2026-07-29 |
 | **Portal MCP (8094) 什么时候能修好** —— 现在挡着最大的告警家族 | 待对方团队 | RB-55 A1 |
-| ⭐**那 4 个 vendor 显示名到底对应白名单里的谁?** —— `HTCL`/`HTCL OLD`/`AWS HK SNS`/`AWS SG SNS`。内网明确拒绝自行映射(**做得对**)。特别是:`HTCL OLD` 是不是已下线?两个 AWS 区域要不要分开算?确认后填 `config/usecase_columns.json` 的 `vendor_display_aliases`,**代码零改动** | 待业务方/owner | 2026-07-30 |
-| **`tbl_use_case_channel_rule` 有没有自己的 `business_category` 列?** —— 有的话连接不需要主数据在场,没有主数据行的用例(M2050)也能拿到权威厂商,覆盖率会提高 | 内网一条查询(RB-59 附加项) | 2026-07-30 |
-| 两个 SLA 列的**单位**(ms/s/min) | RB-54 问题 6 一直没答;现在代码里带着"单位未确认"的告警在跑 | RB-54 |
+| **那 4 个 vendor 显示名的 canonical 映射,业主签认** —— 内网已给出**有据的建议**(HK→awshk / SG→awssg / HTCL→3hk / HTCL OLD 保留原文 + lifecycle),`awshk`/`awssg` 本来就在我们白名单里,所以这是**可核对**的映射而非猜测。**只差业主一句"是"**;签认后填 `config/usecase_columns.json` 的 `validation.vendor_display_aliases`,**代码零改动** | 待 owner 一句确认 | 2026-07-30 |
+| **`HTCL OLD` 到底还有没有流量** —— 唯一的判定方式是查生产近 30/90 天 `route=HUTCHISON_RT_SMS` / `router=HTCL_OLD_SMS` 的消息量,以及 `htcl_old_sms` topic 有没有 consumer/deployment | 待生产查询 | 内网 2026-07-30 |
+| ~~**`tbl_use_case_channel_rule` 有没有自己的 `business_category` 列?**~~ | ✅**已不阻塞代码**:该列已乐观绑定,有就用(连接变两张表)、没有就空字符串。两种答案都零改动。仍值得一问,但只是为了知道覆盖率能提高多少 | 外部 2026-07-30 |
+| ~~两个 SLA 列的**单位**(ms/s/min)~~ | ✅**已答:毫秒**(代码证据,见上)。剩下的只是业主正式签认那一张单 | 内网 2026-07-30 |
 | ~~`delivery_path` 1–9 ↔ 文字路径的对照~~ | ✅**镜像已查尽,查不到。** 转成对业务方的精确请求:一份码表,或一条带数字+名称的配置样本 | RB-56 Q3,内网 2026-07-29 |
 | ~~三个读日志工具的确切参数~~ | ✅**不用问了。** 改成 `config/mcp_tools.json` 的 `"?"` 占位,内网对着 `tools/list` 直接填,不用来回拍照 | 负责人建议 2026-07-29 |
 | `Route=CSL_SVC_RT_SMS` 是不是 `route` 列的取值 | 可自查 —— **现在更要紧**:`delivery_chain` 的 `route_hint` 通路建立在这个假设上 | 截图 2026-07-29 |

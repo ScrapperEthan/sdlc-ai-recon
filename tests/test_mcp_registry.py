@@ -142,9 +142,75 @@ class ReadinessTests(_WithConfig):
             with self.assertRaises(mcp_registry.NotAllowed):
                 mcp_registry.build_call("log.list_apps")
 
+    def test_an_unreadable_config_names_the_path_it_failed_on(self):
+        """A typo in SDLC_MCP_TOOLS otherwise looks identical to "no operations exist"."""
+        with mock.patch.dict(os.environ, {"SDLC_MCP_TOOLS": "/no/such/file.json"}):
+            self.assertIn("/no/such/file.json", mcp_registry.summary()["config_error"])
+        self.assertEqual(mcp_registry.summary()["config_error"], "")
+
+
+class DenyBaselineTests(unittest.TestCase):
+    """The box runs a gitignored local config via SDLC_MCP_TOOLS. Repointing the loader at another
+    file must not be a way to unlock action tools — the deny list lives in code, config only adds."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(self._tmp.name, "local.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({                       # note: no never_expose section at all
+                "servers": {"portal": {"url_env": "TEST_PORTAL_URL", "enabled": True}},
+                "operations": {
+                    "danger.login": {"server": "portal", "tool": "open_portal_login",
+                                      "args": {}, "const": {}},
+                    "danger.resend": {"server": "portal", "tool": "do_sms_resend",
+                                       "args": {}, "const": {}},
+                    "portal.sms": {"server": "portal", "tool": "query_sms_by_tracking_id",
+                                    "args": {"tracking_id": "trackingId"}, "const": {}},
+                },
+            }, handle)
+        self._env = mock.patch.dict(os.environ, {"SDLC_MCP_TOOLS": path})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_config_without_a_deny_section_still_blocks_action_tools(self):
+        for operation in ("danger.login", "danger.resend"):
+            with self.assertRaises(mcp_registry.NotAllowed, msg=operation):
+                mcp_registry.build_call(operation)
+        states = mcp_registry.readiness()
+        self.assertEqual(states["danger.login"]["state"], "blocked")
+        self.assertEqual(states["danger.resend"]["state"], "blocked")
+
+    def test_read_only_queries_are_still_callable(self):
+        """The baseline denies action verbs, not everything — a query tool must survive it."""
+        server, tool, params = mcp_registry.build_call("portal.sms", {"tracking_id": "T1"})
+        self.assertEqual((server, tool, params),
+                         ("portal", "query_sms_by_tracking_id", {"trackingId": "T1"}))
+
+    def test_the_read_only_resend_judgement_tools_are_not_swept_up(self):
+        """`check_sms_resend_need` returns a verdict and sends nothing; a broad `*resend*` would
+        bury it and cost someone half a day working out why (see d6b3a45)."""
+        cfg = mcp_registry.load()
+        for tool in ("check_sms_resend_need", "check_htcl_sms_resend_need",
+                     "check_email_resend_need"):
+            self.assertFalse(mcp_registry._denied(tool, cfg), tool)
+
 
 class ShippedConfigTests(unittest.TestCase):
-    """The committed config/mcp_tools.json must itself be coherent."""
+    """The committed config/mcp_tools.json must itself be coherent.
+
+    Explicitly ignores SDLC_MCP_TOOLS: the box has that set to its own local file, and these
+    assertions are about what we ship, not about what the box happens to have enabled."""
+
+    def setUp(self):
+        self._env = mock.patch.dict(os.environ)
+        self._env.start()
+        os.environ.pop("SDLC_MCP_TOOLS", None)
+
+    def tearDown(self):
+        self._env.stop()
 
     def test_every_server_is_disabled_until_the_box_turns_it_on(self):
         cfg = mcp_registry.load()

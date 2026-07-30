@@ -14,7 +14,10 @@ Three properties worth being explicit about:
   annotations are hints from a remote server, never an authorization decision.
 * **Hard deny beats configuration.** Anything matching `never_expose` is refused even if someone
   declares it, because the damage from calling a resend/submit tool is real and irreversible. The
-  assistant is read-only on production; that is not a setting.
+  assistant is read-only on production; that is not a setting — so the deny list has a copy built
+  into this module and config can only ever ADD to it. `SDLC_MCP_TOOLS` points the loader at a
+  different file (the box runs a gitignored local one), and a file that simply omits `never_expose`
+  must not thereby unlock every action tool.
 * **Unwired fails closed and says so.** A `"?"` placeholder means "not filled in yet". Calling such
   an operation raises with the exact list of missing fields, so the assistant reports "this is not
   wired up yet" instead of guessing a parameter name and silently querying the wrong thing.
@@ -26,6 +29,17 @@ import os
 from retriever import config as retriever_config
 
 UNSET = "?"
+
+# The deny baseline, kept in code so that swapping the config file cannot weaken it. Mirrors
+# `never_expose` in config/mcp_tools.json; that file may add entries but never remove these.
+# Patterns are matched on the action verb rather than a keyword, deliberately: `check_*_resend_need`
+# is a read-only judgement tool and a broad `*resend*` would wrongly bury it (see d6b3a45).
+DENY_TOOLS = ("open_portal_login",)
+DENY_PATTERNS = (
+    "do_*", "execute_*", "perform_*", "trigger_*",
+    "*_resend", "resend_*", "*_submit", "submit_*", "*_send", "send_*",
+    "delete_*", "remove_*", "update_*", "create_*", "login*", "*_login",
+)
 
 
 class NotWired(RuntimeError):
@@ -42,12 +56,22 @@ def _config_path():
 
 
 def load():
+    """Unreadable config degrades to nothing callable — but says why.
+
+    `SDLC_MCP_TOOLS` repoints this at another file, so a typo in that env var used to look exactly
+    like "no MCP operations exist". Carrying the reason means the status endpoint can name the path
+    it failed on instead of costing someone a round trip to find out."""
+    path = _config_path()
     try:
-        with open(_config_path(), encoding="utf-8-sig") as handle:
+        with open(path, encoding="utf-8-sig") as handle:
             payload = json.load(handle)
-    except (OSError, ValueError):
-        return {"servers": {}, "operations": {}, "never_expose": {}}
-    return payload if isinstance(payload, dict) else {"servers": {}, "operations": {}}
+    except (OSError, ValueError) as exc:
+        return {"servers": {}, "operations": {}, "never_expose": {},
+                "_load_error": f"{path}: {exc}"}
+    if not isinstance(payload, dict):
+        return {"servers": {}, "operations": {},
+                "_load_error": f"{path}: expected a JSON object at the top level"}
+    return payload
 
 
 def _clean(mapping):
@@ -74,9 +98,11 @@ def operations(cfg=None):
 def _denied(tool, cfg):
     deny = (cfg.get("never_expose") or {})
     name = (tool or "").lower()
-    if name in {str(t).lower() for t in (deny.get("tools") or [])}:
+    tools = {str(t).lower() for t in (deny.get("tools") or [])} | set(DENY_TOOLS)
+    if name in tools:
         return True
-    return any(fnmatch.fnmatch(name, str(p).lower()) for p in (deny.get("patterns") or []))
+    patterns = list(deny.get("patterns") or []) + list(DENY_PATTERNS)
+    return any(fnmatch.fnmatch(name, str(p).lower()) for p in patterns)
 
 
 def _missing(spec):
@@ -119,11 +145,13 @@ def readiness(cfg=None):
 
 
 def summary(cfg=None):
+    cfg = cfg or load()
     states = readiness(cfg)
     counts = {}
     for entry in states.values():
         counts[entry["state"]] = counts.get(entry["state"], 0) + 1
     return {
+        "config_error": cfg.get("_load_error", ""),
         "operations": len(states),
         "by_state": counts,
         "ready": sorted(n for n, e in states.items() if e["state"] == "ready"),

@@ -174,20 +174,39 @@ def app_candidates(repo):
     return out
 
 
+# Both spellings are accepted. The intranet's own gap analysis calls this file
+# `config/logdream_app_map.json` while this module first shipped reading `logdream_apps.json`, and
+# config/ is intranet-owned on a box that cannot push — so a name disagreement would surface as the
+# mapping silently having no effect, which is the worst possible failure mode for a knob. Accepting
+# either costs one line; coordinating a rename across an air gap does not.
+_APP_MAP_FILES = ("logdream_app_map.json", "logdream_apps.json")
+# Likewise for the key: `repo_to_app` is what this module documented, but a hand-written file may
+# reasonably be a flat {repo: app} object.
+_APP_MAP_KEYS = ("repo_to_app", "repo_to_logdream_app", "mapping")
+
+
 def _app_map():
     """{repo -> app}. Intranet knob, read if present. Absent is normal, not an error."""
-    path = os.path.join(os.getcwd(), "config", "logdream_apps.json")
-    try:
-        import json
-        with open(path, encoding="utf-8-sig") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return {}
-    mapping = data.get("repo_to_app") if isinstance(data, dict) else None
-    if not isinstance(mapping, dict):
-        return {}
-    return {str(k).strip().lower(): str(v).strip() for k, v in mapping.items()
-            if not str(k).startswith("_") and str(v).strip()}
+    import json
+    for name in _APP_MAP_FILES:
+        try:
+            with open(os.path.join(os.getcwd(), "config", name), encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        mapping = next((data[key] for key in _APP_MAP_KEYS
+                        if isinstance(data.get(key), dict)), None)
+        if mapping is None:
+            # A flat {repo: app} file, minus any documentation keys.
+            mapping = {k: v for k, v in data.items()
+                       if not str(k).startswith("_") and isinstance(v, str)}
+        cleaned = {str(k).strip().lower(): str(v).strip() for k, v in mapping.items()
+                   if not str(k).startswith("_") and str(v).strip()}
+        if cleaned:
+            return cleaned
+    return {}
 
 
 _EXCEPTION_CLASS = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Throwable))\b")

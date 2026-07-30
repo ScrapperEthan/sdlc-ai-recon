@@ -83,6 +83,23 @@ class AppNameTests(unittest.TestCase):
     def test_a_missing_mapping_file_is_normal_not_an_error(self):
         self.assertEqual(inv._app_map(), {})
 
+    def test_either_filename_and_either_shape_is_accepted(self):
+        """config/ is intranet-owned on a box that cannot push, and their gap analysis names this
+        file differently than this module first did. A name disagreement would show up as the knob
+        silently doing nothing — the worst failure mode for a knob."""
+        import os as _os
+        import tempfile
+        for name in inv._APP_MAP_FILES:
+            for payload in ({"repo_to_app": {"repo-a": "appA"}},   # documented shape
+                            {"repo-a": "appA", "_note": "flat"}):  # hand-written flat shape
+                with tempfile.TemporaryDirectory() as tmp:
+                    _os.makedirs(_os.path.join(tmp, "config"))
+                    with open(_os.path.join(tmp, "config", name), "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle)
+                    with mock.patch.object(_os, "getcwd", lambda tmp=tmp: tmp):
+                        self.assertEqual(inv._app_map(), {"repo-a": "appA"},
+                                         f"{name} / {sorted(payload)}")
+
 
 class PlanTests(unittest.TestCase):
     """The plan opens no sockets, so it is fully testable offline."""

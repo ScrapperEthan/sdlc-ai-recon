@@ -169,6 +169,12 @@ MCP_TIMEOUT = int(os.environ.get("SDLC_MCP_TIMEOUT", "60"))
 # truncating at the socket keeps a runaway response from becoming a memory problem before
 # context_budget ever sees it. Truncation is always reported, never silent.
 MCP_MAX_RESPONSE_BYTES = int(os.environ.get("SDLC_MCP_MAX_BYTES", "4000000"))
+# The MCP servers are internal infrastructure reached by hostname; routing them through the company
+# HTTP proxy is never correct and is exactly what RUNBOOK-60 hit — every MCP call came back 403 from
+# the proxy until the host was added to NO_PROXY. So by default this client bypasses system proxies
+# for MCP requests, which means a deployment does NOT have to remember to persist NO_PROXY. Set this
+# to "1" only for a deployment that genuinely reaches its MCP endpoint through a proxy.
+MCP_USE_PROXY = os.environ.get("SDLC_MCP_USE_PROXY", "") not in ("", "0", "false", "False")
 # Advertised protocol version per transport. Env-overridable because a version bump on their side
 # must not require an external code change and a push we may not be able to deliver.
 MCP_PROTOCOL_STREAMABLE = os.environ.get("SDLC_MCP_PROTOCOL_HTTP", "2025-03-26")

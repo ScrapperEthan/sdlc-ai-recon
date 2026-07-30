@@ -379,6 +379,32 @@ class FeatureFlagTests(_ServerCase):
         self.assertIn("nobody has determined it yet", str(caught.exception))
 
 
+class ProxyBypassTests(_ServerCase):
+    """RUNBOOK-60: the company proxy 403s every MCP call. The client must ignore it by default."""
+
+    def test_a_bogus_proxy_env_does_not_break_the_call(self):
+        REPLIES["call"] = {"content": [{"type": "text", "text": "reached directly"}]}
+        with mock.patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9/",
+                                          "HTTPS_PROXY": "http://127.0.0.1:9/"}):
+            out = mcp_client.call("aws.get_alarm", {"alarm_name": "a"})
+        self.assertEqual(out["text"], "reached directly")
+
+    def test_the_config_flag_chooses_which_opener_is_used(self):
+        """Off (default) = the proxy-free opener; on = the stock urlopen that honours proxy env.
+        Tested at the branch rather than end-to-end, because urllib caches its global opener and an
+        env-based test would depend on suite ordering."""
+        req = object()
+        with mock.patch.object(mcp_client._DIRECT_OPENER, "open") as direct, \
+             mock.patch.object(mcp_client.urllib.request, "urlopen") as stock:
+            with mock.patch.object(config, "MCP_USE_PROXY", False):
+                mcp_client._urlopen(req, 5)
+            direct.assert_called_once()
+            stock.assert_not_called()
+            with mock.patch.object(config, "MCP_USE_PROXY", True):
+                mcp_client._urlopen(req, 5)
+            stock.assert_called_once()
+
+
 class ProbeTests(_ServerCase):
     def test_a_config_naming_a_tool_the_server_does_not_expose_is_reported(self):
         """The one failure the registry cannot see by itself: the config is authoritative about what

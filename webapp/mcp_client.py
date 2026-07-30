@@ -54,6 +54,18 @@ from . import config, mcp_registry
 
 _CLIENT_INFO = {"name": "sdlc-ai-recon", "version": "0.1"}
 
+# An opener with an EMPTY ProxyHandler ignores HTTP_PROXY/HTTPS_PROXY entirely. RUNBOOK-60: the
+# company proxy 403s every MCP call, because these are internal-infra hosts that must be reached
+# directly. Using this by default means the box does not have to remember to set NO_PROXY.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _urlopen(request, timeout):
+    """urlopen for MCP, bypassing system proxies unless a deployment opts back in."""
+    if config.MCP_USE_PROXY:
+        return urllib.request.urlopen(request, timeout=timeout)
+    return _DIRECT_OPENER.open(request, timeout=timeout)
+
 
 class Disabled(RuntimeError):
     """The feature flag or the server's `enabled` switch is off, or no address is configured."""
@@ -110,7 +122,7 @@ def _post(url, payload, headers, timeout):
         if value:
             request.add_header(name, value)
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        return _urlopen(request, timeout)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
         raise TransportError(f"MCP HTTP {exc.code} from {url}: {detail}")
@@ -273,7 +285,7 @@ class _LegacySse:
         request = urllib.request.Request(self.url, method="GET")
         request.add_header("Accept", "text/event-stream")
         try:
-            self._stream = urllib.request.urlopen(request, timeout=self.timeout)
+            self._stream = _urlopen(request, self.timeout)
         except urllib.error.HTTPError as exc:
             raise TransportError(f"MCP SSE HTTP {exc.code} from {self.url}: "
                                  f"{exc.read().decode('utf-8', 'replace')[:300]}")

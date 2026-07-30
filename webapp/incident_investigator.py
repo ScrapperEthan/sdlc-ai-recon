@@ -21,8 +21,9 @@ Three defences, deliberately redundant, because the expensive failure here is si
 
 Two different data sources with opposite handling rules meet in one answer:
 
-* **LogDream `hk1`/`hkp3` and CloudWatch are PRODUCTION** (owner confirmed 2026-07-29: both
-  LogDream sources are production, holding different logs).
+* **LogDream's sources and CloudWatch are PRODUCTION** (owner confirmed 2026-07-29: both LogDream
+  sources are production, holding different logs — and each has its OWN app list, so an app present
+  on one is not necessarily present on the other).
 * **The use-case route snapshot is dev/SCT**, not production — a use case absent there is not
   evidence it is absent in production.
 
@@ -54,9 +55,36 @@ import re
 from retriever import code as rcode, incident, messages as msg, repo_tags
 from . import config, incident_raw_store, mcp_client, mcp_registry
 
-# LogDream's two sources are BOTH production, holding different logs, so both are queried and every
-# piece of evidence says which one it came from (owner, 2026-07-29).
-PRODUCTION_SOURCES = ("hk1", "hkp3")
+# LogDream's sources are BOTH production, holding different logs, so both are queried and every piece
+# of evidence says which one it came from (owner, 2026-07-29).
+#
+# These are ENVIRONMENT VOCABULARY, so the intranet's config is authoritative and this is only the
+# fallback. Hard-coding them here was a mistake of exactly the kind RUNBOOK-49/50/51 were three
+# separate fixes for: the literal was `hk1` (digit one) where the server accepts `hkl` (letter L),
+# which the box reported in RUNBOOK-60 and which silently loses half the log coverage — every query
+# against the bad name comes back rejected, and a rejection that is read as "no lines" reads as
+# "no problem".
+DEFAULT_LOG_SOURCES = ("hkl", "hkp3")
+
+
+def log_sources():
+    """Sources to query, from `servers.logdream.sources` in the intranet config; else the default.
+
+    A source with `query_by_default: false` is skipped. Whatever this returns is still validated
+    against the live server before anything is searched (each source's app listing must succeed), so
+    a wrong name produces a loud, specific refusal naming that source rather than half the queries
+    quietly finding nothing.
+    """
+    declared = (mcp_registry.servers().get("logdream") or {}).get("sources")
+    if isinstance(declared, dict):
+        names = [str(name).strip() for name, spec in declared.items()
+                 if not str(name).startswith("_") and str(name).strip()
+                 and (not isinstance(spec, dict) or spec.get("query_by_default", True))]
+        if names:
+            return tuple(names)
+    return DEFAULT_LOG_SOURCES
+
+
 _MAX_EXCERPTS = 5
 _MAX_EXCERPT_CHARS = 300
 _MAX_KEYWORDS = 8
@@ -262,11 +290,11 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None):
         "keywords": [],
         "window": None,
         "sources": [str(s).strip() for s in (sources or ()) if str(s).strip()]
-                   or list(PRODUCTION_SOURCES),
+                   or list(log_sources()),
         "log_files": ["otx_trace.log", "exception.log"],
         "refusals": [],
     }
-    if out["sources"] != list(PRODUCTION_SOURCES):
+    if out["sources"] != list(log_sources()):
         out["sources_note"] = ("sources narrowed by the caller. hk1 and hkp3 are BOTH production "
                                "with different content, so a single-source result covers less than "
                                "the default — say which one was searched.")
@@ -376,7 +404,7 @@ def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", w
         "file": log_file,
         # LogDream hk1/hkp3 are both production (owner, 2026-07-29). Labelled on every item so a
         # caller never has to infer it from the source name.
-        "environment": "production" if source in PRODUCTION_SOURCES else "unknown",
+        "environment": "production" if source in log_sources() else "unknown",
         "matched_keyword": keyword,
         "lines_seen": len(lines),
         "lines_returned": len(excerpts),
@@ -387,6 +415,23 @@ def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", w
                            f"{_MAX_EXCERPT_CHARS} chars each. The full response was held in memory "
                            f"and discarded; it is not retrievable from this packet."),
     }
+
+
+def _tool_outcome(out):
+    """An MCP result -> ("error"|"empty"|"hit", text). Four outcomes, not two.
+
+    A call can (1) fail in transport — raised, never reaches here; (2) run and report failure
+    (`ok: False`); (3) run and match nothing; (4) run and return content. Reading `text`
+    unconditionally collapses 2 into 4, which is the single worst bug this feature can have: the
+    tool's own error message ("unknown source hkl") is non-empty, so it would be wrapped up and
+    presented as log evidence. A failed call must never be able to look like a finding.
+    """
+    if not isinstance(out, dict):
+        return "error", "malformed MCP result"
+    if not out.get("ok") or out.get("tool_reported_error"):
+        return "error", (out.get("text") or out.get("error") or "the tool reported failure")
+    text = out.get("text") or ""
+    return ("hit", text) if text.strip() else ("empty", "")
 
 
 def _step(step, label, **detail):
@@ -470,49 +515,93 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         return
 
     # Their own app list is the only authority on app names — ours are candidates (RUNBOOK-55).
-    yield _step("apps", "取应用清单（我们推的名字只是候选，以服务器为准）",
-                server="logdream", operation="log.list_apps")
-    live_apps = set()
-    try:
-        listing = mcp_client.call("log.list_apps")
-        live_apps = {token for token in re.split(r"[\s,\[\]\"']+", listing.get("text") or "")
-                     if token}
-    except (mcp_client.Disabled, mcp_client.TransportError,
-            mcp_registry.NotAllowed, mcp_registry.NotWired) as exc:
-        packet["not_investigated"].append(f"could not list LogDream apps: {exc}")
+    # Queried PER SOURCE, for two reasons: the real `list_logdream_apps` requires a `source`, and the
+    # two sources hold different apps, so a single merged list would send queries to a source that has
+    # never heard of the app. A source whose listing fails is dropped and named, which is also how a
+    # wrong source name in the config surfaces loudly instead of losing half the coverage silently.
+    apps_by_source = {}
+    supports_source = "source" in (mcp_registry.operations().get("log.list_apps") or {}).get(
+        "args", {})
+    for source in query_plan["sources"]:
+        yield _step("apps", "取 %s 的应用清单（我们推的名字只是候选，以服务器为准）" % source,
+                    server="logdream", operation="log.list_apps", source=source)
+        try:
+            listing = mcp_client.call("log.list_apps", {"source": source} if supports_source else None)
+        except (mcp_client.Disabled, mcp_client.TransportError,
+                mcp_registry.NotAllowed, mcp_registry.NotWired) as exc:
+            packet["not_investigated"].append(
+                f"could not list apps on source {source!r}: {exc}. Nothing was searched there.")
+            yield _step("apps_failed", "%s 的应用清单取不到，该 source 不查" % source,
+                        server="logdream", operation="log.list_apps", source=source,
+                        error=str(exc))
+            continue
+        outcome, text = _tool_outcome(listing)
+        if outcome == "error":
+            # The tool ran and refused — e.g. an unknown source name. Its error body is non-empty, so
+            # without this branch it would be split on whitespace and become "app names".
+            packet["not_investigated"].append(
+                f"source {source!r} was REJECTED by LogDream ({text[:200]}). Nothing was searched "
+                f"there. If the name is wrong, fix `servers.logdream.sources` in the intranet's "
+                f"mcp_tools.json — a bad source name otherwise costs half the log coverage silently.")
+            yield _step("apps_failed", "%s 被服务器拒绝，该 source 不查（可能是 source 名写错）" % source,
+                        server="logdream", operation="log.list_apps", source=source,
+                        rejected=True, elapsed_ms=listing.get("elapsed_ms"))
+            continue
+        found = {token for token in re.split(r"[\s,\[\]\"'{}:]+", text) if token}
+        apps_by_source[source] = found
+        yield _step("apps_done", "%s 上有 %d 个应用" % (source, len(found)),
+                    server="logdream", operation="log.list_apps", source=source,
+                    app_count=len(found), elapsed_ms=listing.get("elapsed_ms"))
+
+    if not apps_by_source:
         packet["caveats"].append(
-            "app names could not be verified against the server, so no log query was attempted — "
+            "app names could not be verified on ANY source, so no log query was attempted — "
             "querying a guessed app name returns an empty result that reads like 'no problem'.")
-        yield _step("apps_failed", "取不到应用清单，因此一条日志都没查（拿猜的名字去查会返回空，"
-                                   "而空会被读成“没问题”）",
-                    server="logdream", operation="log.list_apps", error=str(exc))
+        yield _step("apps_failed", "所有 source 都取不到应用清单，因此一条日志都没查",
+                    server="logdream", operation="log.list_apps")
         yield {"type": "result", "packet": _finish(packet, counts)}
         return
-    yield _step("apps_done", "服务器上有 %d 个应用" % len(live_apps),
-                server="logdream", operation="log.list_apps", app_count=len(live_apps),
-                elapsed_ms=listing.get("elapsed_ms"))
+    # Only search sources that actually answered.
+    query_plan["sources_searched"] = sorted(apps_by_source)
 
     for target in query_plan["targets"]:
-        match = next((c["app"] for c in target["app_candidates"] if c["app"] in live_apps), "")
+        # An app exists per SOURCE, not globally: the two sources hold different apps, so resolve the
+        # candidate against each list and only query the sources that actually have it.
+        match, on_sources = "", []
+        for candidate in target["app_candidates"]:
+            hosts = sorted(s for s, apps in apps_by_source.items() if candidate["app"] in apps)
+            if hosts:
+                match, on_sources = candidate["app"], hosts
+                break
         if not match:
             target["app_note"] = (
-                "none of the candidate app names exist on the server: "
+                "none of the candidate app names exist on any searched source ("
+                + ", ".join(sorted(apps_by_source)) + "): "
                 + ", ".join(c["app"] for c in target["app_candidates"])
                 + ". Not queried. This repo needs an entry in the intranet's "
                   "config/logdream_apps.json.")
             packet["not_investigated"].append(f"{target['repo']}: {target['app_note']}")
             yield _step("app_unresolved",
-                        "%s：候选应用名在服务器上都不存在，跳过不查" % target["repo"],
+                        "%s：候选应用名在任何 source 上都不存在，跳过不查" % target["repo"],
                         repo=target["repo"],
                         candidates=[c["app"] for c in target["app_candidates"]])
             continue
         target["app_resolved"] = match
-        yield _step("app_resolved", "%s → 应用 %s（已在服务器清单中核对）" % (target["repo"], match),
-                    repo=target["repo"], app=match)
+        target["app_on_sources"] = on_sources
+        missing_on = sorted(set(apps_by_source) - set(on_sources))
+        if missing_on:
+            # Not a failure — the sources genuinely hold different apps — but it bounds the answer,
+            # so it is stated rather than left for someone to assume full coverage.
+            target["app_note"] = (f"app {match!r} exists on {', '.join(on_sources)} but NOT on "
+                                  f"{', '.join(missing_on)}; those sources were not searched for it.")
+            packet["not_investigated"].append(f"{target['repo']}: {target['app_note']}")
+        yield _step("app_resolved",
+                    "%s → 应用 %s（在 %s 上核对到）" % (target["repo"], match, "、".join(on_sources)),
+                    repo=target["repo"], app=match, sources=on_sources)
         # Built up front and then truncated, so what got SKIPPED is exact rather than inferred from
         # where a loop happened to stop.
         wanted = [(keyword["term"], source) for keyword in query_plan["keywords"]
-                  for source in query_plan["sources"]]
+                  for source in on_sources]
         budget_left = max(0, budget - len(packet["queries_run"]))
         running, skipped = wanted[:budget_left], wanted[budget_left:]
         if skipped:
@@ -559,13 +648,28 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term)
                 continue
-            if not (out.get("text") or "").strip():
+            outcome, text = _tool_outcome(out)
+            if outcome == "error":
+                # The tool ran and reported failure. Its message is NON-EMPTY, so treating text as
+                # content here would wrap "unknown source hkl" up as a log finding and report a failed
+                # call as "we found logs" — the worst outcome this feature can produce.
+                packet["not_investigated"].append(
+                    f"{match}/{source} keyword {term!r}: the log tool REPORTED AN ERROR "
+                    f"({text[:200]}). This is not a log finding and not evidence of no matching "
+                    f"lines — the query did not succeed.")
+                yield _step("query_rejected",
+                            "%s / %s：%s 工具报错，不作为日志证据" % (match, source, term),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term, rejected=True,
+                            elapsed_ms=out.get("elapsed_ms"))
+                continue
+            if outcome == "empty":
                 yield _step("query_empty", "%s / %s：%s 无匹配" % (match, source, term),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term,
                             elapsed_ms=out.get("elapsed_ms"))
                 continue
-            item = _evidence_from_text(out["text"], term, source, match, "otx_trace.log", counts,
+            item = _evidence_from_text(text, term, source, match, "otx_trace.log", counts,
                                        owner=owner, window=query_plan.get("window"))
             packet["evidence"].append(item)
             packet["contains_production_data"] = True

@@ -188,6 +188,17 @@ class InvestigateTests(unittest.TestCase):
         self._flag.start()
         self._raw = mock.patch.object(config, "INCIDENT_RAW_LOGS", False)
         self._raw.start()
+        # Source names and the log.list_apps arg map are read from config, which differs between the
+        # committed template and the box's local file. Pinned here for the same reason retention is:
+        # these tests describe the CODE, and must not be graded against whatever config is on disk.
+        self._sources = mock.patch.object(inv, "log_sources", lambda: inv.DEFAULT_LOG_SOURCES)
+        self._sources.start()
+        self._ops = mock.patch.object(
+            inv.mcp_registry, "operations",
+            lambda cfg=None: {"log.list_apps": {"args": {"source": "source"}},
+                              "log.read": {"args": {"app": "app", "source": "source",
+                                                     "keyword": "keyword"}}})
+        self._ops.start()
         self.calls = []
 
         def _fake_call(operation, args=None, **_kw):
@@ -208,7 +219,8 @@ class InvestigateTests(unittest.TestCase):
         self._search.start()
 
     def tearDown(self):
-        for patcher in (self._search, self._parse, self._mcp, self._raw, self._flag):
+        for patcher in (self._search, self._parse, self._mcp, self._ops, self._sources,
+                        self._raw, self._flag):
             patcher.stop()
 
     def test_no_planted_secret_appears_anywhere_in_the_packet(self):
@@ -236,10 +248,12 @@ class InvestigateTests(unittest.TestCase):
         self.assertIn("dev/SCT", packet["environments"]["route_snapshot"])
 
     def test_both_production_log_sources_are_queried_and_each_item_says_which(self):
-        """Owner 2026-07-29: hk1 and hkp3 are both production and hold different logs."""
+        """Owner 2026-07-29: both LogDream sources are production and hold different logs. Asserted
+        against `log_sources()` rather than literals — the literal is what was wrong (`hk1` for
+        `hkl`), so a test that repeats it just agrees with the bug."""
         inv.investigate(ALERT)
         sources = {args.get("source") for op, args in self.calls if op == "log.read"}
-        self.assertEqual(sources, {"hk1", "hkp3"})
+        self.assertEqual(sources, set(inv.log_sources()))
 
     def test_the_window_is_passed_through_verbatim_and_never_converted(self):
         inv.investigate(ALERT)
@@ -309,7 +323,7 @@ class InvestigateTests(unittest.TestCase):
         self.assertTrue(packet["queries_run"])
         for entry in packet["queries_run"]:
             self.assertEqual(entry["app"], "cslSmsDeli")
-            self.assertIn(entry["source"], inv.PRODUCTION_SOURCES)
+            self.assertIn(entry["source"], inv.log_sources())
             self.assertTrue(entry["keyword"])
 
     def test_a_nil_result_is_scoped_to_the_keywords_actually_used(self):
@@ -356,7 +370,7 @@ class StreamingTests(InvestigateTests):
         """An opaque spinner is what makes people distrust an agent that is working correctly."""
         query = next(e for e in self._events() if e.get("step") == "query")
         self.assertEqual(query["detail"]["app"], "cslSmsDeli")
-        self.assertIn(query["detail"]["source"], inv.PRODUCTION_SOURCES)
+        self.assertIn(query["detail"]["source"], inv.log_sources())
         self.assertTrue(query["detail"]["keyword"])
         self.assertIn(query["detail"]["keyword"], query["label"])
 
@@ -466,7 +480,7 @@ class DrillDownTests(InvestigateTests):
 
     def test_blank_sources_fall_back_to_both_production_sources(self):
         packet = inv.investigate(ALERT, sources=[" "])
-        self.assertEqual({q["source"] for q in packet["queries_run"]}, set(inv.PRODUCTION_SOURCES))
+        self.assertEqual({q["source"] for q in packet["queries_run"]}, set(inv.log_sources()))
         self.assertNotIn("sources_note", packet["plan"])
 
 
@@ -513,6 +527,136 @@ class AgentRelayTests(unittest.TestCase):
         self.assertEqual(len(relayed), 1)
         self.assertEqual(relayed[0]["agent"], "incident_investigate")
         self.assertEqual(relayed[0]["label"], "读告警")
+
+
+class ToolErrorIsNeverEvidenceTests(InvestigateTests):
+    """Reported by the intranet 2026-07-30, and the most dangerous defect this feature has had.
+
+    An MCP call has FOUR outcomes: transport failure (raised), the tool running and reporting failure,
+    the tool succeeding with nothing, and the tool succeeding with content. Reading `text`
+    unconditionally collapses the second into the fourth — and a tool's error body is non-empty, so
+    "unknown source hkl" would be wrapped up and presented as log evidence.
+    """
+
+    def test_a_tool_reported_error_from_log_read_never_becomes_evidence(self):
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            return {"ok": False, "tool_reported_error": True, "text": "unknown source hkl"}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        self.assertFalse(packet["contains_production_data"])
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("REPORTED AN ERROR", joined)
+        self.assertIn("not a log finding", joined)
+        self.assertNotIn("unknown source hkl", json.dumps(packet["evidence"]))
+
+    def test_a_rejected_read_is_streamed_as_a_stop_not_as_a_hit(self):
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            return {"ok": False, "tool_reported_error": True, "text": "unknown source hkl"}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            steps = [e["step"] for e in inv.investigate_events(ALERT)
+                     if e.get("type") == "subagent_step"]
+        self.assertIn("query_rejected", steps)
+        self.assertNotIn("evidence", steps)
+
+    def test_an_error_body_from_list_apps_never_becomes_app_names(self):
+        """It would otherwise be split on whitespace and every token treated as an app."""
+        def _fake_call(operation, args=None, **_kw):
+            return {"ok": False, "tool_reported_error": True,
+                    "text": "unknown source hk1 - valid sources are hkl hkp3"}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("REJECTED by LogDream", joined)
+        self.assertIn("half the log coverage", joined)
+
+    def test_a_source_rejected_on_listing_is_dropped_and_the_other_still_runs(self):
+        """A wrong source name must cost that source, not the whole investigation."""
+        def _fake_call(operation, args=None, **_kw):
+            source = (args or {}).get("source")
+            if operation == "log.list_apps":
+                if source == inv.log_sources()[0]:
+                    return {"ok": False, "tool_reported_error": True, "text": "unknown source"}
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            return {"ok": True, "text": DIRTY_LOG}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        searched = {q["source"] for q in packet["queries_run"]}
+        self.assertEqual(searched, {inv.log_sources()[1]})
+        self.assertTrue(packet["evidence"])
+        self.assertIn("REJECTED", " ".join(packet["not_investigated"]))
+
+    def test_the_outcome_helper_separates_all_four_cases(self):
+        self.assertEqual(inv._tool_outcome({"ok": True, "text": "lines"}), ("hit", "lines"))
+        self.assertEqual(inv._tool_outcome({"ok": True, "text": "  "}), ("empty", ""))
+        self.assertEqual(inv._tool_outcome({"ok": False, "text": "boom"}), ("error", "boom"))
+        self.assertEqual(
+            inv._tool_outcome({"ok": True, "tool_reported_error": True, "text": "boom"}),
+            ("error", "boom"))
+        self.assertEqual(inv._tool_outcome(None)[0], "error")
+
+
+class LogSourceResolutionTests(unittest.TestCase):
+    """`hk1` (digit one) vs `hkl` (letter L), reported by the intranet 2026-07-30. Source names are
+    ENVIRONMENT vocabulary, so the config owns them and Python only holds the fallback."""
+
+    def test_the_default_source_is_the_letter_l_not_a_digit_one(self):
+        self.assertEqual(inv.DEFAULT_LOG_SOURCES, ("hkl", "hkp3"))
+        self.assertNotIn("hk1", inv.DEFAULT_LOG_SOURCES)
+
+    def test_sources_come_from_the_intranet_config_when_declared(self):
+        """Hard-coding them was the RUNBOOK-49/50/51 mistake again: environment vocabulary in Python
+        needs a push to fix, and the box cannot push."""
+        with mock.patch.object(inv.mcp_registry, "servers", lambda cfg=None: {
+                "logdream": {"sources": {"alpha": {"query_by_default": True},
+                                          "beta": {"query_by_default": False},
+                                          "_note": "doc key"}}}):
+            self.assertEqual(inv.log_sources(), ("alpha",))
+
+    def test_a_config_without_sources_falls_back_to_the_default(self):
+        for servers in ({"logdream": {}}, {}, {"logdream": {"sources": {}}}):
+            with mock.patch.object(inv.mcp_registry, "servers", lambda cfg=None, s=servers: s):
+                self.assertEqual(inv.log_sources(), inv.DEFAULT_LOG_SOURCES)
+
+
+class SourceHandlingTests(InvestigateTests):
+    """`log.list_apps` needs a `source`, and the two sources hold different app lists."""
+
+    def test_list_apps_is_called_once_per_source_with_the_source_argument(self):
+        """The real `list_logdream_apps` requires it, and the two sources hold DIFFERENT apps."""
+        inv.investigate(ALERT)
+        listings = [args for op, args in self.calls if op == "log.list_apps"]
+        self.assertEqual(len(listings), len(inv.log_sources()))
+        self.assertEqual({a.get("source") for a in listings}, set(inv.log_sources()))
+
+    def test_an_app_present_on_only_one_source_is_queried_only_there(self):
+        """Querying a source that has never heard of the app returns empty — which reads as
+        'no problem'."""
+        only = inv.log_sources()[1]
+        def _fake_call(operation, args=None, **_kw):
+            source = (args or {}).get("source")
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]' if source == only else '["other"]'}
+            return {"ok": True, "text": DIRTY_LOG}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertEqual({q["source"] for q in packet["queries_run"]}, {only})
+        self.assertIn("but NOT on", " ".join(packet["not_investigated"]))
+
+    def test_source_is_omitted_when_the_operation_does_not_map_it(self):
+        """Schema-flexible: the committed config declares no args for log.list_apps, and the box's
+        local one does. Neither should crash."""
+        with mock.patch.object(inv.mcp_registry, "operations",
+                               lambda cfg=None: {"log.list_apps": {"args": {}}}):
+            inv.investigate(ALERT)
+        listings = [args for op, args in self.calls if op == "log.list_apps"]
+        self.assertTrue(listings)
+        self.assertEqual([a.get("source") for a in listings], [None] * len(listings))
 
 
 class ToolSurfaceTests(unittest.TestCase):

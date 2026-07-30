@@ -175,6 +175,95 @@ for name, e in sorted(r.items()):
 
 ---
 
+---
+
+## 追加(2026-07-30):调查链三个缺陷已修,开 `SDLC_MCP_ENABLED=1` 前请再跑这一段
+
+你在 pull 前的初检提了三条,**全部确认是我的问题,全部已修**。你先前拦住不让开开关,是对的。
+
+| 你报的 | 状态 | 我改了什么 |
+| --- | --- | --- |
+| `hk1` 应为 `hkl`(数字 1 vs 小写 L) | ✅ 已修 | 代码默认值改成 `hkl`;更重要的是**不再硬编码** —— source 列表改为从 `servers.logdream.sources` 读(环境词表归你),Python 里只留兜底 |
+| `log.list_apps` 没传 `source`,且两个 source 的 app 清单不同 | ✅ 已修 | **按 source 各调一次**并传 `source`;一个 app 只在**它真实存在的 source** 上查;某个 app 只在一边有,会明确写进 `not_investigated` |
+| 未分流 MCP 工具错误 | ✅ 已修 | 新增 `_tool_outcome()` 四路分流:传输失败 / **工具报错** / 成功零命中 / 成功有内容。工具报错**禁止进 evidence**,走 `not_investigated`,前端显示 `✖ 工具报错,不作为日志证据` |
+
+⚠️ **有一件事需要你在盒子上做**(我故意没动):`config/mcp_tools.json` 是**你的文件**,
+按既定纪律我不在你有本地改动的路径上提交,免得你 pull 冲突。但**已提交的模板里还有两处旧值**:
+
+```
+"sources": { "hk1": {...}, "hkp3": {...} }        ← 应为 "hkl"
+"log.list_apps": { "args": {} }                    ← 应为 { "source": "source" }
+```
+
+你本地那份应该已经是对的(RB-60 就是这么跑通的)。**请确认你本地这两处正确即可**,
+不需要动已提交的模板。如果你希望我把模板也改对(会让你 pull 时冲突一次),说一句我就改。
+
+### 追加检查 A —— source 名与 app 清单
+
+```bash
+python -c "
+from webapp import incident_investigator as inv
+print('生效的 source :', inv.log_sources())
+print('代码兜底值    :', inv.DEFAULT_LOG_SOURCES)
+from webapp import mcp_registry
+print('list_apps args:', (mcp_registry.operations().get('log.list_apps') or {}).get('args'))
+"
+```
+
+**要回报:** 三行。判定:`生效的 source` 必须是真机接受的那两个;
+`list_apps args` 里必须有 `source`,否则代码会退化成不传 source(能跑但拿不到权威清单)。
+
+### 追加检查 B ⭐ —— 工具报错不再被当成日志证据
+
+故意用一个**错的 source 名**跑一次调查,确认它被当成"没查"而不是"查到了":
+
+```bash
+python -c "
+from unittest import mock
+from webapp import incident_investigator as inv
+with mock.patch.object(inv, 'log_sources', lambda: ('hk1',)):   # 故意用错的名字
+    p = inv.investigate('prodECS_<填一个真实仓库名>_service_CPUUtilizationMINOR[80percent] 03:15 HKT')
+print('evidence 条数        :', len(p['evidence']))
+print('contains_production  :', p['contains_production_data'])
+print('not_investigated     :')
+for n in p['not_investigated']: print('   -', n[:160])
+"
+```
+
+**期望:** `evidence 条数 = 0`、`contains_production = False`,
+并且 `not_investigated` 里出现 **`REJECTED by LogDream`** 或 **`REPORTED AN ERROR`**。
+
+🔴 **如果 evidence 不是 0,立刻停下回报** —— 那说明分流没生效,错误正文又被包成日志了,
+那是这个功能能犯的最严重的错误。
+
+### 追加检查 C —— 正常路径仍然通
+
+用**正确**的 source 跑一次真实调查(和上面检查 2 同一个告警即可),回报:
+
+```
+生效 source     : ___
+每个 source 的 app 数 : ___ / ___
+app 解析结果    : <repo> → <app>,在哪些 source 上核对到
+evidence 条数   : ___
+not_investigated: ___ 条(逐条贴前 160 字)
+```
+
+**判定:** app 数应该接近 RB-55 记的 98 / 93;`app 解析结果` 里的 source 列表要和实际相符。
+
+### 追加检查 D —— 然后才开开关
+
+上面 A/B/C 都符合预期,再把 `SDLC_MCP_ENABLED=1` 打开跑一次真实聊天,
+问一句"**这个告警的日志说明了什么**",回报:
+
+- [ ] 前端 sub-agent 面板出现,每步带 `logdream · log.read` 徽标和耗时
+- [ ] 有 source 被拒时显示 `✖`,并且答案里**没有**把它说成"查到了日志"
+- [ ] 助手明确区分"没查"(`not_investigated`)和"查了没有"
+- [ ] 告警不带时区时,助手**先问**"这个 03:15 是 HKT 还是 UTC",而不是自己猜
+
+任何一条不符合 —— 贴原话,那是 prompt 或代码要改。
+
+---
+
 ## 附:这一步之后**还差什么**才能真正答事故问题
 
 传输层通了不等于助手会用它。剩下的顺序是:

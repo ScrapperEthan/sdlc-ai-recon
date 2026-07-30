@@ -3,7 +3,7 @@ Add a tool by adding a schema here and a branch in dispatch()."""
 import impact_report
 import outage_report
 from retriever import (graph, messages as msg, code, flow, unified_impact, arch_focus,
-                        usecase_consistency, usecase_master, repo_tags, incident)
+                        usecase_consistency, usecase_master, repo_tags, incident, criticality)
 
 # Order affected-repo relations from the most direct (the vendor's own delivery/API) to the widest
 # (dependency closure), so the inline view's repo sample leads with what actually breaks.
@@ -310,6 +310,20 @@ TOOLS = [
             "templates/campaigns/billing — there is no evidence it controls the runtime route.",
             {"alert_text": {"type": "string"}, "max_use_cases": {"type": "integer"}},
             ["alert_text"]),
+    _schema("critical_repos",
+            "Which repos are most critical — scored on SEVERAL independent axes, not one ranking. "
+            "Call for '最核心的服务是哪些', 'top 10 core components', '哪个仓库最不能出问题', "
+            "'最该加测试的是哪些'. "
+            "IMPORTANT — how to report it: (1) the PER-AXIS ranks are the real answer; `score` is "
+            "one equal-weighted view. A build-time dependency hub (`api-common`: everything depends "
+            "on it, carries no messages) and a runtime traffic hub (a delivery job: carries every "
+            "SMS, nothing depends on it) are different kinds of critical, and a single list hides "
+            "which one you picked — so compare axes explicitly; (2) ALWAYS state "
+            "`missing_dimensions` — production traffic, incident history and test coverage are NOT "
+            "scored, so this is a top-10 of what is measurable today and must be presented that "
+            "way, with who each missing axis is blocked on; (3) a `business` value of 0 means the "
+            "dev/SCT route snapshot does not cover that repo's topics, NEVER 'no business impact'.",
+            {"top": {"type": "integer"}}, []),
     _schema("incident_investigate",
             "ROOT-CAUSE track: read the actual PRODUCTION LOGS for an alert. This is the other half "
             "of incident response — `incident_impact` answers 'who is affected' with zero "
@@ -340,6 +354,32 @@ TOOLS = [
 # instead of the shared `tools` lane. A log packet arriving mid-turn must not eat the room the other
 # tools in that same turn still need.
 SUBAGENT_TOOLS = frozenset({"incident_investigate"})
+
+
+def dispatch_events(name, a):
+    """Streaming dispatch for sub-agent tools: yield progress events, then a terminal `result`.
+
+    Exists so the agent loop can relay a sub-agent's steps to the browser without threads or
+    queues. A 30-second log sweep behind an opaque spinner is what makes people distrust an agent
+    that is working correctly, so the same events that prove it is working are the ones shown.
+    Anything not in SUBAGENT_TOOLS yields exactly one `result`, so callers need no special case.
+    """
+    a = a or {}
+    if name == "incident_investigate":
+        text = (a.get("alert_text") or "").strip()
+        if not text:
+            yield {"type": "result",
+                   "packet": {"ok": False,
+                              "error": "alert_text is required (paste the raw alert verbatim)"}}
+            return
+        # Imported here, not at module import time: this is the only tool that can reach production,
+        # and keeping the import local means the retrieval-only tool surface does not depend on it.
+        from . import incident_investigator
+        for event in incident_investigator.investigate_events(
+                text, timezone=(a.get("timezone") or "").strip() or None):
+            yield event
+        return
+    yield {"type": "result", "packet": dispatch(name, a)}
 
 
 def dispatch(name, a):
@@ -481,15 +521,14 @@ def dispatch(name, a):
         if not text:
             return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
         return incident.incident_impact(text, max_use_cases=int(a.get("max_use_cases") or 40))
+    if name == "critical_repos":
+        return criticality.rank(top=int(a.get("top") or 10))
     if name == "incident_investigate":
-        text = (a.get("alert_text") or "").strip()
-        if not text:
-            return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
-        # Imported here, not at module import time: this is the only tool that can reach production,
-        # and keeping the import local means the retrieval-only tool surface does not depend on it.
-        from . import incident_investigator
-        return incident_investigator.investigate(
-            text, timezone=(a.get("timezone") or "").strip() or None)
+        result = {}
+        for event in dispatch_events(name, a):
+            if event.get("type") == "result":
+                result = event["packet"]
+        return result
     if name == "show_coverage":
         return _coverage_view(a.get("kind"), a.get("value"))
     return {"error": f"unknown tool: {name}"}

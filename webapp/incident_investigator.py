@@ -334,14 +334,53 @@ def _evidence_from_text(raw, keyword, source, app, log_file, counts):
     }
 
 
-def investigate(alert_text, repos=None, timezone=None, query_plan=None):
-    """Run the plan against the log MCP and return a sanitized evidence packet.
+def _step(step, label, **detail):
+    """One progress event.
 
-    Never returns raw log text. Never raises for an unreachable server — an incident answer needs to
+    Passed through the SAME exit gate as the packet before it leaves. Progress lines are built from
+    structured fields only (app, source, keyword, counts), but they are streamed straight to a
+    browser, so they are the one place where a redaction miss would be visible before anybody could
+    review it. Gating them costs nothing and removes the need to reason about it per call site.
+    """
+    event = {"type": "subagent_step", "step": step, "label": label, "detail": detail}
+    cleaned, _report = sanitize_packet(event)
+    return cleaned
+
+
+def investigate(alert_text, repos=None, timezone=None, query_plan=None):
+    """Run the plan and return the sanitized evidence packet (drains `investigate_events`)."""
+    packet = {}
+    for event in investigate_events(alert_text, repos=repos, timezone=timezone,
+                                    query_plan=query_plan):
+        if event.get("type") == "result":
+            packet = event["packet"]
+    return packet
+
+
+def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
+    """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
+
+    A generator rather than a callback so the caller can relay progress to a browser without threads
+    or queues: the agent loop simply forwards each `subagent_step` and keeps the terminal `result`.
+    The user watching a 30-second log sweep should see WHICH app, source and keyword is being spent —
+    an opaque spinner is what makes people distrust an agent that is actually working correctly.
+
+    Never yields raw log text. Never raises for an unreachable server — an incident answer needs to
     say "the log service did not respond" as a finding, not fall over.
     """
-    query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone)
     counts = {}
+    yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
+    query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone)
+    if query_plan.get("targets") or query_plan.get("keywords"):
+        yield _step(
+            "plan_done",
+            "计划就绪：%d 个服务，%d 个关键词，时间窗 %s" % (
+                len(query_plan.get("targets") or []),
+                len(query_plan.get("keywords") or []),
+                (query_plan.get("window") or {}).get("timezone") or "未确定"),
+            repos=[t["repo"] for t in query_plan.get("targets") or []],
+            keywords=[k["term"] for k in query_plan.get("keywords") or []],
+            window=query_plan.get("window"))
     packet = {
         "ok": False,
         "plan": query_plan,
@@ -360,16 +399,22 @@ def investigate(alert_text, repos=None, timezone=None, query_plan=None):
     if not query_plan.get("ok"):
         packet["not_investigated"] = list(query_plan.get("refusals") or [])
         packet["caveats"].append("nothing was queried; see not_investigated")
-        return _finish(packet, counts)
+        yield _step("refused", "拒绝调查：告警里读不出服务或用例，不猜", reasons=packet["not_investigated"])
+        yield {"type": "result", "packet": _finish(packet, counts)}
+        return
 
     if not config.MCP_ENABLED:
         packet["not_investigated"].append(
             "log querying is switched off (SDLC_MCP_ENABLED unset), so this answer rests on local "
             "artefacts only. The blast-radius answer does not need it; a root-cause answer does.")
         packet["caveats"].append("no production data was read")
-        return _finish(packet, counts)
+        yield _step("disabled", "日志查询开关未开（SDLC_MCP_ENABLED），没有读任何生产数据")
+        yield {"type": "result", "packet": _finish(packet, counts)}
+        return
 
     # Their own app list is the only authority on app names — ours are candidates (RUNBOOK-55).
+    yield _step("apps", "取应用清单（我们推的名字只是候选，以服务器为准）",
+                server="logdream", operation="log.list_apps")
     live_apps = set()
     try:
         listing = mcp_client.call("log.list_apps")
@@ -381,7 +426,14 @@ def investigate(alert_text, repos=None, timezone=None, query_plan=None):
         packet["caveats"].append(
             "app names could not be verified against the server, so no log query was attempted — "
             "querying a guessed app name returns an empty result that reads like 'no problem'.")
-        return _finish(packet, counts)
+        yield _step("apps_failed", "取不到应用清单，因此一条日志都没查（拿猜的名字去查会返回空，"
+                                   "而空会被读成“没问题”）",
+                    server="logdream", operation="log.list_apps", error=str(exc))
+        yield {"type": "result", "packet": _finish(packet, counts)}
+        return
+    yield _step("apps_done", "服务器上有 %d 个应用" % len(live_apps),
+                server="logdream", operation="log.list_apps", app_count=len(live_apps),
+                elapsed_ms=listing.get("elapsed_ms"))
 
     for target in query_plan["targets"]:
         match = next((c["app"] for c in target["app_candidates"] if c["app"] in live_apps), "")
@@ -392,8 +444,14 @@ def investigate(alert_text, repos=None, timezone=None, query_plan=None):
                 + ". Not queried. This repo needs an entry in the intranet's "
                   "config/logdream_apps.json.")
             packet["not_investigated"].append(f"{target['repo']}: {target['app_note']}")
+            yield _step("app_unresolved",
+                        "%s：候选应用名在服务器上都不存在，跳过不查" % target["repo"],
+                        repo=target["repo"],
+                        candidates=[c["app"] for c in target["app_candidates"]])
             continue
         target["app_resolved"] = match
+        yield _step("app_resolved", "%s → 应用 %s（已在服务器清单中核对）" % (target["repo"], match),
+                    repo=target["repo"], app=match)
         # Built up front and then truncated, so what got SKIPPED is exact rather than inferred from
         # where a loop happened to stop.
         wanted = [(keyword["term"], source) for keyword in query_plan["keywords"]
@@ -407,7 +465,14 @@ def investigate(alert_text, repos=None, timezone=None, query_plan=None):
                 + ", ".join(f"{term} on {source}" for term, source in skipped)
                 + ". Raise SDLC_INCIDENT_MAX_LOG_QUERIES or narrow the keywords — do NOT read this "
                   "as 'those keywords found nothing'.")
-        for term, source in running:
+            yield _step("budget_spent",
+                        "查询预算用完，%d 个关键词/source 组合没查" % len(skipped),
+                        skipped=[f"{term}@{source}" for term, source in skipped])
+        for index, (term, source) in enumerate(running, 1):
+            yield _step("query", "查 %s / %s：关键词 %s（%d/%d）" % (
+                match, source, term, index, len(running)),
+                server="logdream", operation="log.read",
+                app=match, source=source, keyword=term)
             args = {"app": match, "source": source, "keyword": term}
             packet["queries_run"].append({"app": match, "source": source, "keyword": term})
             window = query_plan.get("window")
@@ -420,24 +485,57 @@ def investigate(alert_text, repos=None, timezone=None, query_plan=None):
             except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
                 packet["not_investigated"].append(f"log.read unavailable: {exc}")
                 packet["caveats"].append("the log read operation is not fully wired yet")
-                return _finish(packet, counts)
+                # Refused by the allow-list / naming seam, NOT a failure to reach the server. Ops
+                # need these apart: one is "nobody finished wiring this", the other is "the log
+                # service is down", and they get escalated to different people.
+                yield _step("unwired", "日志读取操作还没接通完（被本地白名单/命名层拒绝，未发出请求）：%s"
+                            % exc, server="logdream", operation="log.read", refused_locally=True)
+                yield {"type": "result", "packet": _finish(packet, counts)}
+                return
             except mcp_client.TransportError as exc:
                 packet["not_investigated"].append(
                     f"{match}/{source} keyword {term!r}: log service did not respond ({exc}). "
                     f"This is NOT evidence of no matching lines.")
+                yield _step("query_failed",
+                            "%s / %s 没响应 —— 这不等于“没有匹配的日志”" % (match, source),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term)
                 continue
             if not (out.get("text") or "").strip():
+                yield _step("query_empty", "%s / %s：%s 无匹配" % (match, source, term),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term,
+                            elapsed_ms=out.get("elapsed_ms"))
                 continue
-            packet["evidence"].append(_evidence_from_text(
-                out["text"], term, source, match, "otx_trace.log", counts))
+            item = _evidence_from_text(out["text"], term, source, match, "otx_trace.log", counts)
+            packet["evidence"].append(item)
             packet["contains_production_data"] = True
+            # Counts and exception classes only — never a line, not even a redacted one. Excerpts
+            # exist in the packet, which the model reads; the live stream does not need them.
+            yield _step("evidence",
+                        "%s / %s：命中 %d 行，异常类 %s" % (
+                            match, source, item["lines_seen"],
+                            "、".join(item["exception_classes"]) or "无"),
+                        server="logdream", operation="log.read",
+                        app=match, source=source, keyword=term,
+                        lines_seen=item["lines_seen"],
+                        exception_classes=item["exception_classes"],
+                        elapsed_ms=out.get("elapsed_ms"),
+                        truncated=bool(out.get("truncated")))
 
     packet["ok"] = bool(packet["evidence"]) or not packet["not_investigated"]
     if not packet["evidence"] and packet["queries_run"] and not packet["not_investigated"]:
         packet["caveats"].append(
             "the queries ran and matched nothing. That is a real finding only for the keywords and "
             "window actually used — see `queries_run`.")
-    return _finish(packet, counts)
+    final = _finish(packet, counts)
+    yield _step("summary", "调查完成：%d 条证据，%d 项没查（脱敏 %d 处）" % (
+        len(final.get("evidence") or []), len(final.get("not_investigated") or []),
+        sum((final.get("redactions") or {}).values())),
+        evidence=len(final.get("evidence") or []),
+        not_investigated=len(final.get("not_investigated") or []),
+        redactions=final.get("redactions") or {})
+    yield {"type": "result", "packet": final}
 
 
 def _finish(packet, counts):

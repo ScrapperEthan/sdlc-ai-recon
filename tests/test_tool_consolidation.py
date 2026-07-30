@@ -17,9 +17,13 @@ EXPECTED_MODEL_TOOLS = {
     "impact", "hubs", "message_flow", "usecase_routing", "list_repos", "search_code",
     "read_file", "unified_impact", "show_arch", "source_system_impact", "usecase_impact",
     "search_usecases", "usecase_quality_findings",
-    # The 13 above are the Q&A surface and MUST stay 13 — that consolidation is the whole point of
-    # this file. Anything added below is a DELIBERATE new capability, listed separately so the count
-    # of the Q&A surface stays auditable and a merge can't quietly regrow it.
+    # Multi-axis criticality (showcase 8). A Q&A tool, so it genuinely grows that surface from 13 to
+    # 14 — recorded here rather than excused, because the point of the count is that every increase
+    # is a decision somebody made. It does NOT re-add a retired name: `hubs` remains the
+    # single-axis Maven view and this is the several-axis one that says what it cannot measure.
+    "critical_repos",   # 2026-07-30
+    # Anything below is a DELIBERATE new capability outside the Q&A surface, listed separately so
+    # that count stays auditable and a merge can't quietly regrow it.
     "incident_impact",   # incident triage (phase 1: local artefacts only, no MCP) — 2026-07-28
     # Root-cause track. Reaches production logs, so it is only safe as a model tool because the
     # result comes back through the investigator's redaction + exit gate — see
@@ -27,7 +31,7 @@ EXPECTED_MODEL_TOOLS = {
     "incident_investigate",   # 2026-07-30
 }
 _INCIDENT_TOOLS = {"incident_impact", "incident_investigate"}
-_QA_SURFACE = 13
+_QA_SURFACE = 14
 
 
 class ModelToolSurfaceTests(unittest.TestCase):

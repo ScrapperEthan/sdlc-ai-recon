@@ -626,6 +626,90 @@
     font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 
+  /* Sub-agent activity. Visually distinct from the retrieval-step chips because it IS different:
+     this is the one code path that reads production logs, so "the investigator ran" must be
+     unmistakable in the transcript rather than looking like one more retrieval call. */
+  .subagent {
+    width: 100%;
+    margin-top: 2px;
+    border: 1px solid #c9b8ea;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(124, 92, 196, .06), rgba(124, 92, 196, .02));
+    overflow: hidden;
+  }
+
+  .subagent summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    color: #5b4394;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .subagent summary::-webkit-details-marker { display: none; }
+
+  .subagent-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0 12px 12px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .subagent-step {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #3f3363;
+  }
+
+  .subagent-step .mark { flex: 0 0 auto; opacity: .85; }
+
+  /* Which external system was called, and how long it took. Ops asked for this specifically: the
+     step text alone does not say whether a line came from OUR index or from a call into LogDream,
+     and that is the first thing you need to know when a step looks wrong. */
+  .subagent-mcp {
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border-radius: 4px;
+    border: 1px solid #9f86d0;
+    background: rgba(124, 92, 196, .12);
+    color: #4b3a7d;
+    font-size: 10.5px;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+  }
+
+  .subagent-step .took { flex: 0 0 auto; margin-left: auto; opacity: .7; font-size: 11px; }
+  .subagent-step .took.is-slow { color: #8a5a12; opacity: 1; font-weight: 650; }
+  .subagent-step.is-warn { color: #8a5a12; }
+  .subagent-step.is-stop { color: #a12d2d; }
+  .subagent-step.is-hit { color: #1f6f5c; font-weight: 650; }
+
+  .subagent-live {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #7c5cc4;
+    animation: subagent-pulse 1.1s ease-in-out infinite;
+  }
+
+  @keyframes subagent-pulse {
+    0%, 100% { opacity: .25; transform: scale(.8); }
+    50%      { opacity: 1;   transform: scale(1.15); }
+  }
+
+  .subagent-note {
+    padding: 0 12px 10px;
+    font-size: 11.5px;
+    color: #6b5a93;
+  }
+
   .composer-wrap {
     max-width: 980px;
     width: 100%;
@@ -1798,6 +1882,91 @@ function showLiveTools(container, trace, completed = false) {
   log.scrollTop = log.scrollHeight;
 }
 
+// Step kinds that must not read as routine progress. A server that did not answer, or a repo that
+// was skipped, is a "we did not look" — the whole point of surfacing these is that the user can tell
+// that apart from "we looked and found nothing".
+const SUBAGENT_WARN = new Set(['budget_spent', 'query_failed', 'app_unresolved', 'query_empty']);
+const SUBAGENT_STOP = new Set(['refused', 'disabled', 'apps_failed', 'unwired']);
+const SUBAGENT_MARKS = {
+  plan: '◇', plan_done: '◆', apps: '◇', apps_done: '◆', app_resolved: '→',
+  app_unresolved: '⚠', query: '·', query_empty: '○', query_failed: '⚠', evidence: '●',
+  budget_spent: '⚠', refused: '■', disabled: '■', apps_failed: '■', unwired: '■', summary: '✓'
+};
+
+function showSubagent(container, steps, completed = false) {
+  const existing = container.querySelector('.subagent');
+  if (existing) existing.remove();
+  if (!steps.length) return;
+
+  const details = document.createElement('details');
+  details.className = 'subagent';
+  details.open = true;
+
+  const summary = document.createElement('summary');
+  const dot = document.createElement('span');
+  if (completed) {
+    dot.textContent = '✓';
+  } else {
+    dot.className = 'subagent-live';
+  }
+  const title = document.createElement('span');
+  const hits = steps.filter((s) => s.step === 'evidence').length;
+  title.textContent = completed
+    ? `事故调查员 已完成 · ${steps.length} 步` + (hits ? ` · ${hits} 条证据` : '')
+    : `事故调查员 正在调查 · ${steps.length} 步`;
+  summary.append(dot, title);
+
+  const list = document.createElement('div');
+  list.className = 'subagent-steps';
+  steps.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'subagent-step';
+    if (SUBAGENT_STOP.has(item.step)) row.classList.add('is-stop');
+    else if (SUBAGENT_WARN.has(item.step)) row.classList.add('is-warn');
+    else if (item.step === 'evidence') row.classList.add('is-hit');
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = SUBAGENT_MARKS[item.step] || '·';
+    row.appendChild(mark);
+
+    const detail = item.detail || {};
+    if (detail.server) {
+      const badge = document.createElement('span');
+      badge.className = 'subagent-mcp';
+      // Name the MCP server AND the abstract operation. "logdream · log.read" tells an operator both
+      // which system was contacted and which of our allow-listed operations did it.
+      badge.textContent = detail.server + (detail.operation ? ' · ' + detail.operation : '');
+      badge.title = detail.refused_locally
+        ? '本地白名单/命名层拒绝，未发出网络请求'
+        : '经 MCP 调用外部系统';
+      row.appendChild(badge);
+    }
+
+    const label = document.createElement('span');
+    label.textContent = item.label || item.step || '';
+    row.appendChild(label);
+
+    if (typeof detail.elapsed_ms === 'number') {
+      const took = document.createElement('span');
+      took.className = 'took' + (detail.elapsed_ms >= 5000 ? ' is-slow' : '');
+      took.textContent = (detail.elapsed_ms / 1000).toFixed(1) + 's';
+      row.appendChild(took);
+    }
+    list.appendChild(row);
+  });
+
+  const note = document.createElement('div');
+  note.className = 'subagent-note';
+  const mcpCount = steps.filter((s) => (s.detail || {}).server).length;
+  note.textContent = (mcpCount ? `经 MCP 调用外部系统 ${mcpCount} 次。` : '')
+    + '原始生产日志只存在于调查员内存中，脱敏聚合后才返回；此处只显示计数与异常类，不显示日志内容。';
+
+  details.append(summary, list, note);
+  container.appendChild(details);
+  list.scrollTop = list.scrollHeight;
+  log.scrollTop = log.scrollHeight;
+}
+
 function formatCount(value) {
   return (Number(value) || 0).toLocaleString('en-US');
 }
@@ -1997,6 +2166,7 @@ async function askStream(text) {
   setBusy(true);
 
   const trace = [];
+  const subagentSteps = [];
   let answer = '';
   let started = false;
 
@@ -2034,6 +2204,9 @@ async function askStream(text) {
         if (event.type === 'tool_start') {
           trace.push({tool: event.name || 'tool'});
           showLiveTools(pending, trace);
+        } else if (event.type === 'subagent_step') {
+          subagentSteps.push(event);
+          showSubagent(pending, subagentSteps, event.step === 'summary');
         } else if (event.type === 'view') {
           renderInlineView(pending, event.view);
         } else if (event.type === 'token') {
@@ -2052,6 +2225,7 @@ async function askStream(text) {
           markCitations(bubble, event.citations);
           history.push({role:'assistant', content: answer || ''});
           if (event.tool_trace && event.tool_trace.length) showLiveTools(pending, event.tool_trace, true);
+          if (subagentSteps.length) showSubagent(pending, subagentSteps, true);
           if (event.usage) renderUsage(pending, event.usage);
           if (event.session) {
             currentSessionId = event.session.id;

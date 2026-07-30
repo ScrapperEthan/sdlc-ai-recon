@@ -317,6 +317,145 @@ class InvestigateTests(unittest.TestCase):
         self.assertTrue(packet["plan"]["keywords"])
 
 
+class StreamingTests(InvestigateTests):
+    """Progress events are streamed straight to a browser, so they are the one place a redaction
+    miss would be visible before anyone could review it. Inherits the fixtures above."""
+
+    def _events(self, **kw):
+        return list(inv.investigate_events(ALERT, **kw))
+
+    def test_no_planted_secret_appears_in_any_streamed_event(self):
+        blob = json.dumps([e for e in self._events() if e.get("type") == "subagent_step"],
+                          ensure_ascii=False)
+        for secret in SECRETS:
+            self.assertNotIn(secret, blob, f"{secret} leaked into a progress event")
+
+    def test_the_stream_never_carries_a_log_line_even_a_redacted_one(self):
+        """Excerpts belong in the packet, which the model reads. The live feed needs counts only."""
+        for event in self._events():
+            if event.get("type") != "subagent_step":
+                continue
+            self.assertNotIn("excerpts", event["detail"])
+            self.assertNotIn("ERROR", event["label"])
+
+    def test_the_steps_narrate_plan_then_apps_then_queries_then_summary(self):
+        steps = [e["step"] for e in self._events() if e.get("type") == "subagent_step"]
+        self.assertEqual(steps[0], "plan")
+        self.assertEqual(steps[-1], "summary")
+        for expected in ("plan_done", "apps", "apps_done", "app_resolved", "query", "evidence"):
+            self.assertIn(expected, steps)
+
+    def test_a_query_step_names_the_app_source_and_keyword_being_spent(self):
+        """An opaque spinner is what makes people distrust an agent that is working correctly."""
+        query = next(e for e in self._events() if e.get("step") == "query")
+        self.assertEqual(query["detail"]["app"], "cslSmsDeli")
+        self.assertIn(query["detail"]["source"], inv.PRODUCTION_SOURCES)
+        self.assertTrue(query["detail"]["keyword"])
+        self.assertIn(query["detail"]["keyword"], query["label"])
+
+    def test_every_external_call_step_names_the_mcp_server_and_operation(self):
+        """Ops need to see that a step was a call INTO LogDream, not a read of our own index —
+        it is the first thing you check when a step looks wrong."""
+        called = [e for e in self._events()
+                  if e.get("type") == "subagent_step" and (e["detail"].get("server"))]
+        self.assertTrue(called)
+        for event in called:
+            self.assertEqual(event["detail"]["server"], "logdream")
+            self.assertIn(event["detail"]["operation"], ("log.list_apps", "log.read"))
+
+    def test_local_steps_carry_no_mcp_badge(self):
+        """Reading the alert and building the plan touch nothing external; claiming otherwise would
+        make the badge meaningless."""
+        for step in ("plan", "plan_done", "app_resolved", "summary"):
+            event = next((e for e in self._events() if e.get("step") == step), None)
+            if event:
+                self.assertNotIn("server", event["detail"], step)
+
+    def test_call_latency_is_reported_so_a_slow_endpoint_is_visible(self):
+        hit = next(e for e in self._events() if e.get("step") == "evidence")
+        self.assertIn("elapsed_ms", hit["detail"])
+
+    def test_a_local_refusal_is_marked_as_never_having_left_the_process(self):
+        """"nobody finished wiring this" and "the log service is down" escalate to different people."""
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            raise mcp_registry.NotWired("log.read cannot pass 'mode' yet")
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            event = next(e for e in inv.investigate_events(ALERT) if e.get("step") == "unwired")
+        self.assertTrue(event["detail"]["refused_locally"])
+        self.assertIn("未发出请求", event["label"])
+
+    def test_an_evidence_step_reports_counts_and_exception_classes_only(self):
+        hit = next(e for e in self._events() if e.get("step") == "evidence")
+        self.assertEqual(hit["detail"]["lines_seen"], 6)
+        self.assertIn("SmsDeliveryException", hit["detail"]["exception_classes"])
+        self.assertEqual(set(hit["detail"]) & {"text", "excerpts", "content"}, set())
+
+    def test_the_terminal_event_carries_the_same_packet_the_tool_returns(self):
+        events = self._events()
+        streamed = next(e for e in events if e.get("type") == "result")["packet"]
+        self.assertEqual(streamed, inv.investigate(ALERT))
+
+    def test_a_refusal_is_streamed_as_a_stop_not_as_silence(self):
+        with mock.patch.object(inv.incident, "parse_alert",
+                               lambda *a, **k: {"identified": False, "repos": [], "use_cases": [],
+                                                "times": [], "metric": "", "notes": []}):
+            steps = [e["step"] for e in inv.investigate_events("something broke")
+                     if e.get("type") == "subagent_step"]
+        self.assertIn("refused", steps)
+
+    def test_the_flag_being_off_is_streamed_too(self):
+        with mock.patch.object(config, "MCP_ENABLED", False):
+            steps = [e["step"] for e in self._events() if e.get("type") == "subagent_step"]
+        self.assertIn("disabled", steps)
+
+
+class AgentRelayTests(unittest.TestCase):
+    """The agent loop must forward sub-agent steps and keep only the terminal packet."""
+
+    def test_dispatch_events_yields_progress_then_one_result(self):
+        from webapp import tools
+        events = list(tools.dispatch_events("incident_investigate", {"alert_text": "x"}))
+        self.assertEqual(events[-1]["type"], "result")
+        self.assertEqual(sum(1 for e in events if e["type"] == "result"), 1)
+
+    def test_a_non_subagent_tool_yields_exactly_one_result(self):
+        """So callers need no special case."""
+        from webapp import tools
+        events = list(tools.dispatch_events("hubs", {"top": 1}))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "result")
+
+    def test_a_blank_alert_still_produces_a_result_event(self):
+        from webapp import tools
+        events = list(tools.dispatch_events("incident_investigate", {"alert_text": " "}))
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0]["packet"]["ok"])
+
+    def test_the_agent_relays_steps_and_tags_them_with_the_agent_name(self):
+        from webapp import agent, tools
+        fake = [{"type": "subagent_step", "step": "plan", "label": "读告警", "detail": {}},
+                {"type": "result", "packet": {"ok": True, "evidence": []}}]
+        calls = [{"id": "c1", "type": "function",
+                  "function": {"name": "incident_investigate",
+                               "arguments": '{"alert_text": "x"}'}}]
+        replies = iter([{"role": "assistant", "content": None, "tool_calls": calls},
+                        {"role": "assistant", "content": "done"}])
+
+        def _chat(messages, tool_list=None):
+            yield ("final", next(replies))
+
+        with mock.patch.object(agent.llm, "chat_stream", _chat), \
+             mock.patch.object(agent.llm, "stream_text", lambda m: []), \
+             mock.patch.object(tools, "dispatch_events", lambda n, a: iter(fake)):
+            events = list(agent.answer_events("q"))
+        relayed = [e for e in events if e.get("type") == "subagent_step"]
+        self.assertEqual(len(relayed), 1)
+        self.assertEqual(relayed[0]["agent"], "incident_investigate")
+        self.assertEqual(relayed[0]["label"], "读告警")
+
+
 class ToolSurfaceTests(unittest.TestCase):
     def test_the_investigator_is_charged_to_the_subagent_lane(self):
         from webapp import tools

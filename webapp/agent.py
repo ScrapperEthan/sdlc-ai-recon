@@ -188,10 +188,24 @@ def answer_events(question, history=None):
             except json.JSONDecodeError:
                 args = {}
             yield {"type": "tool_start", "name": name, "args": args}
-            try:
-                result = tools.dispatch(name, args)
-            except Exception as e:  # noqa: BLE001
-                result = {"error": str(e)}
+            if name in tools.SUBAGENT_TOOLS:
+                # Relay the sub-agent's own steps as they happen. The user watching a 30-second log
+                # sweep should see which app, source and keyword is being spent — the events are
+                # already through the investigator's exit gate, so they carry no raw log text.
+                result = {}
+                try:
+                    for event in tools.dispatch_events(name, args):
+                        if event.get("type") == "result":
+                            result = event.get("packet") or {}
+                        else:
+                            yield {"agent": name, **event}
+                except Exception as e:  # noqa: BLE001
+                    result = {"error": str(e)}
+            else:
+                try:
+                    result = tools.dispatch(name, args)
+                except Exception as e:  # noqa: BLE001
+                    result = {"error": str(e)}
             yield {"type": "tool_end", "name": name}
             # Inline-rendering tools hand the frontend a view directive so the diagram appears in
             # the answer itself (the user never opens a page or clicks a node). Gate on the RESULT

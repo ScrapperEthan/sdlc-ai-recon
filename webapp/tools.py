@@ -330,8 +330,22 @@ TOOLS = [
             "production access, this one answers 'what does the log say'. Call it when the user "
             "asks '看日志', 'what does the log show', '为什么挂的', 'root cause', or after "
             "incident_impact when they want to know WHY rather than WHO. "
-            "Pass the alert text verbatim. `timezone` is only needed when the alert's own timestamp "
-            "carries no zone — then supply the one the user states, never one you assumed. "
+            "Pass the alert text verbatim. "
+            "TIMEZONE: if the result's `plan.refusals` says the alert carries no explicit timezone, "
+            "the window was NOT built and nothing was searched on time. Do not retry with a guess — "
+            "ASK THE USER IN CHAT: 'this 03:15 — is it HKT or UTC?' and pass their answer as "
+            "`timezone`. The reason matters and is worth telling them: CloudWatch writes UTC, "
+            "LogDream defaults to Asia/Hong_Kong and the servers are GMT, so the same clock time can "
+            "be three moments 8 hours apart; searching the wrong one returns nothing, and nothing "
+            "reads as 'no problem'. "
+            "DRILL-DOWN — for a follow-up like '再宽一点时间窗', '换 ConnectException 再查', "
+            "'只看 hkp3', '多查几个关键词': call this again with `keywords` (REPLACES the "
+            "graph-derived list — spend the budget on what they asked for), `sources` (subset of "
+            "hk1/hkp3; both are production with DIFFERENT content, so say which you searched), "
+            "and/or `max_queries` (raise it when they want a wider sweep and are willing to wait — "
+            "each read can take ~3-10s). Report that the keywords were user-supplied rather than "
+            "derived, because a nil result on a derived keyword list means much more than a nil "
+            "result on one term someone guessed. "
             "It runs in an isolated investigator that holds the raw logs in memory and returns only "
             "a REDACTED, aggregated evidence packet: counts, exception classes, and at most 5 "
             "short redacted lines per finding. "
@@ -343,10 +357,16 @@ TOOLS = [
             "which you must say out loud instead of implying the logs were clean; (3) every item "
             "carries `environment` — logs are PRODUCTION, the use-case route snapshot is dev/SCT, "
             "so never assert production behaviour from the snapshot; (4) excerpts are redacted "
-            "(`<phone:ab12>` style) and the raw text is gone — do not offer to fetch it, there is "
-            "no code path that can; (5) exception classes and counts are evidence, but a log line "
-            "is not a root cause on its own — say what it shows, not what you infer.",
-            {"alert_text": {"type": "string"}, "timezone": {"type": "string"}},
+            "(`<phone:ab12>` style); read `storage_rule` — when raw retention is ON for the UAT "
+            "test, each evidence item has a `raw_ref` and the USER can click through to the "
+            "original, but YOU still cannot read it, so offer the click-through and never imply you "
+            "verified the original yourself; when it is off, the raw text is gone and no code path "
+            "returns it; (5) exception classes and counts are evidence, but a log line is not a root "
+            "cause on its own — say what it shows, not what you infer.",
+            {"alert_text": {"type": "string"}, "timezone": {"type": "string"},
+             "keywords": {"type": "array", "items": {"type": "string"}},
+             "sources": {"type": "array", "items": {"type": "string"}},
+             "max_queries": {"type": "integer"}},
             ["alert_text"]),
 ]
 
@@ -356,8 +376,12 @@ TOOLS = [
 SUBAGENT_TOOLS = frozenset({"incident_investigate"})
 
 
-def dispatch_events(name, a):
+def dispatch_events(name, a, owner=""):
     """Streaming dispatch for sub-agent tools: yield progress events, then a terminal `result`.
+
+    `owner` is the opaque per-browser id retained raw logs are scoped to. Empty (the CLI/MCP path)
+    means anything retained is readable by nobody, which is the right default: there is no browser to
+    click through from.
 
     Exists so the agent loop can relay a sub-agent's steps to the browser without threads or
     queues. A 30-second log sweep behind an opaque spinner is what makes people distrust an agent
@@ -376,7 +400,12 @@ def dispatch_events(name, a):
         # and keeping the import local means the retrieval-only tool surface does not depend on it.
         from . import incident_investigator
         for event in incident_investigator.investigate_events(
-                text, timezone=(a.get("timezone") or "").strip() or None):
+                text,
+                timezone=(a.get("timezone") or "").strip() or None,
+                keywords=a.get("keywords") or None,
+                sources=a.get("sources") or None,
+                max_queries=a.get("max_queries") or None,
+                owner=owner):
             yield event
         return
     yield {"type": "result", "packet": dispatch(name, a)}

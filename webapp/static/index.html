@@ -687,6 +687,51 @@
 
   .subagent-step .took { flex: 0 0 auto; margin-left: auto; opacity: .7; font-size: 11px; }
   .subagent-step .took.is-slow { color: #8a5a12; opacity: 1; font-weight: 650; }
+
+  .subagent-raw-btn {
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid #b06a6a;
+    background: rgba(176, 106, 106, .1);
+    color: #8c3b3b;
+    font: 11px/1.4 inherit;
+    cursor: pointer;
+  }
+
+  .subagent-raw-btn:hover { background: rgba(176, 106, 106, .2); }
+
+  .subagent-raw {
+    margin: 2px 0 6px 18px;
+    padding: 8px 10px;
+    border-left: 2px solid #b06a6a;
+    background: rgba(176, 106, 106, .06);
+    font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #3a2f2f;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+
+  .subagent-raw .warn {
+    display: block;
+    margin-bottom: 6px;
+    color: #8c3b3b;
+    font-weight: 650;
+  }
+
+  /* Loud on purpose: unredacted production log text is being kept on disk. A tester must not have
+     to check a config file to know that. */
+  .subagent-retention {
+    margin: 0 12px 10px;
+    padding: 6px 9px;
+    border-radius: 8px;
+    border: 1px solid #d9a5a5;
+    background: rgba(176, 106, 106, .1);
+    color: #8c3b3b;
+    font-size: 11.5px;
+  }
   .subagent-step.is-warn { color: #8a5a12; }
   .subagent-step.is-stop { color: #a12d2d; }
   .subagent-step.is-hit { color: #1f6f5c; font-weight: 650; }
@@ -1953,15 +1998,68 @@ function showSubagent(container, steps, completed = false) {
       row.appendChild(took);
     }
     list.appendChild(row);
+
+    // Click-through to the original lines. Only present under raw retention; the ref is opaque and
+    // the fetch is owner-scoped server-side, so the button cannot reach another session's logs.
+    if (detail.raw_ref) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'subagent-raw-btn';
+      btn.textContent = '查看原文';
+      btn.title = '未脱敏的生产日志原文（UAT 内测）';
+      const pane = document.createElement('div');
+      pane.className = 'subagent-raw';
+      pane.hidden = true;
+      btn.addEventListener('click', async () => {
+        if (!pane.hidden) { pane.hidden = true; btn.textContent = '查看原文'; return; }
+        pane.hidden = false;
+        btn.textContent = '收起原文';
+        if (pane.dataset.loaded) return;
+        pane.textContent = '读取中...';
+        try {
+          const res = await fetch('/api/incident/raw?ref=' + encodeURIComponent(detail.raw_ref),
+                                  {headers: authHeaders()});
+          const data = await res.json();
+          pane.textContent = '';
+          const warn = document.createElement('span');
+          warn.className = 'warn';
+          if (!res.ok) {
+            warn.textContent = '取不到原文：' + (data.hint || data.error || res.status);
+            pane.appendChild(warn);
+            return;
+          }
+          warn.textContent = `⚠ 未脱敏生产日志原文 · 共 ${data.line_count} 行`
+            + (data.truncated ? '（已截断）' : '') + ` · 存于 ${data.stored_at}`;
+          pane.appendChild(warn);
+          pane.appendChild(document.createTextNode(data.lines.join('\n')));
+          pane.dataset.loaded = '1';
+        } catch (error) {
+          pane.textContent = '取不到原文：' + error.message;
+        }
+      });
+      row.appendChild(btn);
+      list.appendChild(pane);
+    }
   });
 
   const note = document.createElement('div');
   note.className = 'subagent-note';
   const mcpCount = steps.filter((s) => (s.detail || {}).server).length;
+  const retained = steps.filter((s) => (s.detail || {}).raw_ref).length;
   note.textContent = (mcpCount ? `经 MCP 调用外部系统 ${mcpCount} 次。` : '')
-    + '原始生产日志只存在于调查员内存中，脱敏聚合后才返回；此处只显示计数与异常类，不显示日志内容。';
+    + (retained
+        ? '模型只收到脱敏聚合结果；原文单独留存，仅本浏览器可点开核对。'
+        : '原始生产日志只存在于调查员内存中，脱敏聚合后才返回；此处只显示计数与异常类，不显示日志内容。');
 
-  details.append(summary, list, note);
+  details.append(summary, list);
+  if (retained) {
+    const banner = document.createElement('div');
+    banner.className = 'subagent-retention';
+    banner.textContent = `⚠ UAT 内测模式：本次 ${retained} 条证据的未脱敏日志原文已留存在服务器上，`
+      + '可点「查看原文」核对。正式使用前必须关闭 SDLC_INCIDENT_RAW_LOGS。';
+    details.appendChild(banner);
+  }
+  details.appendChild(note);
   container.appendChild(details);
   list.scrollTop = list.scrollHeight;
   log.scrollTop = log.scrollHeight;

@@ -179,8 +179,15 @@ class InvestigateTests(unittest.TestCase):
     """The end-to-end wall test: raw production text in, sanitized packet out."""
 
     def setUp(self):
+        # Retention pinned OFF: everything in this file describes the DEFAULT behaviour, and the
+        # devops box has SDLC_INCIDENT_RAW_LOGS=1 set for the internal test. Without pinning, these
+        # would be graded against whatever the deployment happens to have — the same trap that made
+        # ShippedConfigTests read the box's local MCP config instead of the committed one.
+        # Retention-on behaviour has its own file, tests/test_incident_raw_store.py.
         self._flag = mock.patch.object(config, "MCP_ENABLED", True)
         self._flag.start()
+        self._raw = mock.patch.object(config, "INCIDENT_RAW_LOGS", False)
+        self._raw.start()
         self.calls = []
 
         def _fake_call(operation, args=None, **_kw):
@@ -201,7 +208,7 @@ class InvestigateTests(unittest.TestCase):
         self._search.start()
 
     def tearDown(self):
-        for patcher in (self._search, self._parse, self._mcp, self._flag):
+        for patcher in (self._search, self._parse, self._mcp, self._raw, self._flag):
             patcher.stop()
 
     def test_no_planted_secret_appears_anywhere_in_the_packet(self):
@@ -411,6 +418,58 @@ class StreamingTests(InvestigateTests):
         self.assertIn("disabled", steps)
 
 
+class DrillDownTests(InvestigateTests):
+    """Follow-up questions: narrow, widen, or re-aim without starting over."""
+
+    def test_supplied_keywords_replace_the_derived_list(self):
+        """"search for X instead" must spend the budget on X, not bury it behind six derived terms."""
+        packet = inv.investigate(ALERT, keywords=["ConnectException", "SocketTimeout"])
+        terms = [k["term"] for k in packet["plan"]["keywords"]]
+        self.assertEqual(terms, ["ConnectException", "SocketTimeout"])
+        self.assertNotIn("CPUUtilization", terms)
+
+    def test_supplied_keywords_are_marked_as_not_derived_from_the_graph(self):
+        """A nil result on a graph-derived list means far more than one on a guessed term."""
+        packet = inv.investigate(ALERT, keywords=["ConnectException"])
+        self.assertIn("not derived from the code graph", packet["plan"]["keywords"][0]["why"])
+        self.assertIn("only speaks to the terms the user asked for",
+                      packet["plan"]["keywords_note"])
+
+    def test_narrowing_sources_is_honoured_and_flagged_as_covering_less(self):
+        packet = inv.investigate(ALERT, sources=["hkp3"])
+        self.assertEqual({q["source"] for q in packet["queries_run"]}, {"hkp3"})
+        self.assertIn("BOTH production", packet["plan"]["sources_note"])
+
+    def test_raising_the_query_budget_lets_a_wider_sweep_run(self):
+        hits = ["a/B.java:1: throw new SmsDeliveryException(m);",
+                "a/C.java:1: throw new VendorTimeoutException(m);"]
+        with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits):
+            narrow = inv.investigate(ALERT, max_queries=2)
+            wide = inv.investigate(ALERT, max_queries=6)
+        self.assertEqual(len(narrow["queries_run"]), 2)
+        self.assertEqual(len(wide["queries_run"]), 6)
+        self.assertTrue(narrow["not_investigated"])          # says what it skipped
+        self.assertIn("2-read query budget", " ".join(narrow["not_investigated"]))
+
+    def test_the_default_budget_still_applies_when_no_override_is_given(self):
+        with mock.patch.object(inv, "_MAX_LOG_QUERIES", 3):
+            packet = inv.investigate(ALERT)
+        self.assertLessEqual(len(packet["queries_run"]), 3)
+
+    def test_blank_keywords_fall_back_to_the_derived_list(self):
+        """Zero keywords would mean zero queries — an investigation that searched nothing while
+        looking like it ran."""
+        packet = inv.investigate(ALERT, keywords=["", "  "])
+        self.assertNotIn("keywords_note", packet["plan"])
+        self.assertIn("CPUUtilization", [k["term"] for k in packet["plan"]["keywords"]])
+        self.assertTrue(packet["queries_run"])
+
+    def test_blank_sources_fall_back_to_both_production_sources(self):
+        packet = inv.investigate(ALERT, sources=[" "])
+        self.assertEqual({q["source"] for q in packet["queries_run"]}, set(inv.PRODUCTION_SOURCES))
+        self.assertNotIn("sources_note", packet["plan"])
+
+
 class AgentRelayTests(unittest.TestCase):
     """The agent loop must forward sub-agent steps and keep only the terminal packet."""
 
@@ -448,7 +507,7 @@ class AgentRelayTests(unittest.TestCase):
 
         with mock.patch.object(agent.llm, "chat_stream", _chat), \
              mock.patch.object(agent.llm, "stream_text", lambda m: []), \
-             mock.patch.object(tools, "dispatch_events", lambda n, a: iter(fake)):
+             mock.patch.object(tools, "dispatch_events", lambda n, a, owner="": iter(fake)):
             events = list(agent.answer_events("q"))
         relayed = [e for e in events if e.get("type") == "subagent_step"]
         self.assertEqual(len(relayed), 1)

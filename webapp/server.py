@@ -14,7 +14,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import agent, config, session_store, llm_routes, llm_credentials, llm, mcp_client
+from . import (agent, config, session_store, llm_routes, llm_credentials, llm, mcp_client,
+                incident_raw_store)
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -331,6 +332,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": f"Session not found: {session_id}"})
             else:
                 self._send_json(200, session)
+        elif path == "/api/incident/raw":
+            # Click-through to the original log lines behind an evidence item (UAT internal test).
+            # Owner-scoped exactly like /api/sessions: a wrong owner is indistinguishable from a
+            # missing ref, so one tester's browser cannot enumerate another's production logs.
+            qs = parse_qs(urlparse(self.path).query)
+            ref = (qs.get("ref") or [""])[0]
+            entry = incident_raw_store.get(ref, self._uid)
+            if entry is None:
+                self._send_json(404, {
+                    "error": "not found",
+                    "hint": ("either raw retention is off (SDLC_INCIDENT_RAW_LOGS), the reference "
+                             "expired, or it belongs to a different session"),
+                    "retention": incident_raw_store.status()})
+            else:
+                self._send_json(200, entry)
+        elif path == "/api/incident/raw/status":
+            self._send_json(200, incident_raw_store.status())
         elif path == "/api/mcp/status":
             # The box's verification surface for RUNBOOK-58 onward. Wiring readiness always; a live
             # cross-check of the declared tool names against each server's own tools/list only with
@@ -365,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
         self._resolve_uid()
         path = urlparse(self.path).path
         allowed = ["/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
+                   "/api/incident/raw/purge",
                    "/api/llm/register", "/api/llm/select-model", "/api/llm/tunnel-models"]
         if config.LLM_TOKEN_MODE_ENABLED:
             # Internal beta only (see docs/specs/copilot-token-direct-mode.md) -- these two routes
@@ -377,7 +396,14 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         try:
             req = json.loads(self.rfile.read(length) or b"{}")
-            if path == "/api/sessions":
+            if path == "/api/incident/raw/purge":
+                # Retained production log text needs a delete button, not only a TTL. Scoped to the
+                # caller by default; `all: true` clears the store for whoever is running the test.
+                removed = incident_raw_store.purge(None if req.get("all") else self._uid)
+                self._send_json(200, {"purged": removed,
+                                      "scope": "all" if req.get("all") else "this session",
+                                      "retention": incident_raw_store.status()})
+            elif path == "/api/sessions":
                 session = session_store.create_session(req.get("title") or "New session", self._uid)
                 self._send_json(201, session)
                 return
@@ -678,7 +704,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            for event in agent.answer_events(question, history):
+            for event in agent.answer_events(question, history, owner=uid):
                 if event.get("type") == "done":
                     session = session_store.append_exchange(
                         session_id,

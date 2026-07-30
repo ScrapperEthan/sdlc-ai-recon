@@ -124,8 +124,11 @@ def answer(question, history=None):
     }
 
 
-def answer_events(question, history=None):
-    """Yield chat protocol events; finish with a terminal done event."""
+def answer_events(question, history=None, owner=""):
+    """Yield chat protocol events; finish with a terminal done event.
+
+    `owner` is the caller's opaque per-browser id, threaded through to sub-agent tools so that
+    anything they retain (raw log text, under the UAT flag) is scoped to the browser that asked."""
     # ONE budget for the whole turn, divided into lanes (webapp/context_budget.py). The system
     # prompt and the reserved output come off the top first; history and tool results then spend
     # against their own lanes, so a greedy tool result can no longer quietly eat the room the
@@ -194,7 +197,7 @@ def answer_events(question, history=None):
                 # already through the investigator's exit gate, so they carry no raw log text.
                 result = {}
                 try:
-                    for event in tools.dispatch_events(name, args):
+                    for event in tools.dispatch_events(name, args, owner=owner):
                         if event.get("type") == "result":
                             result = event.get("packet") or {}
                         else:

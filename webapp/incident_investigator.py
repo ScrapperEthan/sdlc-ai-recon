@@ -52,7 +52,7 @@ import os
 import re
 
 from retriever import code as rcode, incident, messages as msg, repo_tags
-from . import config, mcp_client, mcp_registry
+from . import config, incident_raw_store, mcp_client, mcp_registry
 
 # LogDream's two sources are BOTH production, holding different logs, so both are queried and every
 # piece of evidence says which one it came from (owner, 2026-07-29).
@@ -112,6 +112,17 @@ def _residual_pii(text):
     return sorted({kind for kind, pattern in _PII if pattern.search(stripped)})
 
 
+# Machine-generated identifiers, exempt from the exit scan. `uuid4().hex` frequently contains eight
+# consecutive digits, which the account/phone patterns match — so without this the gate ate roughly
+# one in eight `raw_ref`s, silently breaking click-through for that evidence item AND inflating
+# `sanitized_at_exit`, the counter whose whole job is to signal a REAL upstream redaction bug. A
+# false positive in a leak detector is not harmless; it trains you to ignore it.
+#
+# Safe because these values never come from log content: `raw_ref` is set only from
+# `incident_raw_store.put()`. Do not add a key here that could carry log-derived text.
+_IDENTIFIER_KEYS = frozenset({"raw_ref"})
+
+
 def sanitize_packet(node, report=None):
     """Walk a finished packet and blank any string that still looks like PII.
 
@@ -120,7 +131,9 @@ def sanitize_packet(node, report=None):
     """
     report = report if report is not None else {"sanitized_at_exit": 0, "kinds": []}
     if isinstance(node, dict):
-        return {key: sanitize_packet(value, report)[0] for key, value in node.items()}, report
+        return {key: (value if key in _IDENTIFIER_KEYS and isinstance(value, str)
+                      else sanitize_packet(value, report)[0])
+                for key, value in node.items()}, report
     if isinstance(node, list):
         cleaned = []
         for item in node:
@@ -233,8 +246,14 @@ def exception_classes(repo, limit=6):
     return [name for name, _count in sorted(found.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
 
 
-def plan(alert_text, repos=None, timezone=None):
-    """Alert text -> a read-only query plan. Opens no sockets; fully testable offline."""
+def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None):
+    """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
+
+    `keywords` and `sources` are the drill-down path: a follow-up question ("search for
+    ConnectException instead", "only hkp3") re-runs with them instead of the derived list, so
+    narrowing does not mean starting over. Caller-supplied keywords are marked as such, because the
+    provenance of a keyword is what separates our query plan from "grep for ERROR".
+    """
     parsed = incident.parse_alert(alert_text, repos=repos)
     out = {
         "ok": False,
@@ -242,10 +261,15 @@ def plan(alert_text, repos=None, timezone=None):
         "targets": [],
         "keywords": [],
         "window": None,
-        "sources": list(PRODUCTION_SOURCES),
+        "sources": [str(s).strip() for s in (sources or ()) if str(s).strip()]
+                   or list(PRODUCTION_SOURCES),
         "log_files": ["otx_trace.log", "exception.log"],
         "refusals": [],
     }
+    if out["sources"] != list(PRODUCTION_SOURCES):
+        out["sources_note"] = ("sources narrowed by the caller. hk1 and hkp3 are BOTH production "
+                               "with different content, so a single-source result covers less than "
+                               "the default — say which one was searched.")
     if not parsed["identified"]:
         out["refusals"].append(
             "no repo and no known use-case id could be read from this alert, so there is nothing to "
@@ -282,7 +306,22 @@ def plan(alert_text, repos=None, timezone=None):
     if parsed.get("metric"):
         _add_keyword(parsed["metric"], "metric named in the alert")
 
-    out["keywords"] = list(seen_keywords.values())[:_MAX_KEYWORDS]
+    # Filtered BEFORE the branch: an all-whitespace override would otherwise leave zero keywords,
+    # and zero keywords means zero queries — an investigation that searched nothing while looking
+    # like it ran. Blank in, derived list out.
+    supplied = [str(term).strip() for term in (keywords or []) if str(term).strip()]
+    if supplied:
+        # A drill-down replaces the derived list rather than adding to it: the point of "search for
+        # X instead" is to spend the query budget on X, not to bury it behind six derived terms.
+        out["keywords"] = [{"term": term,
+                            "why": "supplied by the user for this follow-up (not derived from the "
+                                   "code graph — say so when reporting)"}
+                           for term in supplied][:_MAX_KEYWORDS]
+        out["keywords_note"] = ("derived keywords were REPLACED by the caller's. The graph-derived "
+                                "list is what makes a nil result meaningful, so a nil result here "
+                                "only speaks to the terms the user asked for.")
+    else:
+        out["keywords"] = list(seen_keywords.values())[:_MAX_KEYWORDS]
 
     # The window. Never defaulted: see the module docstring on the three coexisting timezones.
     zoned = [t for t in parsed.get("times") or [] if isinstance(t, dict) and t.get("timezone")]
@@ -307,15 +346,31 @@ def plan(alert_text, repos=None, timezone=None):
 
 # ---- the investigation ----------------------------------------------------------------------
 
-def _evidence_from_text(raw, keyword, source, app, log_file, counts):
-    """One log response -> an aggregate. `raw` is local and stays local."""
+def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", window=None):
+    """One log response -> an aggregate. `raw` is local and stays local.
+
+    When raw retention is on (UAT internal test only) the original lines are handed to
+    `incident_raw_store` and the evidence carries an opaque `ref` for the browser to fetch. The raw
+    text still does not travel in this dict, so the model's view is unchanged either way.
+    """
     lines = [line for line in (raw or "").splitlines() if line.strip()]
     classes = {}
     for line in lines:
         for match in _EXCEPTION_CLASS.finditer(line):
             classes[match.group(1)] = classes.get(match.group(1), 0) + 1
     excerpts = [redact(line[:_MAX_EXCERPT_CHARS], counts) for line in lines[:_MAX_EXCERPTS]]
+    ref = incident_raw_store.put(owner, lines, meta={
+        "app": app, "source": source, "keyword": keyword, "file": log_file,
+        "window": window or {}, "environment": "production"})
     return {
+        "raw_ref": ref,
+        "raw_ref_note": (
+            "click-through to the original lines is available (UAT internal test). The raw text is "
+            "NOT in this packet and you cannot read it — only the browser can fetch it. Tell the "
+            "user they can expand it to verify; never claim to have read it yourself."
+            if ref else
+            "raw retention is off, so there is no original to click through to. The redacted "
+            "excerpts are the whole record."),
         "source": source,
         "app": app,
         "file": log_file,
@@ -347,17 +402,17 @@ def _step(step, label, **detail):
     return cleaned
 
 
-def investigate(alert_text, repos=None, timezone=None, query_plan=None):
+def investigate(alert_text, **kwargs):
     """Run the plan and return the sanitized evidence packet (drains `investigate_events`)."""
     packet = {}
-    for event in investigate_events(alert_text, repos=repos, timezone=timezone,
-                                    query_plan=query_plan):
+    for event in investigate_events(alert_text, **kwargs):
         if event.get("type") == "result":
             packet = event["packet"]
     return packet
 
 
-def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
+def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
+                        sources=None, max_queries=None, owner=""):
     """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
 
     A generator rather than a callback so the caller can relay progress to a browser without threads
@@ -369,8 +424,10 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
     say "the log service did not respond" as a finding, not fall over.
     """
     counts = {}
+    budget = max(1, int(max_queries or _MAX_LOG_QUERIES))
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
-    query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone)
+    query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
+                                    keywords=keywords, sources=sources)
     if query_plan.get("targets") or query_plan.get("keywords"):
         yield _step(
             "plan_done",
@@ -456,17 +513,18 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
         # where a loop happened to stop.
         wanted = [(keyword["term"], source) for keyword in query_plan["keywords"]
                   for source in query_plan["sources"]]
-        budget_left = max(0, _MAX_LOG_QUERIES - len(packet["queries_run"]))
+        budget_left = max(0, budget - len(packet["queries_run"]))
         running, skipped = wanted[:budget_left], wanted[budget_left:]
         if skipped:
             packet["not_investigated"].append(
-                f"{match}: the {_MAX_LOG_QUERIES}-read query budget ran out, so these "
+                f"{match}: the {budget}-read query budget ran out, so these "
                 f"keyword/source pairs were never tried: "
                 + ", ".join(f"{term} on {source}" for term, source in skipped)
                 + ". Raise SDLC_INCIDENT_MAX_LOG_QUERIES or narrow the keywords — do NOT read this "
                   "as 'those keywords found nothing'.")
             yield _step("budget_spent",
-                        "查询预算用完，%d 个关键词/source 组合没查" % len(skipped),
+                        "查询预算用完（%d 次），%d 个关键词/source 组合没查" % (budget, len(skipped)),
+                        budget=budget,
                         skipped=[f"{term}@{source}" for term, source in skipped])
         for index, (term, source) in enumerate(running, 1):
             yield _step("query", "查 %s / %s：关键词 %s（%d/%d）" % (
@@ -507,7 +565,8 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
                             app=match, source=source, keyword=term,
                             elapsed_ms=out.get("elapsed_ms"))
                 continue
-            item = _evidence_from_text(out["text"], term, source, match, "otx_trace.log", counts)
+            item = _evidence_from_text(out["text"], term, source, match, "otx_trace.log", counts,
+                                       owner=owner, window=query_plan.get("window"))
             packet["evidence"].append(item)
             packet["contains_production_data"] = True
             # Counts and exception classes only — never a line, not even a redacted one. Excerpts
@@ -521,7 +580,10 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None):
                         lines_seen=item["lines_seen"],
                         exception_classes=item["exception_classes"],
                         elapsed_ms=out.get("elapsed_ms"),
-                        truncated=bool(out.get("truncated")))
+                        truncated=bool(out.get("truncated")),
+                        # Present only under raw retention. The browser fetches the original with
+                        # it; nothing in the stream or the packet contains the text itself.
+                        raw_ref=item["raw_ref"])
 
     packet["ok"] = bool(packet["evidence"]) or not packet["not_investigated"]
     if not packet["evidence"] and packet["queries_run"] and not packet["not_investigated"]:
@@ -549,8 +611,17 @@ def _finish(packet, counts):
             f"{', '.join(report['kinds'])} at the exit gate and were removed. Redaction upstream "
             f"missed them — that is a bug worth reporting, not a data problem."]
     if cleaned.get("contains_production_data"):
-        cleaned["storage_rule"] = (
-            "This packet contains material derived from PRODUCTION logs. It is redacted, bounded "
-            "and safe to persist as-is; the underlying raw log text was never returned and is gone. "
-            "Do not ask for it again in raw form — there is no code path that provides it.")
+        if incident_raw_store.enabled():
+            cleaned["storage_rule"] = (
+                "This packet contains material derived from PRODUCTION logs, redacted and bounded. "
+                "RAW LOG RETENTION IS ON (UAT internal test): the original lines are retained "
+                "separately and the user can click through to verify each evidence item. YOU cannot "
+                "read them — the raw text is not in this packet and no tool returns it — so offer "
+                "the click-through, and never imply you checked the original yourself.")
+        else:
+            cleaned["storage_rule"] = (
+                "This packet contains material derived from PRODUCTION logs. It is redacted, bounded "
+                "and safe to persist as-is; the underlying raw log text was never returned and is "
+                "gone. Do not ask for it again in raw form — there is no code path that provides it.")
+        cleaned["raw_retention"] = incident_raw_store.status()
     return cleaned

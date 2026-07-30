@@ -180,6 +180,32 @@ MCP_USE_PROXY = os.environ.get("SDLC_MCP_USE_PROXY", "") not in ("", "0", "false
 MCP_PROTOCOL_STREAMABLE = os.environ.get("SDLC_MCP_PROTOCOL_HTTP", "2025-03-26")
 MCP_PROTOCOL_SSE = os.environ.get("SDLC_MCP_PROTOCOL_SSE", "2024-11-05")
 
+# ---- incident investigator: raw log retention (UAT internal test ONLY) ----
+# OFF by default. ON retains the raw log text an investigation read, so a devops tester can click an
+# evidence item and check it against the original — evidence you cannot verify is evidence people
+# will not trust, which is the whole reason this exists.
+#
+# What it does NOT change, deliberately: the model still only ever receives the REDACTED packet. Raw
+# text goes to a separate owner-scoped store and is fetched by the browser on demand, so it never
+# enters the model's context and never re-enters it on later turns of the same conversation. Putting
+# raw logs in chat_sessions.json itself would do exactly that, because history_for_agent replays the
+# transcript back to the model every turn.
+#
+# Owner decision 2026-07-30: enable for the devops internal test on UAT. Turn OFF before anything
+# resembling production use.
+INCIDENT_RAW_LOGS = os.environ.get("SDLC_INCIDENT_RAW_LOGS", "") not in ("", "0", "false", "False")
+# Where retained raw text lives. Under webapp_data/ (gitignored) and separate from the session store
+# so that "purge the retained logs" is deleting one file, not editing chat history.
+INCIDENT_RAW_STORE = os.environ.get(
+    "SDLC_INCIDENT_RAW_STORE", os.path.join(os.getcwd(), "webapp_data", "incident_raw.json"))
+# Bounded on both axes: oldest entries are dropped past the count, and anything older than the age is
+# refused on read AND swept on write. Unbounded retention of production log text is how a testing
+# convenience becomes a data-retention finding.
+INCIDENT_RAW_MAX_ENTRIES = int(os.environ.get("SDLC_INCIDENT_RAW_MAX_ENTRIES", "200"))
+INCIDENT_RAW_TTL_HOURS = int(os.environ.get("SDLC_INCIDENT_RAW_TTL_HOURS", "72"))
+# Per-entry line cap. A single unbounded log read could otherwise put tens of MB on disk.
+INCIDENT_RAW_MAX_LINES = int(os.environ.get("SDLC_INCIDENT_RAW_MAX_LINES", "500"))
+
 # ---- server ----
 HOST = os.environ.get("SDLC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SDLC_PORT", "8765"))

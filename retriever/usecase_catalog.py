@@ -160,7 +160,14 @@ _IDENTITY_FIELDS = (
 )
 _CONSENT_FIELDS = tuple(_CONSENT_FIELD_LABELS)
 _RULE_FIELDS = ("use_case_id", "channel", "priority", "route", "router", "traffic_percentage",
-                "tag", "sender", "send_policy", "status")
+                "tag", "sender", "send_policy", "status",
+                # Bound OPTIMISTICALLY: the four-column router key needs a business_category, and
+                # whether this table carries its own is RUNBOOK-59's open question. Binding it now
+                # means the answer costs no code change either way — present, and the router join
+                # becomes two tables (so use cases with no master row, e.g. M2050, can still reach
+                # an authoritative carrier); absent, `_field` yields "" and the master row stays the
+                # only source, exactly as today.
+                "business_category")
 _ROUTER_FIELDS = ("id", "channel", "route", "router", "vendor", "message_process_sla",
                   "message_delivery_sla", "delivery_path", "business_category")
 _EXT_FIELDS = ("use_case_id", "service_line", "messaging_service_level", "delivery_mode", "endpoint",
@@ -612,6 +619,8 @@ def rules_by_use_case_id():
             "sender": _field(row, bound, "sender"),
             "send_policy": _field(row, bound, "send_policy"),
             "status": _field(row, bound, "status"),
+            # "" when this table has no such column — see the note on _RULE_FIELDS.
+            "business_category": _field(row, bound, "business_category"),
             "citation": _citation_for(path, line_no),
         }
         out.setdefault(uc_id.lower(), []).append(rule)

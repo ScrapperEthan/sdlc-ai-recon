@@ -111,6 +111,43 @@ class NaturalKeyTests(_DatasetMixin, unittest.TestCase):
             match = usecase_router.router_for_rule(rule, business_category="11")
         self.assertTrue(match["matched"])
         self.assertEqual(match["router_id"], "3")
+        self.assertEqual(match["business_category_source"], "rule")
+
+    def test_which_table_supplied_the_category_is_reported(self):
+        """It changes what a miss MEANS: from the rule row the join is two tables and a master-less
+        use case can still reach its carrier; from the master, no master row means no carrier."""
+        rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL"}
+        with ExitStack() as stack:
+            self._with_dataset(stack)
+            from_master = usecase_router.router_for_rule(rule, business_category="11")
+            from_rule = usecase_router.router_for_rule(dict(rule, business_category="11"))
+            neither = usecase_router.router_for_rule(rule)
+        self.assertEqual(from_master["business_category_source"], "master")
+        self.assertEqual(from_rule["business_category_source"], "rule")
+        self.assertEqual(neither["business_category_source"], "absent")
+        self.assertEqual(from_rule["router_id"], from_master["router_id"])
+
+    def test_the_two_tables_disagreeing_is_surfaced_not_silently_resolved(self):
+        """Row-local still wins, but a disagreement means one of them keys onto a different
+        carrier's row — the exact silent mis-join RUNBOOK-54 was written to prevent."""
+        rule = {"channel": "PUSH", "route": "SNS_HK", "router": "R_SNS_HK",
+                "business_category": "20"}
+        with ExitStack() as stack:
+            self._with_dataset(stack)
+            match = usecase_router.router_for_rule(rule, business_category="11")
+        self.assertTrue(match["matched"])
+        self.assertIn("'20'", match["business_category_conflict"])
+        self.assertIn("'11'", match["business_category_conflict"])
+        self.assertIn("suspect", match["business_category_conflict"])
+
+    def test_agreement_between_the_two_tables_raises_no_conflict(self):
+        rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL",
+                "business_category": "11"}
+        with ExitStack() as stack:
+            self._with_dataset(stack)
+            match = usecase_router.router_for_rule(rule, business_category="11")
+        self.assertTrue(match["matched"])
+        self.assertNotIn("business_category_conflict", match)
 
     def test_wrong_business_category_does_not_match(self):
         rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL"}

@@ -307,6 +307,35 @@ class RuleExtIngestTests(unittest.TestCase):
         self.assertTrue(rules["uc001"][0]["citation"].endswith(":2"))
         self.assertTrue(rules["uc001"][1]["citation"].endswith(":3"))
 
+    def test_channel_rule_business_category_binds_when_present(self):
+        """RUNBOOK-59's open question, answered in advance by binding the column optimistically: if
+        this table carries its own business_category the router join is two tables, so a use case
+        with no master row can still reach an authoritative carrier."""
+        with tempfile.TemporaryDirectory() as tmp:
+            master = (["use_case_id", "source_system", "status"], [["UC001", "PEGA", "Y"]])
+            rule = (["use_case_id", "channel", "route", "router", "business_category"],
+                    [["UC001", "SMS", "R1", "RT1", "11"]])
+            dataset_dir = _write_manifest_dataset(tmp, environment="UAT", master=master, rule=rule)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                rules = uc.rules_by_use_case_id()
+
+        self.assertEqual(rules["uc001"][0]["business_category"], "11")
+
+    def test_channel_rule_without_that_column_yields_blank_not_a_crash(self):
+        """The other half of the same answer: absent, the master row stays the only source and
+        nothing changes. Neither outcome needs a code edit once the box reports which it is."""
+        with tempfile.TemporaryDirectory() as tmp:
+            master = (["use_case_id", "source_system", "status"], [["UC001", "PEGA", "Y"]])
+            rule = (["use_case_id", "channel", "route", "router"], [["UC001", "SMS", "R1", "RT1"]])
+            dataset_dir = _write_manifest_dataset(tmp, environment="UAT", master=master, rule=rule)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                rules = uc.rules_by_use_case_id()
+
+        self.assertEqual(rules["uc001"][0]["business_category"], "")
+        self.assertEqual(rules["uc001"][0]["channel"], "SMS")
+
     def test_ext_missing_dormant_period_is_schema_drift_not_a_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             master = (["use_case_id", "source_system", "status"], [["UC001", "PEGA", "Y"]])

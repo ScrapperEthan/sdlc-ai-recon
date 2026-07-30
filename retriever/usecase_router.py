@@ -199,12 +199,28 @@ def router_for_rule(rule, business_category="", index=None):
 
     rule = rule or {}
     # A business_category on the rule row itself is row-local and wins; the master row is fallback.
+    # Which one supplied it is reported, because it changes what a miss means: with `rule`, the join
+    # is two tables and a use case with no master row can still reach its carrier; with `master`, no
+    # master row means no authoritative carrier however complete the channel rules are.
+    rule_category = (rule.get("business_category") or "").strip()
+    master_category = (business_category or "").strip()
     values = {
-        "business_category": (rule.get("business_category") or business_category or ""),
+        "business_category": rule_category or master_category,
         "channel": rule.get("channel") or "",
         "route": rule.get("route") or "",
         "router": rule.get("router") or "",
     }
+    result["business_category_source"] = (
+        "rule" if rule_category else ("master" if master_category else "absent"))
+    if rule_category and master_category and rule_category.casefold() != master_category.casefold():
+        # Not resolved silently: the two tables disagreeing means one of them keys onto a different
+        # carrier's router row, and picking the wrong one is precisely the failure RUNBOOK-54 was
+        # written to prevent. Use the row-local value and say so loudly.
+        result["business_category_conflict"] = (
+            f"tbl_use_case_channel_rule says {rule_category!r} but tbl_use_case says "
+            f"{master_category!r}. Using the rule row (row-local), but the two disagree, so this "
+            "carrier answer is suspect — the tables are also from different export runs. Report the "
+            "disagreement rather than the vendor alone.")
     key = _key_of(values, index["key_fields"])
     if key is None:
         missing = [f for f in index["key_fields"] if not (values.get(f) or "").strip()]

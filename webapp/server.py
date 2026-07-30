@@ -14,7 +14,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import agent, config, session_store, llm_routes, llm_credentials, llm
+from . import agent, config, session_store, llm_routes, llm_credentials, llm, mcp_client
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -331,6 +331,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": f"Session not found: {session_id}"})
             else:
                 self._send_json(200, session)
+        elif path == "/api/mcp/status":
+            # The box's verification surface for RUNBOOK-58 onward. Wiring readiness always; a live
+            # cross-check of the declared tool names against each server's own tools/list only with
+            # ?probe=1, since that opens connections to production systems.
+            qs = parse_qs(urlparse(self.path).query)
+            want_probe = (qs.get("probe") or [""])[0] not in ("", "0", "false")
+            try:
+                self._send_json(200, mcp_client.status(probe_servers=want_probe))
+            except Exception as e:  # noqa: BLE001 -- a status page must not 500 on a wiring problem
+                self._send_json(200, {"error": str(e), "calling_enabled": bool(config.MCP_ENABLED)})
         elif path == "/health":
             # One unified health check for the single entry: this app + the retrieval upstream.
             self._send_json(200, self._unified_health())

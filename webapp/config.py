@@ -155,6 +155,25 @@ LLM_ROUTES_STORE = os.environ.get(
 # Set to "1" only if a deployment deliberately uses non-loopback connector hosts.
 LLM_ALLOW_NONLOOPBACK = os.environ.get("SDLC_LLM_ALLOW_NONLOOPBACK", "") not in ("", "0", "false", "False")
 
+# ---- MCP (the colleagues' LogDream / CloudWatch / Portal servers) ----
+# Default OFF, same discipline as SDLC_LLM_TOKEN_MODE: with this unset no code path in
+# webapp/mcp_client.py can open a socket, so behaviour is identical to before it existed. Turning it
+# on is not sufficient by itself either — the server must also be `enabled` in the intranet's
+# mcp_tools.json AND have its url_env set, so there are three independent gates before any
+# production system is contacted.
+MCP_ENABLED = os.environ.get("SDLC_MCP_ENABLED", "") not in ("", "0", "false", "False")
+# Per-call wall clock. RUNBOOK-55 measured `list_alarms` at 26.4s for 500 rows, so anything under
+# ~30s would time out on legitimately slow calls and look like an outage.
+MCP_TIMEOUT = int(os.environ.get("SDLC_MCP_TIMEOUT", "60"))
+# Hard byte cap on one response. A log read can return far more than the context budget can hold;
+# truncating at the socket keeps a runaway response from becoming a memory problem before
+# context_budget ever sees it. Truncation is always reported, never silent.
+MCP_MAX_RESPONSE_BYTES = int(os.environ.get("SDLC_MCP_MAX_BYTES", "4000000"))
+# Advertised protocol version per transport. Env-overridable because a version bump on their side
+# must not require an external code change and a push we may not be able to deliver.
+MCP_PROTOCOL_STREAMABLE = os.environ.get("SDLC_MCP_PROTOCOL_HTTP", "2025-03-26")
+MCP_PROTOCOL_SSE = os.environ.get("SDLC_MCP_PROTOCOL_SSE", "2024-11-05")
+
 # ---- server ----
 HOST = os.environ.get("SDLC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SDLC_PORT", "8765"))

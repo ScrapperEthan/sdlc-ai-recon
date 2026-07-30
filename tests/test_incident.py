@@ -149,10 +149,16 @@ class ParseAlertTests(_Fixture):
         self.assertIn("hand-asserted", parsed["repos"][0]["why"])
 
     def test_delivery_path_phrase_is_reported_but_not_resolved(self):
+        """An alert-title 'Path' phrase is a DIFFERENT vocabulary from the router table's
+        delivery_path, whose code table was found 2026-07-30 (Time Critical (MDC) ... Shared Batch)
+        and contains nothing shaped like this. RUNBOOK-56 Q3 assumed the two were the same nine
+        things; they are not, so mapping one onto the other would be an invented join."""
         parsed = incident.parse_alert(ALERT_PATH, repos=REPOS)
         self.assertEqual(parsed["delivery_path"]["phrase"], "WPB Servicing Realtime High Risk Path")
         self.assertIsNone(parsed["delivery_path"]["resolved_id"])
-        self.assertIn("numeric enum", parsed["delivery_path"]["note"])
+        note = parsed["delivery_path"]["note"]
+        self.assertIn("DIFFERENT vocabulary", note)
+        self.assertIn("invented join", note)
 
     def test_time_without_a_timezone_is_flagged_ambiguous(self):
         parsed = incident.parse_alert("alarm fired at 12:25:08 on " + ALARM_ECS, repos=REPOS)

@@ -44,14 +44,18 @@
 | 权威厂商的**真实覆盖率 ≈ 1/4**:2967/5959 回连(49.79%)× 其中 1628 条 vendor 非空(54.87%)= **1628/5959 ≈ 27.3%** | 内网 2026-07-30 |
 | `router.vendor` 全部取值只有 **4 个**,共 102/247 行:`HTCL` 70 / `AWS SG SNS` 16 / `AWS HK SNS` 7 / `HTCL OLD` 9,空 145。**即 只覆盖 push 和 SMS** —— email/letter/whatsapp/wechat 的权威厂商**完全没有**,那几个渠道的"渠道级上界"不是过渡方案,是唯一答案 | 内网 2026-07-30 (RB-54 Q2) |
 | 🔴**不要把 router 表的 vendor 值喂给仓库名解析器**:`pick_vendor` 取**最右侧**已知 token,会把 `AWS HK SNS` 和 `AWS SG SNS` **一起折成 `sns`**,丢掉权威表特意区分的区域;`HTCL OLD` 折成 `htcl` 等于断言一条标了 OLD 的线路是活的。这两者都是 RB-49/51 打过的同一类幻影/合并桶。→ 这些显示名需要**自己的**映射表,且**未经 owner 确认前一律原文照抄** | 内网拦下 + 外部 2026-07-30 |
-| `delivery_path` 1–9 的文字对照:**我们这边查尽了**(代码无 enum/constant、四张 UAT CSV 无码表、Git 只有 README changelog 里的散落表述)→ 只能等业务方码表或一条带数字+名称的配置样本 | 内网 2026-07-29 (RB-56 Q3) |
+| ~~`delivery_path` 1–9 的文字对照:我们这边查尽了(代码无 enum/constant…)→ 只能等业务方码表~~ **已被 2026-07-30 推翻:枚举一直都在**(`portal-web` 的 `powermi/constant/DeliveryPathEnum.java`),当时没搜到是因为**盒子本地镜像只有 15 个仓库**(见下),不是"不存在"。教训:"查尽了"这句话的作用域受镜像覆盖率限制,下结论时要连镜像范围一起说 | 原:内网 2026-07-29 (RB-56 Q3);推翻:2026-07-30 |
 | **那 338 条 `General SHP API Error` 不是 CloudWatch Alarm**:前 500 条 0 命中,LogDream 191 个 app 搜索 0 命中,镜像/Git 无告警标题或邮件模板 → 可能来自 Splunk/邮件规则/其他监控,**原始正文无法从现有数据源还原**。`SHP` 全称在镜像里也搜不到 | 内网 2026-07-29 |
 | `business_category` **33×1 + 37×6 = 共 7 行**(占 2810 的 0.25%)→ 可降级,不值得单独去问 | 内网 2026-07-29 |
 | ⚠️**当前盒子本地镜像只有 15 个 Git 仓库**(名册是 460)→ 所有"grep 镜像没找到"的结论都受这个边界限制,不等于"代码里没有";也是没跑全量 `refresh.py` 的原因(怕覆盖现有 460 仓库索引) | 内网 2026-07-29 |
 | **"全链路"现在到出口了**(主题→投递任务→出站 API→厂商→SMSC/APNs/ProofPoint/打印),`usecase_impact.delivery_chain` + 架构图高亮都通到底。但**厂商默认是渠道级上界**(`channel_upper_bound`),因为权威厂商表**虽已摄取但还没接进链路计算**(且它本身 vendor 空值率 58.7%)—— 只能说"最多这几家",**不能说"它走 X"**。`route`/`router` 里出现厂商名时收窄为 `route_hint`,仍是线索 | 2026-07-29 外部,2026-07-30 订正 |
 | 厂商白名单靠**最右侧已知厂商**解析;`iccm*` 折叠成 `iccm` 是**对的**(已复核);`hr`/`hase` = unknown | RB-51 / RB-52 |
 | ⭐**两个 SLA 列的单位 = 毫秒**(RB-54 问题 6,靠证据答出来的,不是靠问):产品代码里直接比较 `process_millisecond <= message_process_sla`;8 个取值(60000…86400000)按毫秒读全是整分钟(1 分钟…24 小时);两列 **247/247 完全相同**(所以不要当成两个独立预算)。⚠️**业主尚未正式签认** → 说法="60000 ms(1 分钟),单位由代码推定" | 内网 2026-07-30 |
-| ⭐**`delivery_path` 是分类元数据,不是运行时路由开关** —— 它是 `tbl_use_case_router` 的原始字段(1-6,8,9;缺 7),**不能从 `business_category` 推导**(一个 category 可以有多个 path);同名字段还出现在 `tbl_template` / Template API request / adhoc campaign / SMS billing report。**没有任何证据表明它控制 delivery topic 或 delivery job**。RB-56 里那 9 个文字路径名只是候选猜测 | 内网 2026-07-30 |
+| ⭐**`delivery_path` 是分类元数据,不是运行时路由开关** —— 它是 `tbl_use_case_router` 的原始字段(1-6,8,9;缺 7),**不能从 `business_category` 推导**(一个 category 可以有多个 path)。**没有任何证据表明它控制 delivery topic 或 delivery job** | 内网 2026-07-30 |
+| ⭐⭐**`delivery_path` 码表已找到**(RB-56 Q3 结案):`1` Time Critical (MDC) / `2` HASE Real Time Express (MDC) / `3` HASE Real Time Standard (MDC) / `4` HASE Batch (MDC) / `5` Time Critical / `6` HASE Real Time Express / `7` HASE Real Time Standard / `8` Shared Real Time Standard / `9` Shared Batch。含义 = **该路由属于哪种时效等级 × 哪套投递体系(MDC / HASE / Shared)**。代码证据**三处一致**:`portal-web/.../powermi/constant/DeliveryPathEnum.java`、`BillingReportService.java`(按 route/router + business_category 找到路由记录后转成这些名字)、前端 `static/dist/js/util/data.js:174`。因为不是判断题,外部**直接内置默认码表**(不像厂商别名要等业主) | 内网 2026-07-30 |
+| 🔴**`tbl_template.delivery_path` 和 `tbl_use_case_router.delivery_path` 不是同一套含义** —— 前者是**具体投递通道**(SFMC / ICCM / 3HK / AWS SNS),后者是时效/体系分类。**同名不同义,不要互读**(外部之前把两者当成一回事,已订正) | 内网 2026-07-30 |
+| 🔴**告警标题里那 9 个文字 `...Path` 短语,和 `delivery_path` 1-9 是两套词汇** —— 枚举名是 "Time Critical (MDC)"/"Shared Batch" 这种,和 "WPB Servicing Realtime High Risk Path" 完全不是一类。**RB-56 Q3"这两者可能是同九个东西"的假设被推翻**。不要把告警短语映射到 1-9,那是编出来的连接 | 外部 2026-07-30 |
+| `delivery_path` 的 **7 在枚举里有定义,但 UAT 导出里没有行** —— "定义了但这里没用到" ≠ "没定义" | 内网 2026-07-30 |
 | ⭐**`HTCL OLD` 不能断言已下线,也不能折叠到 `HTCL`/`3hk`**:router 表仍有 9 行,其中 2 条 channel-rule 关联成功且 **channel-rule 与 use-case 都 status=Y**;代码镜像仍有 `MessageRouterTopicEnum.HTCL_OLD_SMS` / `HTCL_RT_OLD_TRACKING` / 独立 `htcl_old_sms` topic;但 topology 里**没有**独立的 `*-htcl-old-*` delivery-job 仓库 → 结论只能是"明确标 OLD 的 legacy 线路,但不能宣称已下线"。最终确认要查生产近 30/90 天 `route=HUTCHISON_RT_SMS` / `router=HTCL_OLD_SMS` 的消息量 | 内网 2026-07-30 |
 | ⭐**AWS HK / SG 要分开算,但保留共同的 `sns` 父级**:router 表分别记录;Java 分别定义 `AWS_HK_SNS_PUSH` / `AWS_SG_SNS_PUSH`;topology 里 awshk 4 个 / awssg 5 个 delivery job;代码大体 WPB→SG、CMB/WSB→HK。口径 = `provider_family=sns` + `region=hk\|sg` + `canonical_vendor=awshk\|awssg`。**区域故障分开算,AWS SNS 全局故障再合并** | 内网 2026-07-30 |
 | ⚠️**那 3 个厂商别名仍未经业主签认** —— 内网给的是**建议**:HK→`awshk`、SG→`awssg`、HTCL→`3hk`(仓库命名那条早已确认,但 **router 表里的 `HTCL` 是否同一家仍需业主确认**)。所以外部代码**仍然 0 条内置别名**,只按显示名**字面**拆出 family/region/lifecycle(这是可核对的弱断言),不断言 canonical 厂商 | 内网建议 + 外部 2026-07-30 |
@@ -121,7 +125,7 @@
 | **`HTCL OLD` 到底还有没有流量** —— 唯一的判定方式是查生产近 30/90 天 `route=HUTCHISON_RT_SMS` / `router=HTCL_OLD_SMS` 的消息量,以及 `htcl_old_sms` topic 有没有 consumer/deployment | 待生产查询 | 内网 2026-07-30 |
 | ~~**`tbl_use_case_channel_rule` 有没有自己的 `business_category` 列?**~~ | ✅**已不阻塞代码**:该列已乐观绑定,有就用(连接变两张表)、没有就空字符串。两种答案都零改动。仍值得一问,但只是为了知道覆盖率能提高多少 | 外部 2026-07-30 |
 | ~~两个 SLA 列的**单位**(ms/s/min)~~ | ✅**已答:毫秒**(代码证据,见上)。剩下的只是业主正式签认那一张单 | 内网 2026-07-30 |
-| ~~`delivery_path` 1–9 ↔ 文字路径的对照~~ | ✅**镜像已查尽,查不到。** 转成对业务方的精确请求:一份码表,或一条带数字+名称的配置样本 | RB-56 Q3,内网 2026-07-29 |
+| ~~`delivery_path` 1–9 ↔ 文字路径的对照~~ | ✅**已找到并已落代码**(2026-07-30,`DeliveryPathEnum.java` + `BillingReportService` + portal 前端三处一致)。**不需要再问业务方。** 见上面第二节 | 内网 2026-07-30 |
 | ~~三个读日志工具的确切参数~~ | ✅**不用问了。** 改成 `config/mcp_tools.json` 的 `"?"` 占位,内网对着 `tools/list` 直接填,不用来回拍照 | 负责人建议 2026-07-29 |
 | `Route=CSL_SVC_RT_SMS` 是不是 `route` 列的取值 | 可自查 —— **现在更要紧**:`delivery_chain` 的 `route_hint` 通路建立在这个假设上 | 截图 2026-07-29 |
 | 🔴**为什么 `message_edges.csv`(255 topic)和用例路由快照(20 topic)几乎不相交** —— 代码侧的误用已修,但**数据缺口还在**:精确的 repo→use case 仍然算不出来 | 曾以为靠 `tbl_use_case_router` 摄取就能补上这一跳 —— ⚠️**2026-07-30:表已摄取,回连仅 49.79%**,所以这一跳只能补一半,剩下的仍要靠 topic 命名或业务方 | RB-57 |

@@ -239,9 +239,13 @@ TOOLS = [
             "merged with the unmarked value, and `provider_family`/`region` let you say 'AWS SNS, "
             "Hong Kong region' — a regional outage counts per region, a family-wide one merges them. "
             "SLA numbers are MILLISECONDS (inferred from the product code, not owner-signed-off): "
-            "give both, e.g. '60000 ms (1 minute)', and say the unit comes from code. delivery_path "
-            "is still a bare code — report the number, never a path name, and do not imply it "
-            "controls the route (it is template/billing classification metadata). "
+            "give both, e.g. '60000 ms (1 minute)', and say the unit comes from code. `delivery_path` "
+            "now RESOLVES: `delivery_path_resolved` gives the name plus `system` (MDC/HASE/Shared) "
+            "and `tier` (Time Critical / Real Time Express / Real Time Standard / Batch), e.g. "
+            "'delivery_path 3 = HASE Real Time Standard (MDC)'. It is a CLASSIFICATION, not a route: "
+            "say a message is classified on that path, never that it travels via it. If "
+            "`known:false`, report the bare number — do NOT reuse a 'Path' phrase from an alert "
+            "title, that is a different vocabulary. "
             "`use_case_master` says whether master data was "
             "found and, when not, WHY (dataset not configured vs id absent from that snapshot) — "
             "read it before writing 无法确认, so you name which half is missing instead of implying "
@@ -304,10 +308,11 @@ TOOLS = [
             "could NOT be identified — say so and ask which service, NEVER guess; (4) `vendor` "
             "here is still null — `tbl_use_case_router` IS ingested now, but reaching it needs a "
             "use case, and this tool starts from an alert. For a carrier, go through "
-            "`usecase_impact`; do NOT infer one from repo names; (5) a `delivery_path.phrase` is "
-            "reported verbatim but NOT resolved: delivery_path is a numeric enum (1-6, 8, 9) with "
-            "no name mapping in any readable source, and it is classification metadata shared with "
-            "templates/campaigns/billing — there is no evidence it controls the runtime route.",
+            "`usecase_impact`; do NOT infer one from repo names; (5) a `delivery_path.phrase` here is "
+            "a phrase from the ALERT TITLE and stays verbatim and unresolved. It is a different "
+            "vocabulary from `tbl_use_case_router.delivery_path`, whose code table IS now known "
+            "(1=Time Critical (MDC) ... 9=Shared Batch) — never map an alert phrase onto those "
+            "numbers, that join would be invented.",
             {"alert_text": {"type": "string"}, "max_use_cases": {"type": "integer"}},
             ["alert_text"]),
     _schema("critical_repos",

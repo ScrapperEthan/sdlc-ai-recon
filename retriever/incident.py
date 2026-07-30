@@ -35,8 +35,12 @@ _DEFAULT_TZ_ALIASES = {"HKT": "Asia/Hong_Kong", "HK": "Asia/Hong_Kong", "CST": "
 # are removed afterwards by _drop_subsumed, which keeps the longest match at a position.
 _ALNUM = re.compile(r"[A-Za-z0-9]")
 _THRESHOLD = re.compile(r"\[([^\]]{1,40})\]")
-# "WPB Servicing Realtime High Risk Path" — a capitalised phrase ending in 'Path'. Reported as-is;
-# it is NOT joined to anything until the delivery_path name->id map arrives (RUNBOOK-56 Q3).
+# "WPB Servicing Realtime High Risk Path" — a capitalised phrase ending in 'Path'. Reported as-is,
+# and now known to be a DIFFERENT vocabulary from tbl_use_case_router.delivery_path: that enum was
+# found 2026-07-30 and its names are "Time Critical (MDC)", "HASE Real Time Express", "Shared Batch"
+# and so on, which these phrases plainly are not. RUNBOOK-56 Q3 assumed the two might be the same
+# nine things; they are not. Do NOT "finish the job" by mapping these phrases onto 1-9 — that join
+# would be invented.
 _PATH_PHRASE = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+){0,7}[ _-]Path)\b")
 _DATETIME = re.compile(r"\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)\s*([A-Za-z]{1,4})?")
 _CLOCK = re.compile(r"\b(\d{1,2}:\d{2}(?::\d{2})?)\s*([A-Za-z]{2,4})?")
@@ -290,9 +294,12 @@ def parse_alert(text, repos=None):
             "phrase": phrase.group(1),
             "resolved_id": resolved,
             "note": ("" if resolved else
-                     "delivery_path name->id map not supplied yet (RUNBOOK-56 Q3): "
-                     "tbl_use_case_router.delivery_path is a numeric enum, so this phrase cannot "
-                     "be joined to the router table. Reported verbatim, NOT resolved."),
+                     "this 'Path' phrase comes from the alert title and is a DIFFERENT vocabulary "
+                     "from tbl_use_case_router.delivery_path, whose code table is now known "
+                     "(Time Critical / HASE Real Time Express / Shared Batch / ...) and does not "
+                     "contain phrases like this. So it stays verbatim and unresolved — mapping it "
+                     "onto 1-9 would be an invented join. RUNBOOK-56 Q3's assumption that the two "
+                     "were the same nine things is refuted."),
         }
     result["times"] = _extract_times(text, _tz_aliases(patterns))
     if any(t["ambiguous"] for t in result["times"]):

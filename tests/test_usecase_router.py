@@ -222,17 +222,66 @@ class VendorResolutionTests(_DatasetMixin, unittest.TestCase):
         self.assertIn("not owner-signed-off", match["sla_note"].lower())
         self.assertIn("identical on all 247 rows", match["sla_note"])
 
-    def test_delivery_path_is_flagged_as_classification_not_a_routing_control(self):
-        """The important half is the negative finding: an answer must not imply the message travels
-        'via path 3'. The same column lives on templates, campaigns and the billing report."""
+    def test_delivery_path_resolves_to_its_name_system_and_tier(self):
+        """Found 2026-07-30 in DeliveryPathEnum.java, BillingReportService.java and the portal
+        frontend — three places in the product's own code agree, so unlike the vendor display names
+        this is not a judgement call and ships as a default."""
         rule = {"channel": "SMS", "route": "HUTCHISON_GW_SMS", "router": "R_HTCL"}
         with ExitStack() as stack:
             self._with_dataset(stack)
             match = usecase_router.router_for_rule(rule, business_category="11")
-        note = match["delivery_path_note"]
-        self.assertIn("NO evidence it controls the runtime", note)
-        self.assertIn("billing", note)
-        self.assertIn("candidate guesses", note)
+        self.assertEqual(match["delivery_path"], "2")            # raw code still there
+        resolved = match["delivery_path_resolved"]
+        self.assertEqual(resolved["label"], "HASE Real Time Express (MDC)")
+        self.assertEqual(resolved["system"], "MDC")
+        self.assertEqual(resolved["tier"], "Real Time Express")
+        self.assertTrue(resolved["known"])
+
+    def test_the_whole_code_table_maps_to_a_system_and_a_tier(self):
+        expected_systems = {"1": "MDC", "2": "MDC", "3": "MDC", "4": "MDC",
+                            "5": "HASE", "6": "HASE", "7": "HASE",
+                            "8": "Shared", "9": "Shared"}
+        for code, system in expected_systems.items():
+            got = usecase_router.resolve_delivery_path(code)
+            self.assertTrue(got["known"], code)
+            self.assertEqual(got["system"], system, code)
+            self.assertTrue(got["tier"], code)
+
+    def test_it_is_stated_as_a_classification_not_a_routing_control(self):
+        """An answer must not imply a message travels 'via path 3'."""
+        note = usecase_router.resolve_delivery_path("3")["note"]
+        self.assertIn("CLASSIFICATION", note)
+        self.assertIn("no evidence it controls the runtime", note)
+        self.assertIn("`tbl_template.delivery_path` is a DIFFERENT column", note)
+
+    def test_code_seven_is_defined_but_unused_in_uat(self):
+        """"Defined but unused here" is not the same statement as "undefined"."""
+        got = usecase_router.resolve_delivery_path("7")
+        self.assertTrue(got["known"])
+        self.assertEqual(got["label"], "HASE Real Time Standard")
+        self.assertIn("no rows in the UAT export", got["note"])
+
+    def test_an_unknown_code_reports_the_number_and_refuses_to_invent_a_name(self):
+        got = usecase_router.resolve_delivery_path("42")
+        self.assertFalse(got["known"])
+        self.assertEqual(got["label"], "")
+        self.assertIn("not in the code table", got["note"])
+        self.assertIn("do NOT reuse a", got["note"])
+
+    def test_a_blank_code_is_blank_not_unknown(self):
+        got = usecase_router.resolve_delivery_path("")
+        self.assertFalse(got["known"])
+        self.assertIn("blank on the matched router row", got["note"])
+
+    def test_the_intranet_can_override_the_code_table(self):
+        """The enum could change on their side; that must not need a push from us."""
+        with ExitStack() as stack:
+            self._with_dataset(stack, columns_config={"validation": {
+                "delivery_path_labels": {"1": "Renamed Tier (MDC)"}}})
+            got = usecase_router.resolve_delivery_path("1")
+            fallback = usecase_router.resolve_delivery_path("9")
+        self.assertEqual(got["label"], "Renamed Tier (MDC)")
+        self.assertFalse(fallback["known"])              # override replaces, it does not merge
 
     def test_the_display_name_is_decomposed_into_family_and_region(self):
         """A regional outage is counted per region; an AWS-SNS-wide one merges them. Reading the two

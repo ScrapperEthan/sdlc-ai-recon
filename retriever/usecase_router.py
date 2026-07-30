@@ -48,6 +48,20 @@ Note the tension deliberately left unresolved: `htcl → 3hk` IS already an owne
 in this codebase — but for REPO NAMES (RUNBOOK-49). Whether the router table's `HTCL` denotes the
 same carrier is a different question, and the intranet explicitly refused to assume it. Correct
 call; do not "fix" this by seeding the map.
+
+## delivery_path, by contrast, IS resolved (found 2026-07-30)
+
+RUNBOOK-56 concluded the code table did not exist in anything we could read. It does — three places
+in the product's own code agree on it, so unlike the vendor names this is not a judgement call and
+the map ships as a built-in default. See `DEFAULT_DELIVERY_PATH_LABELS`.
+
+The two things to keep straight:
+
+* It is a **classification**, not a routing control: which timeliness tier under which delivery
+  system. A message is *classified on* path 3; it does not *travel via* path 3.
+* **`tbl_template.delivery_path` is a different column with a different meaning** (concrete channels
+  — SFMC / ICCM / 3HK / AWS SNS). An earlier version of this module treated the two as one thing,
+  which is why the note now says so explicitly.
 """
 import json
 import os
@@ -88,17 +102,43 @@ _SLA_NOTE = (
     "`message_delivery_sla` are identical on all 247 rows, so do not present them as two "
     "independent budgets.")
 
-# delivery_path, per the same 2026-07-30 answer. The important half is the NEGATIVE finding: it is
-# not a routing control, so an answer must not imply the message travels "via path 3".
+# ---------------------------------------------------------------------------------------------
+# delivery_path — the code table, FOUND 2026-07-30 after RUNBOOK-56 concluded it did not exist in
+# anything we could read. It does: `powermi/constant/DeliveryPathEnum.java` in portal-web, with
+# `BillingReportService.java` joining route/router + business_category and converting the code to
+# these names, and the same map again in the portal frontend (`static/dist/js/util/data.js:174`).
+#
+# Shipped as a built-in default rather than left to config, because unlike the vendor display names
+# this is not a judgement call: three independent places in the product's own code agree on it.
+# Config can still override, for when the enum changes on their side.
+#
+# ⚠️ It is NOT the same column as `tbl_template.delivery_path`, which carries concrete delivery
+# CHANNELS (SFMC / ICCM / 3HK / AWS SNS). Same name, different meaning — an earlier note in this
+# module treated them as one thing and was wrong.
+DEFAULT_DELIVERY_PATH_LABELS = {
+    "1": "Time Critical (MDC)",
+    "2": "HASE Real Time Express (MDC)",
+    "3": "HASE Real Time Standard (MDC)",
+    "4": "HASE Batch (MDC)",
+    "5": "Time Critical",
+    "6": "HASE Real Time Express",
+    "7": "HASE Real Time Standard",
+    "8": "Shared Real Time Standard",
+    "9": "Shared Batch",
+}
+# Defined in the enum but with no rows in the UAT export. "Defined but unused here" is a different
+# statement from "undefined", and only the first is true of 7.
+DELIVERY_PATH_DEFINED_UNUSED = ("7",)
+
 _DELIVERY_PATH_NOTE = (
-    "delivery_path is a raw numeric enum from tbl_use_case_router (values 1-6, 8, 9; 7 absent). It "
-    "is NOT derived from business_category — one category can carry several delivery_paths. The "
-    "same column name also appears on tbl_template, the Template API request, the ad-hoc campaign "
-    "table and the SMS billing report, so it reads as a business route/template/billing "
-    "classification; there is NO evidence it controls the runtime delivery topic or delivery job. "
-    "Report the number, never invent a name: the nine textual 'Path' strings seen in alert titles "
-    "were candidate guesses only, and no number->name table exists in the mirror, the UAT tables or "
-    "the code.")
+    "delivery_path is Power MI's message delivery-path CLASSIFICATION code: which timeliness tier "
+    "(Time Critical / Real Time Express / Real Time Standard / Batch) under which delivery system "
+    "(MDC / HASE / Shared) this route belongs to. It is NOT a vendor or channel number, and there is "
+    "no evidence it controls the runtime delivery topic or job — do not say a message travels 'via "
+    "path 3'; say it is classified on that path. It also cannot be derived from business_category: "
+    "one category carries several delivery_paths. "
+    "⚠️ `tbl_template.delivery_path` is a DIFFERENT column with a different meaning (concrete "
+    "channels: SFMC / ICCM / 3HK / AWS SNS) — never read one as the other.")
 
 _UNCONFIRMED_ALIAS_NOTE = (
     "vendor recorded verbatim in tbl_use_case_router; the display-name -> canonical-token mapping "
@@ -218,6 +258,58 @@ def _describe_display_name(text):
     return {"provider_family": family, "region": region, "lifecycle": lifecycle}
 
 
+def delivery_path_labels():
+    """{code -> label}. Intranet knob wins when present, else the code-evidenced default."""
+    validation = (_columns_config().get("validation") or {})
+    declared = validation.get("delivery_path_labels")
+    if not isinstance(declared, dict):
+        return dict(DEFAULT_DELIVERY_PATH_LABELS)
+    labels = {str(key).strip(): str(value).strip()
+              for key, value in declared.items() if not str(key).startswith("_")}
+    return labels or dict(DEFAULT_DELIVERY_PATH_LABELS)
+
+
+# Read off the authoritative label, the same weak-but-checkable move used for vendor display names:
+# the label itself says which delivery system and which timeliness tier, so reporting those two is
+# not a new claim. `system` is the (MDC) / bare / Shared distinction the enum draws; `tier` is the
+# Time Critical / Real Time Express / Real Time Standard / Batch ladder.
+_PATH_TIERS = ("Time Critical", "Real Time Express", "Real Time Standard", "Batch")
+
+
+def resolve_delivery_path(code):
+    """Raw `delivery_path` cell -> {code, label, system, tier, known, note}.
+
+    Never invents a label: an unknown code is reported as a bare number, because the nine textual
+    'Path' strings that appear in alert titles were only ever candidate guesses and are NOT this
+    enum's names.
+    """
+    text = str(code or "").strip()
+    if not text:
+        return {"code": "", "label": "", "system": "", "tier": "", "known": False,
+                "note": "delivery_path is blank on the matched router row."}
+    label = delivery_path_labels().get(text, "")
+    if not label:
+        return {"code": text, "label": "", "system": "", "tier": "", "known": False,
+                "note": (f"delivery_path {text!r} is not in the code table (known codes: "
+                          + ", ".join(sorted(delivery_path_labels())) +
+                          "). Report the number and say the name is unknown — do NOT reuse a "
+                          "textual 'Path' string from an alert title, those are a different thing. "
+                          + _DELIVERY_PATH_NOTE)}
+    if "(MDC)" in label:
+        system = "MDC"
+    elif label.startswith("Shared"):
+        system = "Shared"
+    else:
+        system = "HASE"
+    tier = next((name for name in _PATH_TIERS if name in label), "")
+    out = {"code": text, "label": label, "system": system, "tier": tier, "known": True,
+           "note": _DELIVERY_PATH_NOTE}
+    if text in DELIVERY_PATH_DEFINED_UNUSED:
+        out["note"] = ("this code is DEFINED in DeliveryPathEnum but has no rows in the UAT export — "
+                       '"defined but unused here" is not the same as "undefined". ' + out["note"])
+    return out
+
+
 def resolve_vendor(raw):
     """Raw `vendor` cell -> {raw, token, confirmed, family, region, lifecycle, note}.
 
@@ -327,7 +419,12 @@ def router_for_rule(rule, business_category="", index=None):
         result["sla_note"] = _SLA_NOTE
         result["sla_unit"] = SLA_UNIT
     if result["delivery_path"]:
-        result["delivery_path_note"] = _DELIVERY_PATH_NOTE
+        # The raw code stays on `delivery_path` (nothing that read it before changes); the resolved
+        # name, delivery system and timeliness tier arrive alongside it.
+        resolved = resolve_delivery_path(result["delivery_path"])
+        result["delivery_path_resolved"] = resolved
+        result["delivery_path_label"] = resolved["label"]
+        result["delivery_path_note"] = resolved["note"]
     return result
 
 

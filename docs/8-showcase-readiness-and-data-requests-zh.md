@@ -15,7 +15,7 @@
 > | --- | --- | --- |
 > | **可自查（UAT 库里有）** | 提工单等 DBA | **内网 Codex 直接查，当天出结果** |
 > | **仍需 DBA** | 同上 | 只剩：**同一时刻一致性快照**（自查是逐表查，解决不了 `mixed_export_times`）、以及**生产库**的任何东西 |
-> | **仍需业务方** | 同上 | 不变——语义问题（`delivery_path` 含义、`vendor` 为空是什么意思）查库查不出来 |
+> | **仍需业务方** | 同上 | 只剩**厂商别名签认**和 **`vendor` 为空是什么意思**。（`delivery_path` 的含义原本在这一格，2026-07-30 已在代码里找到枚举，不用问了） |
 > | **仍需平台/安全** | 同上 | 不变——IAM/KMS/CI/事故记录都不在 UAT 库里 |
 >
 > **由此产生的三个新方向（建议内网 Codex 优先探索，都不需要等任何人批）：**
@@ -151,9 +151,16 @@
    而 `awshk`/`awssg` 本来就在我们的厂商白名单里，所以这是**可核对的映射，不是猜测**。
    但内网明确写了"**router 表语义仍需业主确认**"——即路由表里的 `HTCL` 是否就是仓库命名里那一家。
    **所以代码里目前 0 条内置别名**，助手只能原文照抄"权威表记录 `HTCL`"，不能说"它走 3HK"。
-2. 🔴 **`delivery_path` 1–9 没有文字码表。** 已确认它是**分类元数据**（同名字段还出现在
-   `tbl_template`、Template API request、adhoc campaign、SMS billing report），
-   **没有证据表明它控制运行时路由**。镜像、四张 UAT 表、代码都已查尽，查不到码表。
+2. ✅ **`delivery_path` 码表已找到（2026-07-30），此项关闭。** 它是**时效等级 × 投递体系**的
+   分类码：`1` Time Critical (MDC) / `2` HASE Real Time Express (MDC) / `3` HASE Real Time
+   Standard (MDC) / `4` HASE Batch (MDC) / `5` Time Critical / `6` HASE Real Time Express /
+   `7` HASE Real Time Standard / `8` Shared Real Time Standard / `9` Shared Batch。
+   代码证据三处一致（`DeliveryPathEnum.java`、`BillingReportService.java`、portal 前端），
+   所以**已内置进代码**，不像厂商别名那样要等业主签认。助手现在会说
+   "delivery_path 3 = HASE Real Time Standard (MDC)"，并且明确它是**分类而不是路由开关**。
+   ⚠️ 两条同时确认的"不要搞混"：`tbl_template.delivery_path` 是**具体通道**
+   （SFMC/ICCM/3HK/AWS SNS），同名不同义；告警标题里那些 `...Path` 短语是**第三套词汇**，
+   和 1–9 无关（RB-56 那个"可能是同九个东西"的假设被推翻了）。
 3. 🟡 **`vendor` 为空到底什么意思**：用默认厂商？运行时代码决定？该渠道没有厂商概念？
    这三种含义会导出完全不同的结论。
 4. 🟡 **有没有独立的主备 / fallback 配置表**。
@@ -445,7 +452,7 @@ tbl_event_router_usecase_topic     ← 最关键的新增项
    - AWS SG SNS → awssg ？
    - HTCL → 3hk ？（仓库命名那条已确认，路由表语义待确认）
    - HTCL OLD → 保留原文并标 legacy ？
-2. delivery_path 1–9 的文字码表（或一条同时带数字和名称的配置样例）
+2. ~~delivery_path 1–9 的文字码表~~ ✅ **已找到并落代码，不用再问**（2026-07-30）
 3. vendor 为空的含义：默认厂商 / 运行时决定 / 该渠道无厂商概念
 4. route 与 router 的业务区别
 5. rule_text 的后续阶段：总会执行，还是前一阶段失败才执行
@@ -503,7 +510,7 @@ tbl_event_router_usecase_topic     ← 最关键的新增项
 | `incident.py` 不调 MCP，**缺接入和编排开发** | **已建**：MCP 传输层 + 调查员 sub-agent，真机验证过 | 案例 5 从"缺开发"变成"缺一个映射表" |
 | 需要建 `config/logdream_app_map.json` | 钩子已建（两个文件名都认）。**内容需要内网填** | 变成纯数据请求 |
 | 需要"日志脱敏 + 时区转换" | 脱敏**已建**。时区**故意不转换**——只在告警自带显式时区时使用，否则明确拒绝并说明原因 | 三个时区并存（CloudWatch UTC / LogDream Asia/Hong_Kong / 服务器 GMT），乱转会查错窗口→返回空→被读成"无异常" |
-| `delivery_path` 数字↔文字映射列为案例 5 的阻塞 | **不是案例 5 的阻塞**。它是分类元数据，不控制运行时路由 | 它只影响案例 2 的表述精度，优先级应下调 |
+| `delivery_path` 数字↔文字映射列为案例 5 的阻塞 | 不是案例 5 的阻塞（它不控制运行时路由），而且 **2026-07-30 已在 `portal-web` 里找到枚举，此项已关闭** | 之前"镜像已查尽"的结论错在**盒子本地镜像只有 15 个仓库**——"查不到"的作用域受镜像覆盖率限制 |
 | 第一批优先做 CodeGraph 补齐 + message map 全量重建 | 建议改为：**数据请求先发**（有 lead time、不占我们工时），引擎活儿并行做 | 两件事都是小时级重建且只动 2 个工具，不该排在 DBA 请求前面 |
 
 ---

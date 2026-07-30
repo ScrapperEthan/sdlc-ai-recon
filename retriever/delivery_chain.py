@@ -19,15 +19,23 @@ rather than left to the caller's prose:
 * **Structure** (which stages exist, in what order, which carrier serves which channel) is fact:
   a committed catalog plus a repo-name-derived topology whose parser has been box-verified through
   RUNBOOK-49/50/51/52.
-* **Which carrier THIS use case uses** is generally NOT known. So the default answer is every
-  carrier on the channel, labelled ``channel_upper_bound``: "at most these", never "these". The
-  authoritative vendor column lives in `tbl_use_case_router`, which the intranet HAS now ingested
-  (RUNBOOK-54, 247 rows) but which nothing joins yet — the reason travels with the caveat at
-  runtime via ``usecase_catalog.router_table_status()`` instead of being frozen into a string here,
-  because the previous frozen version went on saying "not ingested" after it was.
-* When ``tbl_use_case_channel_rule.route``/``.router``/``.sender`` names a known carrier (values
-  look like ``CSL_SVC_RT_SMS``), the set is narrowed and labelled ``route_hint`` — a HINT, because
-  that those columns carry the carrier is still unconfirmed (RUNBOOK-54 question 1).
+* **Which carrier THIS use case uses** has four possible answers, and ``vendor_selection.method``
+  always says which one you got:
+
+  - ``router_table`` — `tbl_use_case_router` matched on its four-column natural key AND its vendor
+    display name is owner-confirmed. Authoritative. Rare today (see below).
+  - ``router_table_unconfirmed_alias`` — the authoritative row matched and DOES name a carrier, but
+    the display name (`HTCL`, `AWS HK SNS`, `HTCL OLD`) has no owner-confirmed canonical token, so
+    it is quoted verbatim and cannot be pointed at a carrier node. This is the interesting middle
+    tier: neither "we know" nor "we have nothing".
+  - ``route_hint`` — `channel_rule.route`/`.router`/`.sender` names a known carrier
+    (`CSL_SVC_RT_SMS`). A HINT; that those columns carry the carrier is unverified.
+  - ``channel_upper_bound`` — every carrier on the channel: "at most these", never "these".
+
+  The authoritative table is far thinner than the word suggests: ~49.8% of child rows back-link,
+  54.9% of those land on a non-blank vendor (⇒ ~a quarter overall), and the four values present
+  cover push and SMS only. For email/letter/WhatsApp/WeChat the upper bound is not a stopgap, it is
+  the only answer that exists. See ``retriever/usecase_router.py``.
 
 An honest wide answer beats a confident narrow one: over-listing carriers costs the reader a
 sentence, while inventing the wrong one gets the wrong vendor called at 3am.
@@ -39,7 +47,7 @@ two can disagree. Where the topology knows a carrier the diagram never drew, it 
 import json
 import os
 
-from . import config, usecase_catalog
+from . import config, usecase_catalog, usecase_router
 from .vendors import KNOWN_VENDORS, UNKNOWN_VENDOR, canon_vendor, vendors_in
 
 # Raw DB channel value -> the delivery channel the architecture actually has an exit for.
@@ -295,9 +303,38 @@ def _summarize(channel, stages):
     return f"{channel.upper()}: " + " → ".join(parts)
 
 
-def _channel_path(catalog, channel, declared_as, topology, topics, hints):
+def _authoritative_rows(channel, rules, business_category, router_index):
+    """The `tbl_use_case_router` rows this channel's rules actually reach.
+
+    Kept separate from the diagram walk on purpose. A matched router row is the authoritative
+    record, but its `vendor` is blank on 58.7% of the table and, when present, is a display name
+    whose canonical token is not owner-confirmed — so it can rarely narrow the PATH even when it
+    fully answers "what does the authoritative table say". Reporting both, distinctly, beats
+    collapsing them into one confidence level.
+    """
+    out = []
+    for rule in rules or []:
+        if not isinstance(rule, dict) or canonical_channel(rule.get("channel")) != channel:
+            continue
+        match = usecase_router.router_for_rule(rule, business_category, index=router_index)
+        entry = {"rule_citation": rule.get("citation") or "", **match}
+        out.append(entry)
+    return out
+
+
+def _channel_path(catalog, channel, declared_as, topology, topics, hints,
+                  rules=None, business_category="", router_index=None):
     channel_hints = hints.get(channel) or {}
     narrowed = sorted(v for v in channel_hints if v in KNOWN_VENDORS)
+
+    authoritative = _authoritative_rows(channel, rules, business_category, router_index)
+    # Only a router row whose vendor resolves to a CONFIRMED canonical token may narrow the path —
+    # an unconfirmed display name cannot be pointed at a carrier node without guessing which one.
+    confirmed = sorted({row["vendor"]["token"] for row in authoritative
+                        if row.get("matched") and row["vendor"]["token"]
+                        and row["vendor"]["token"] in KNOWN_VENDORS})
+    if confirmed:
+        narrowed = confirmed
     allowed = set(narrowed) if narrowed else None
 
     walked = _walk(catalog, _topic_node_id(catalog, channel), allowed)
@@ -310,20 +347,65 @@ def _channel_path(catalog, channel, declared_as, topology, topics, hints):
     stages.sort(key=lambda s: (_STAGE_RANK.get(s["stage"], len(_STAGE_RANK)), s["label"]))
 
     vendors = sorted(drawn | off_diagram)
-    return {
+    selection = _vendor_selection(channel_hints, narrowed, confirmed, authoritative)
+    result = {
         "channel": channel,
         "declared_as": sorted(set(declared_as)),
         "stages": stages,
         "vendors": vendors,
         "vendors_off_diagram": sorted(off_diagram),
         "terminals": [s["label"] for s in stages if s["stage"] == "vendor-terminal"],
-        "vendor_selection": {
-            "method": "route_hint" if narrowed else "channel_upper_bound",
-            "caveat": _ROUTE_HINT_CAVEAT if narrowed else _upper_bound_caveat(),
-            "citations": sorted({c for v in narrowed for c in channel_hints.get(v) or []}),
-        },
+        "vendor_selection": selection,
         "path_summary": _summarize(channel, stages),
     }
+    if authoritative:
+        result["authoritative_router"] = authoritative
+    return result
+
+
+def _vendor_selection(channel_hints, narrowed, confirmed, authoritative):
+    """Which basis the carrier answer rests on, strongest first, with the reason it isn't stronger.
+
+    Three tiers, and the middle one is the interesting case: a router row MATCHED (authoritative)
+    but its vendor is blank or its display name is unconfirmed. That is neither "we know" nor "we
+    have nothing" — the answer should quote the raw value and say the mapping is unconfirmed.
+    """
+    matched = [row for row in authoritative if row.get("matched")]
+    raw_vendors = sorted({row["vendor"]["raw"] for row in matched if row["vendor"]["present"]})
+    router_citations = sorted({row["citation"] for row in matched if row.get("citation")})
+
+    if confirmed:
+        return {
+            "method": "router_table",
+            "caveat": ("carrier comes from tbl_use_case_router (authoritative) via the four-column "
+                       "natural key, and its display name is owner-confirmed. Still a "
+                       + usecase_router.coverage_note()),
+            "citations": router_citations,
+            "authoritative_vendor_raw": raw_vendors,
+        }
+    if raw_vendors:
+        return {
+            "method": "router_table_unconfirmed_alias",
+            "caveat": ("tbl_use_case_router DOES record a carrier for this use case — verbatim: "
+                       + ", ".join(f"`{value}`" for value in raw_vendors)
+                       + ". Quote it as raw text: the display-name -> canonical-token mapping is "
+                         "not owner-confirmed, so it cannot be pointed at a carrier on the diagram "
+                         "and the path below stays the channel-level upper bound. " + _UPPER_BOUND_CAVEAT),
+            "citations": router_citations,
+            "authoritative_vendor_raw": raw_vendors,
+        }
+    reasons = sorted({row["reason"] for row in authoritative
+                      if not row.get("matched") and row.get("reason")})
+    if matched:
+        reasons.insert(0, "matched a router row whose vendor column is blank")
+    selection = {
+        "method": "route_hint" if narrowed else "channel_upper_bound",
+        "caveat": _ROUTE_HINT_CAVEAT if narrowed else _upper_bound_caveat(),
+        "citations": sorted({c for v in narrowed for c in channel_hints.get(v) or []}),
+    }
+    if reasons:
+        selection["authoritative_lookup"] = {"matched": bool(matched), "reasons": reasons}
+    return selection
 
 
 def _topic_node_id(catalog, channel):
@@ -333,7 +415,7 @@ def _topic_node_id(catalog, channel):
     return ""
 
 
-def exit_path(channels, rules=None, topics=None):
+def exit_path(channels, rules=None, topics=None, business_category=""):
     """Declared channels -> the full exit path per channel, down to the carrier terminal.
 
     `channels` are raw DB values (`tbl_use_case_channel_rule.channel`). `rules` are that use case's
@@ -375,9 +457,19 @@ def exit_path(channels, rules=None, topics=None):
         elif raw and raw not in result["unmapped_channels"]:
             result["unmapped_channels"].append(raw)
 
+    router_index = usecase_router.index_by_natural_key()
+    result["authoritative_table"] = {
+        "available": router_index["available"],
+        "table_present": router_index["table_present"],
+        "row_count": router_index["row_count"],
+        "key_fields": router_index["key_fields"],
+        "coverage_note": usecase_router.coverage_note(),
+    }
     for channel in sorted(canonical):
         result["by_channel"].append(
-            _channel_path(catalog, channel, canonical[channel], topology, topics, hints))
+            _channel_path(catalog, channel, canonical[channel], topology, topics, hints,
+                           rules=rules, business_category=business_category,
+                           router_index=router_index))
 
     result["available"] = bool(result["by_channel"])
     result["vendors"] = sorted({v for item in result["by_channel"] for v in item["vendors"]})

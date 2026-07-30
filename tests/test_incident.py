@@ -209,19 +209,22 @@ class BlastRadiusTests(_Fixture):
         self.assertIn("tbl_use_case_router", out["vendor_note"])
         self.assertIn("Do NOT infer a vendor from repo names", out["vendor_note"])
 
-    def test_vendor_note_says_ingested_but_unwired_once_the_table_is_present(self):
-        """The box's real state after RUNBOOK-54: table present, join not implemented."""
+    def test_vendor_note_states_the_coverage_limits_once_the_table_is_wired(self):
+        """The box's real state: table present AND joined — but joined is not complete. If the note
+        stopped at "ingested and joined", an incident answer would read a blank vendor as "no
+        carrier" instead of "not recorded"."""
         with mock.patch.object(usecase_catalog, "active_dataset", return_value={
             "environment": "UAT", "snapshot_id": "20260727-1542", "tables": {
                 "tbl_use_case_router": {"path": __file__, "row_count": 247,
                                          "exported_at": "2026-07-27"}}}):
             status = usecase_catalog.router_table_status()
         self.assertTrue(status["declared"])
-        self.assertFalse(status["wired"])
+        self.assertTrue(status["wired"])
         self.assertEqual(status["row_count"], 247)
-        self.assertIn("IS ingested", status["note"])
-        self.assertIn("NOT yet joined", status["note"])
-        self.assertIn("not wired in yet", status["note"])
+        self.assertIn("IS ingested AND joined", status["note"])
+        self.assertIn("QUARTER", status["note"])
+        self.assertIn("push and SMS only", status["note"])
+        self.assertIn("verbatim", status["note"])
 
     def test_repo_with_no_edges_is_empty_not_an_error(self):
         out = incident.blast_radius("amet-mdc-hsbc-cm-outbound-job")

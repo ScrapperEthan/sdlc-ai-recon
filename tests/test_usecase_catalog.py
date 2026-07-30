@@ -134,11 +134,14 @@ class DatasetManifestTests(unittest.TestCase):
         self.assertIn("DIFFERENT export runs", manifest["caveat"])
         self.assertIn("cross-time join", manifest["caveat"])
         self.assertEqual(manifest["table_exported_at"]["tbl_use_case_router"], "2026-07-27")
-        # The router table is present and readable, but nothing joins it yet — both facts stated.
+        # Present, readable, and now joined — but `wired` is not the same as "complete", so the
+        # note still has to carry the coverage limits.
         self.assertTrue(status["declared"])
         self.assertTrue(status["readable"])
-        self.assertFalse(status["wired"])
+        self.assertTrue(status["wired"])
         self.assertEqual(status["row_count"], 247)
+        self.assertIn("QUARTER", status["note"])
+        self.assertIn("push and SMS only", status["note"])
 
     def test_router_table_absent_says_absent_without_claiming_a_vendor(self):
         with tempfile.TemporaryDirectory() as tmp:

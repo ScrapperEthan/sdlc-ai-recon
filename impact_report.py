@@ -533,7 +533,7 @@ def usecase_master_provenance(use_case_id, master, rules, ext, route):
     return provenance
 
 
-def usecase_delivery_chain(rules, chain, topics):
+def usecase_delivery_chain(rules, chain, topics, master=None):
     """The exit half of the chain: declared channels -> … -> carrier -> what the customer receives.
 
     Channels come from `tbl_use_case_channel_rule.channel` when the use case has rules (a FACT).
@@ -544,7 +544,12 @@ def usecase_delivery_chain(rules, chain, topics):
     declared = sorted({rule["channel"] for rule in rules if rule.get("channel")})
     inferred = [item["channel"] for item in chain or []]
     channels, source = (declared, "declared") if declared else (inferred, "inferred")
-    result = delivery_chain.exit_path(channels, rules=rules, topics=topics)
+    # business_category is the fourth component of the router table's natural key and lives on the
+    # MASTER row, not the channel rule — so a use case with no master row cannot reach its
+    # authoritative carrier at all, however complete its channel rules are.
+    result = delivery_chain.exit_path(
+        channels, rules=rules, topics=topics,
+        business_category=(master or {}).get("business_category_code") or "")
     result["channel_source"] = source if channels else "none"
     if source == "inferred" and channels:
         result.setdefault("caveats", []).insert(0, (
@@ -637,7 +642,7 @@ def build_usecase_report(use_case_id, tags):
             "message": report["use_case_master"]["note"],
             "citations": [],
         })
-    report["delivery_chain"] = usecase_delivery_chain(rules, chain, topics)
+    report["delivery_chain"] = usecase_delivery_chain(rules, chain, topics, master)
 
     # Additive + null-safe: no master row (or no snapshot at all) -> byte-identical to today.
     if master:
@@ -947,6 +952,26 @@ def render_delivery_chain(payload):
         lines.append(f"  - exit / terminal: {', '.join(item['terminals']) or 'not drawn on the diagram'}")
         if item.get("vendors_off_diagram"):
             lines.append("  - not on the static diagram: " + ", ".join(item["vendors_off_diagram"]))
+        raw = item["vendor_selection"].get("authoritative_vendor_raw")
+        if raw:
+            lines.append("  - tbl_use_case_router records (verbatim, alias unconfirmed): "
+                         + ", ".join(f"`{value}`" for value in raw))
+        lookup = item["vendor_selection"].get("authoritative_lookup")
+        if lookup:
+            lines.append(f"  - authoritative lookup: matched={lookup['matched']}; "
+                         + "; ".join(lookup["reasons"]))
+        for row in item.get("authoritative_router") or []:
+            if not row.get("matched"):
+                continue
+            bits = [f"  - router row `{row['router_id']}`"]
+            if row.get("delivery_path"):
+                bits.append(f"delivery_path={row['delivery_path']} (code, no name known)")
+            if row.get("message_process_sla") or row.get("message_delivery_sla"):
+                bits.append(f"SLA process={row['message_process_sla']}/"
+                            f"delivery={row['message_delivery_sla']} (UNIT UNCONFIRMED)")
+            if row.get("citation"):
+                bits.append(row["citation"])
+            lines.append(" | ".join(bits))
     if payload.get("note"):
         lines.append(f"- note: {payload['note']}")
     lines.extend(f"- caveat: {caveat}" for caveat in payload.get("caveats") or [])

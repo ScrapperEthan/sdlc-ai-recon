@@ -63,6 +63,12 @@ RULE_TEXT_SEMANTICS_JSON = _cfg(
 # retriever/incident.py falls back to built-in defaults, and repo identification does not depend on
 # this file at all (it scans for known repo ids in the alert text).
 ALARM_PATTERNS_JSON = _cfg("SDLC_ALARM_PATTERNS", "alarm_patterns.json")
+# Column/validation knobs for the UAT Use Case CSV ingestion — written and OWNED by the intranet
+# (it is the side that sees the real exports). Deliberately NOT shipped in this repo: the intranet
+# cannot push to the public remote (confirmed by the owner), so a copy committed here would be
+# overwritten on their next pull. Consumers read it when present and fall back to built-in defaults
+# mirrored from what the intranet reported — see retriever/usecase_router.py.
+USECASE_COLUMNS_JSON = _cfg("SDLC_USECASE_COLUMNS", "usecase_columns.json")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

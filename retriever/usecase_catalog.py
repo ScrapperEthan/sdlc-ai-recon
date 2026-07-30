@@ -103,6 +103,16 @@ _FIELD_SPECS = {
     "sender": {"exact": {"sender"}, "needles": ("sender",)},
     "send_policy": {"exact": {"sendpolicy"}, "needles": ("send", "policy")},
 
+    # tbl_use_case_router. Aliases mirror the intranet column map (config/usecase_columns.json):
+    # process_sla / delivery_sla / delivery_path_id are the source spellings it folds.
+    "id": {"exact": {"id"}, "needles": ()},
+    "vendor": {"exact": {"vendor"}, "needles": ("vendor",)},
+    "message_process_sla": {"exact": {"messageprocesssla", "processsla"},
+                             "needles": ("process", "sla")},
+    "message_delivery_sla": {"exact": {"messagedeliverysla", "deliverysla"},
+                              "needles": ("delivery", "sla")},
+    "delivery_path": {"exact": {"deliverypath", "deliverypathid"}, "needles": ("delivery", "path")},
+
     # tbl_use_case_ext
     "service_line": {"exact": {"serviceline"}, "needles": ("service", "line")},
     "messaging_service_level": {"exact": {"messagingservicelevel"}, "needles": ("service", "level")},
@@ -151,6 +161,8 @@ _IDENTITY_FIELDS = (
 _CONSENT_FIELDS = tuple(_CONSENT_FIELD_LABELS)
 _RULE_FIELDS = ("use_case_id", "channel", "priority", "route", "router", "traffic_percentage",
                 "tag", "sender", "send_policy", "status")
+_ROUTER_FIELDS = ("id", "channel", "route", "router", "vendor", "message_process_sla",
+                  "message_delivery_sla", "delivery_path", "business_category")
 _EXT_FIELDS = ("use_case_id", "service_line", "messaging_service_level", "delivery_mode", "endpoint",
                "rule_text", "message_owner", "business_contact", "business_team", "team_head",
                "depart_head", "cost_owner", "signoff_by", "downstream_name", "is_dual_channel",
@@ -490,9 +502,11 @@ def router_table_status():
     sentence FALSE on the box while the code kept saying it. A wrong caveat is worse than a missing
     one — it tells the reader to stop asking for something they already have.
 
-    `wired` stays False until the join is implemented: the natural key spans four columns and the
-    row-level back-link resolves for only about half the child rows, so the join cannot be guessed
-    (guessing one is the cross-environment mis-join RUNBOOK-54 exists to prevent).
+    The join IS implemented now (`retriever/usecase_router.py`, four-column natural key
+    `business_category + channel + route + router`, reported by the intranet 2026-07-29). `wired`
+    says so — but being wired does not make it a complete answer, and the note carries why: it
+    back-links for ~half of child rows, over half of the rows it does reach have a blank vendor,
+    and the display names it does carry have no owner-confirmed canonical token yet.
     """
     dataset = active_dataset()
     meta = ((dataset or {}).get("tables") or {}).get("tbl_use_case_router") or {}
@@ -502,12 +516,13 @@ def router_table_status():
         "readable": declared and os.path.exists(meta["path"]),
         "row_count": meta.get("row_count"),
         "exported_at": meta.get("exported_at"),
-        "wired": False,
+        "wired": declared,
         "note": (
-            "tbl_use_case_router IS ingested in the active dataset but is NOT yet joined into the "
-            "chain: the join key spans four columns and needs the intranet column map before it "
-            "can be trusted. So the carrier here is still not the authoritative one — say 'the "
-            "authoritative vendor table exists but is not wired in yet', never 'we don't have it'."
+            "tbl_use_case_router IS ingested AND joined (four-column natural key), but it answers "
+            "for only about a QUARTER of rows — ~49.8% back-link, and 58.7% of its rows have a "
+            "blank vendor — and the vendor values present cover push and SMS only. Its display "
+            "names (HTCL / AWS HK SNS / HTCL OLD) also have no owner-confirmed canonical token, so "
+            "they are quoted verbatim rather than translated."
             if declared else
             "tbl_use_case_router (the authoritative vendor column) is not in the active dataset."),
     }

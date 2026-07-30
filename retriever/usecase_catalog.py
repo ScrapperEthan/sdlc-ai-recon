@@ -230,12 +230,19 @@ def active_dataset():
             tables[name] = {
                 "path": os.path.join(config.USECASE_DATASET_DIR, meta["file"]),
                 "row_count": meta.get("row_count"),
+                # Per-table export time: the tables are NOT necessarily one moment's snapshot (the
+                # first real router export landed a week after the other three), so a join across
+                # them is a cross-TIME join and every consumer has to be able to see that.
+                "exported_at": meta.get("exported_at"),
             }
         return {
             "environment": manifest.get("environment") or "unknown",
             "snapshot_id": manifest.get("snapshot_id"),
             "exported_at": manifest.get("exported_at"),
             "tables": tables,
+            # Set by the ingestion when the member tables come from different export runs. Kept
+            # verbatim (bool, list of times, whatever the builder wrote) so the caveat can quote it.
+            "mixed_export_times": manifest.get("mixed_export_times"),
             "legacy": False,
         }
     if os.path.exists(config.USECASE_MASTER_CSV):
@@ -333,6 +340,20 @@ def snapshot_manifest():
                    "does not prove absence in production."),
         "column_bindings": bindings,
     }
+    if dataset.get("mixed_export_times"):
+        # A join across tables exported a week apart can mismatch in BOTH directions (a use case
+        # added after the earlier export has no master row; one deleted before the later export
+        # has a stale child row). The ingestion flags it; refusing to pass that on would leave the
+        # answer sounding like one coherent snapshot.
+        manifest["mixed_export_times"] = dataset["mixed_export_times"]
+        manifest["caveat"] += (
+            " ⚠ The member tables come from DIFFERENT export runs (manifest: mixed_export_times), "
+            "so any join across them is a cross-time join — an unmatched row may mean 'exported at "
+            "a different moment', not 'not configured'.")
+    per_table = {name: meta.get("exported_at") for name, meta in (dataset.get("tables") or {}).items()
+                 if meta.get("exported_at")}
+    if per_table:
+        manifest["table_exported_at"] = per_table
     if dataset.get("legacy"):
         try:
             mtime = os.path.getmtime(path)
@@ -457,6 +478,38 @@ def _identity(path, line_no, row, bound):
         "status": status_raw,
         "active": (status_raw.upper() == "Y") if status_raw else None,
         "citation": _citation_for(path, line_no),
+    }
+
+
+def router_table_status():
+    """Is `tbl_use_case_router` present in the active dataset, and is anything reading it yet?
+
+    These are two different questions and conflating them puts a false statement in the answer.
+    Every "the authoritative vendor column is not ingested" note in this codebase was written when
+    the table did not exist anywhere; the intranet ingestion (RUNBOOK-54, 247 rows) made that
+    sentence FALSE on the box while the code kept saying it. A wrong caveat is worse than a missing
+    one — it tells the reader to stop asking for something they already have.
+
+    `wired` stays False until the join is implemented: the natural key spans four columns and the
+    row-level back-link resolves for only about half the child rows, so the join cannot be guessed
+    (guessing one is the cross-environment mis-join RUNBOOK-54 exists to prevent).
+    """
+    dataset = active_dataset()
+    meta = ((dataset or {}).get("tables") or {}).get("tbl_use_case_router") or {}
+    declared = bool(meta.get("path"))
+    return {
+        "declared": declared,
+        "readable": declared and os.path.exists(meta["path"]),
+        "row_count": meta.get("row_count"),
+        "exported_at": meta.get("exported_at"),
+        "wired": False,
+        "note": (
+            "tbl_use_case_router IS ingested in the active dataset but is NOT yet joined into the "
+            "chain: the join key spans four columns and needs the intranet column map before it "
+            "can be trusted. So the carrier here is still not the authoritative one — say 'the "
+            "authoritative vendor table exists but is not wired in yet', never 'we don't have it'."
+            if declared else
+            "tbl_use_case_router (the authoritative vendor column) is not in the active dataset."),
     }
 
 

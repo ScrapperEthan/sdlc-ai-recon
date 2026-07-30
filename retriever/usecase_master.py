@@ -16,6 +16,7 @@ from .usecase_catalog import (  # noqa: F401
     resolve_column,
     resolve_endpoint,
     route_dimension,
+    router_table_status,
     rules_by_use_case_id,
     search_usecases,
     snapshot_manifest,

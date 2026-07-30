@@ -104,6 +104,55 @@ class DatasetManifestTests(unittest.TestCase):
         self.assertFalse(manifest["production_verified"])
         self.assertIn("column_bindings", manifest)
 
+    def test_mixed_export_times_reaches_the_caveat(self):
+        """The intranet ingestion (RUNBOOK-54) landed three tables exported 2026-07-20 and the
+        router table exported 2026-07-27, and flagged `mixed_export_times` on the manifest. A join
+        across those is a cross-TIME join: an unmatched row can mean "exported at a different
+        moment" rather than "not configured", and only ~50% of child rows back-link at all. If the
+        flag stops at the manifest file, every answer reads as one coherent snapshot."""
+        with tempfile.TemporaryDirectory() as tmp:
+            master = (["use_case_id", "source_system", "status"], [["UC001", "PEGA", "Y"]])
+            dataset_dir = _write_manifest_dataset(tmp, master=master)
+            path = os.path.join(dataset_dir, "manifest.json")
+            with open(path, encoding="utf-8") as handle:
+                manifest_json = json.load(handle)
+            manifest_json["mixed_export_times"] = ["2026-07-20", "2026-07-27"]
+            manifest_json["tables"]["tbl_use_case"]["exported_at"] = "2026-07-20"
+            manifest_json["tables"]["tbl_use_case_router"] = {
+                "file": "tbl_use_case_router.snapshot.csv", "row_count": 247,
+                "exported_at": "2026-07-27"}
+            _write_csv(os.path.join(dataset_dir, "tbl_use_case_router.snapshot.csv"),
+                       ["id", "channel", "vendor"], [["1", "SMS", "csl"]])
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(manifest_json, handle)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                manifest = uc.snapshot_manifest()
+                status = uc.router_table_status()
+
+        self.assertEqual(manifest["mixed_export_times"], ["2026-07-20", "2026-07-27"])
+        self.assertIn("DIFFERENT export runs", manifest["caveat"])
+        self.assertIn("cross-time join", manifest["caveat"])
+        self.assertEqual(manifest["table_exported_at"]["tbl_use_case_router"], "2026-07-27")
+        # The router table is present and readable, but nothing joins it yet — both facts stated.
+        self.assertTrue(status["declared"])
+        self.assertTrue(status["readable"])
+        self.assertFalse(status["wired"])
+        self.assertEqual(status["row_count"], 247)
+
+    def test_router_table_absent_says_absent_without_claiming_a_vendor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            master = (["use_case_id", "source_system", "status"], [["UC001", "PEGA", "Y"]])
+            dataset_dir = _write_manifest_dataset(tmp, master=master)
+            with mock.patch.object(config, "USECASE_DATASET_DIR", dataset_dir), \
+                 mock.patch.object(config, "ROOT", tmp):
+                status = uc.router_table_status()
+                manifest = uc.snapshot_manifest()
+        self.assertFalse(status["declared"])
+        self.assertFalse(status["wired"])
+        self.assertIn("not in the active dataset", status["note"])
+        self.assertNotIn("mixed_export_times", manifest)
+
     def test_legacy_backcompat_environment_is_unknown_not_dev_sct(self):
         with tempfile.TemporaryDirectory() as tmp:
             legacy_dir = os.path.join(tmp, "index")

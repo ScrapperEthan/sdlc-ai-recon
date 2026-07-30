@@ -427,9 +427,10 @@ def blast_radius(repo, max_topics=_MAX_TOPICS, max_use_cases=_MAX_USE_CASES_LIST
         "time_critical": bool(tags.get("time_critical")),
         "snapshot": snapshot_source,
         "vendor": None,
-        "vendor_note": ("vendor is not derivable yet — tbl_use_case_router (which carries the "
-                        "authoritative vendor column) is not ingested. Do NOT infer a vendor from "
-                        "repo names in an incident answer."),
+        # Read at call time: this used to hardcode "not ingested", which became a false statement
+        # the moment the intranet ingested the table (RUNBOOK-54).
+        "vendor_note": (usecase_catalog.router_table_status()["note"]
+                        + " Do NOT infer a vendor from repo names in an incident answer."),
         "caveats": [
             "use cases come from the routing snapshot — indicative, verify against production "
             "before telling anyone their traffic stopped.",
@@ -477,8 +478,7 @@ def blast_radius_for_use_case(use_case, topics):
                    for entry in sorted(involved.values(), key=lambda e: e["repo"])],
         "channels": channels,
         "vendor": None,
-        "vendor_note": ("vendor is not derivable yet — tbl_use_case_router (the authoritative "
-                        "vendor column) is not ingested."),
+        "vendor_note": usecase_catalog.router_table_status()["note"],
         "caveats": [
             "use-case -> topic comes from the dev/SCT routing snapshot — indicative, verify "
             "against production.",

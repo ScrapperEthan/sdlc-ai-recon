@@ -19,9 +19,12 @@ rather than left to the caller's prose:
 * **Structure** (which stages exist, in what order, which carrier serves which channel) is fact:
   a committed catalog plus a repo-name-derived topology whose parser has been box-verified through
   RUNBOOK-49/50/51/52.
-* **Which carrier THIS use case uses** is generally NOT known. `tbl_use_case_router` — the
-  authoritative vendor column — is not ingested (RUNBOOK-54). So the default answer is every
-  carrier on the channel, labelled ``channel_upper_bound``: "at most these", never "these".
+* **Which carrier THIS use case uses** is generally NOT known. So the default answer is every
+  carrier on the channel, labelled ``channel_upper_bound``: "at most these", never "these". The
+  authoritative vendor column lives in `tbl_use_case_router`, which the intranet HAS now ingested
+  (RUNBOOK-54, 247 rows) but which nothing joins yet — the reason travels with the caveat at
+  runtime via ``usecase_catalog.router_table_status()`` instead of being frozen into a string here,
+  because the previous frozen version went on saying "not ingested" after it was.
 * When ``tbl_use_case_channel_rule.route``/``.router``/``.sender`` names a known carrier (values
   look like ``CSL_SVC_RT_SMS``), the set is narrowed and labelled ``route_hint`` — a HINT, because
   that those columns carry the carrier is still unconfirmed (RUNBOOK-54 question 1).
@@ -36,7 +39,7 @@ two can disagree. Where the topology knows a carrier the diagram never drew, it 
 import json
 import os
 
-from . import config
+from . import config, usecase_catalog
 from .vendors import KNOWN_VENDORS, UNKNOWN_VENDOR, canon_vendor, vendors_in
 
 # Raw DB channel value -> the delivery channel the architecture actually has an exit for.
@@ -61,9 +64,19 @@ _STAGE_RANK = {"topic": 0, "delivery-job": 1, "outbound-api": 2, "vendor-termina
 
 _UPPER_BOUND_CAVEAT = (
     "carrier set is an UPPER BOUND: these are every carrier serving this channel, not the one this "
-    "use case actually routes to. tbl_use_case_router (the authoritative vendor column) is not "
-    "ingested — see RUNBOOK-54. Say 'at most these carriers', never 'it sends via X'."
+    "use case actually routes to. Say 'at most these carriers', never 'it sends via X'."
 )
+
+
+def _upper_bound_caveat():
+    """The upper-bound caveat plus the CURRENT reason it is still an upper bound.
+
+    Hardcoding "tbl_use_case_router is not ingested" made this text go stale the moment the
+    intranet ingested it (RUNBOOK-54, 247 rows): the answer then told the reader to go get
+    something they already had. The reason is read from the dataset instead."""
+    return _UPPER_BOUND_CAVEAT + " " + usecase_catalog.router_table_status()["note"]
+
+
 _ROUTE_HINT_CAVEAT = (
     "carrier narrowed from tbl_use_case_channel_rule.route/router/sender, which is a HINT, not a "
     "confirmed mapping: that those columns carry the carrier is still unverified (RUNBOOK-54 "
@@ -306,7 +319,7 @@ def _channel_path(catalog, channel, declared_as, topology, topics, hints):
         "terminals": [s["label"] for s in stages if s["stage"] == "vendor-terminal"],
         "vendor_selection": {
             "method": "route_hint" if narrowed else "channel_upper_bound",
-            "caveat": _ROUTE_HINT_CAVEAT if narrowed else _UPPER_BOUND_CAVEAT,
+            "caveat": _ROUTE_HINT_CAVEAT if narrowed else _upper_bound_caveat(),
             "citations": sorted({c for v in narrowed for c in channel_hints.get(v) or []}),
         },
         "path_summary": _summarize(channel, stages),
@@ -373,7 +386,7 @@ def exit_path(channels, rules=None, topics=None):
 
     methods = {item["vendor_selection"]["method"] for item in result["by_channel"]}
     if "channel_upper_bound" in methods:
-        result["caveats"].append(_UPPER_BOUND_CAVEAT)
+        result["caveats"].append(_upper_bound_caveat())
     if "route_hint" in methods:
         result["caveats"].append(_ROUTE_HINT_CAVEAT)
     if any(item["vendors_off_diagram"] for item in result["by_channel"]):

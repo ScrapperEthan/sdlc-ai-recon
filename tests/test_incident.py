@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from retriever import config, incident
+from retriever import config, incident, usecase_catalog
 
 # Real alarm names from RUNBOOK-55's sample (repo ids are public names, no incident data).
 ALARM_ECS = "prodECS_mc-hk-hase-batch-letter-postman-job_service_CPUUtilizationMINOR[80percent]"
@@ -199,10 +199,29 @@ class BlastRadiusTests(_Fixture):
         out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
         self.assertTrue(all(item.get("citation") for item in out["use_cases"]))
 
-    def test_vendor_is_refused_until_the_router_table_is_ingested(self):
+    def test_vendor_is_refused_until_the_router_table_is_wired_in(self):
+        """The refusal is the contract; the WORDING has to track reality. This assertion used to
+        pin the literal phrase "not ingested", which turned into a false statement on the box the
+        moment the intranet ingested the table (RUNBOOK-54, 247 rows) — the answer then told the
+        reader to go fetch something they already had."""
         out = incident.blast_radius("mc-hk-hase-batch-letter-postman-job")
         self.assertIsNone(out["vendor"])
-        self.assertIn("not ingested", out["vendor_note"])
+        self.assertIn("tbl_use_case_router", out["vendor_note"])
+        self.assertIn("Do NOT infer a vendor from repo names", out["vendor_note"])
+
+    def test_vendor_note_says_ingested_but_unwired_once_the_table_is_present(self):
+        """The box's real state after RUNBOOK-54: table present, join not implemented."""
+        with mock.patch.object(usecase_catalog, "active_dataset", return_value={
+            "environment": "UAT", "snapshot_id": "20260727-1542", "tables": {
+                "tbl_use_case_router": {"path": __file__, "row_count": 247,
+                                         "exported_at": "2026-07-27"}}}):
+            status = usecase_catalog.router_table_status()
+        self.assertTrue(status["declared"])
+        self.assertFalse(status["wired"])
+        self.assertEqual(status["row_count"], 247)
+        self.assertIn("IS ingested", status["note"])
+        self.assertIn("NOT yet joined", status["note"])
+        self.assertIn("not wired in yet", status["note"])
 
     def test_repo_with_no_edges_is_empty_not_an_error(self):
         out = incident.blast_radius("amet-mdc-hsbc-cm-outbound-job")

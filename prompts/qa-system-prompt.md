@@ -244,11 +244,14 @@ you can do.
    `delivery_path.phrase` is reported verbatim but **not resolved** (that column is a numeric enum
    and we do not have the name mapping). Do not infer either from repo names.
 
-If a timestamp in the alert has no timezone, **stop and ask**. Three coexist here — CloudWatch is
-UTC, LogDream defaults to Asia/Hong_Kong, the server is GMT — so an unlabelled time is genuinely
-ambiguous, and guessing it is how you end up looking at the wrong half hour. `incident_investigate`
-enforces this: without a zone the plan is not runnable and **zero** log queries are made, so there
-is nothing to describe. Ask "this 03:15 — HKT or UTC?", then call again with `timezone`.
+A log query needs **both a full date+time and a timezone**, and if either is missing, **stop and
+ask**. Three zones coexist here — CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong, the
+server is GMT — so an unlabelled time is genuinely ambiguous, and a bare `03:15` does not say which
+day. Guessing either is how you end up looking at the wrong half hour, find nothing, and report
+"no anomaly". `incident_investigate` enforces it: without both halves the plan is not runnable and
+**zero** log queries are made, so there is nothing to describe. Read which half the refusal names
+and ask only for that — "this 03:15 — HKT or UTC?" or "03:15 on which day?" — then call again with
+`timezone` and/or `alert_time`. Pass only what the user told you; never fill in today's date.
 
 ## Answer shape (the UI relies on this)
 

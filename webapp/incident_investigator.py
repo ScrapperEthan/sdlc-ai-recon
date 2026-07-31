@@ -56,6 +56,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime
 
 from retriever import code as rcode, incident, messages as msg, repo_tags
 from . import config, incident_raw_store, mcp_client, mcp_registry
@@ -579,7 +580,31 @@ def exception_classes(repo, limit=6):
     return [name for name, _count in sorted(found.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
 
 
-def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None):
+# The wire format for `alert_time`. The real tool REJECTED `2026-07-30 03:15 HKT` and wants
+# `alert_time=2026-07-30 03:15:00` with `timezone=Asia/Hong_Kong` alongside it (intranet,
+# 2026-07-31). Passing the alert's own words through was meant to avoid converting the moment —
+# and it still does; this is a reformat, not a conversion. Configurable for the same reason
+# everything else about their side is: `operations['log.read'].request.alert_time_format`.
+ALERT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def alert_time_format(operation="log.read"):
+    declared = ((mcp_registry.operations().get(operation) or {}).get("request") or {})
+    fmt = declared.get("alert_time_format")
+    return fmt if isinstance(fmt, str) and fmt.strip() else ALERT_TIME_FORMAT
+
+
+def _format_alert_time(normalized, operation="log.read"):
+    fmt = alert_time_format(operation)
+    if fmt == ALERT_TIME_FORMAT:
+        return normalized                     # already that shape; no parse, no drift
+    try:
+        return datetime.strptime(normalized, ALERT_TIME_FORMAT).strftime(fmt)
+    except ValueError:
+        return normalized                     # a bad format string must not lose the stamp
+
+
+def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None):
     """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
 
     `keywords` and `sources` are the drill-down path: a follow-up question ("search for
@@ -656,23 +681,58 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None):
     else:
         out["keywords"] = list(seen_keywords.values())[:_MAX_KEYWORDS]
 
-    # The window. Never defaulted: see the module docstring on the three coexisting timezones.
-    zoned = [t for t in parsed.get("times") or [] if isinstance(t, dict) and t.get("timezone")]
-    if zoned:
+    # The window. Never defaulted and never CONVERTED — see the module docstring on the three
+    # coexisting timezones. TWO independent halves are required, not one: a full date+time stamp
+    # and a zone, because the real tool takes them as separate parameters. They are resolved
+    # separately so a refusal can name exactly which half is missing — "which timezone?" and
+    # "which day?" are different questions, and asking the wrong one wastes a round trip mid-incident.
+    times = [t for t in parsed.get("times") or [] if isinstance(t, dict)]
+    dated = [t for t in times if t.get("normalized")]
+    caller_stamp = incident.normalize_stamp(alert_time) if alert_time else ""
+
+    stamp, shown, stamp_source = "", "", ""
+    if dated:
+        stamp, shown, stamp_source = dated[0]["normalized"], dated[0].get("text") or "", \
+            "explicit in the alert text"
+    elif caller_stamp:
+        stamp, shown, stamp_source = caller_stamp, alert_time, "caller-supplied"
+
+    zone, zone_source = "", ""
+    from_alert = next((t["timezone"] for t in times if t.get("timezone")), "")
+    if from_alert:
         # An explicit zone in the alert beats a caller-supplied one: the alert is the evidence.
-        out["window"] = {"at": zoned[0].get("text") or "", "timezone": zoned[0]["timezone"],
-                         "source": "explicit in the alert text"}
-    elif timezone and (parsed.get("times") or []):
-        first = (parsed["times"] or [])[0]
-        out["window"] = {"at": first.get("text") or "", "timezone": timezone,
-                         "source": "caller-supplied timezone (the alert's own time was ambiguous)"}
+        zone, zone_source = from_alert, "explicit in the alert text"
+    elif timezone:
+        zone, zone_source = timezone, "caller-supplied (the alert's own time was ambiguous)"
+
+    if stamp and zone:
+        out["window"] = {
+            "at": shown,
+            # What actually goes on the wire. The zone travels as its own parameter beside it.
+            "alert_time": _format_alert_time(stamp),
+            "timezone": zone,
+            "source": ("explicit in the alert text"
+                       if stamp_source == zone_source == "explicit in the alert text"
+                       else f"time {stamp_source or 'missing'}; timezone {zone_source or 'missing'}"),
+            "note": ("the stamp and the zone travel as SEPARATE parameters; the stamp was only "
+                     "REFORMATTED, never converted — 03:15 in the alert is still 03:15 here."),
+        }
     else:
+        missing = []
+        if not stamp:
+            missing.append(
+                "a DATE — the alert carries %s, and the read tool needs a full `alert_time`, which "
+                "cannot be built without knowing which day" % (
+                    "only a clock time like 03:15" if times else "no timestamp at all"))
+        if not zone:
+            missing.append(
+                "a TIMEZONE — CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong and the "
+                "servers are GMT, so the same clock time is three moments 8 hours apart")
         out["refusals"].append(
-            "BLOCKING: the alert carries no time with an explicit timezone, so no window could be "
-            "built and NOTHING was queried. CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong "
-            "and the servers are GMT — the same clock time is three moments 8 hours apart, and a "
-            "read against the wrong one returns nothing, which reads as 'no anomaly'. Ask the user "
-            "which zone the alert timestamp is in and pass timezone= explicitly; do not guess.")
+            "BLOCKING: no time window could be built, so NOTHING was queried. Missing: "
+            + "; and ".join(missing) + ". Ask the user, then pass `alert_time` (e.g. "
+            "'2026-07-30 03:15:00') and/or `timezone` explicitly. Do not guess either half: a "
+            "wrong window returns nothing, and nothing reads as 'no anomaly'.")
 
     # Runnable, not merely "we understood the alert". Identifying the service is necessary and not
     # sufficient: this tool's real parameter is an ALERT TIME it backtracks from, so without a
@@ -884,7 +944,7 @@ def investigate(alert_text, **kwargs):
 
 
 def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
-                        sources=None, max_queries=None, owner=""):
+                        sources=None, max_queries=None, owner="", alert_time=None):
     """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
 
     A generator rather than a callback so the caller can relay progress to a browser without threads
@@ -899,7 +959,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     budget = max(1, int(max_queries or _MAX_LOG_QUERIES))
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
     query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
-                                    keywords=keywords, sources=sources)
+                                    keywords=keywords, sources=sources, alert_time=alert_time)
     if query_plan.get("targets") or query_plan.get("keywords"):
         yield _step(
             "plan_done",
@@ -936,7 +996,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         packet["not_investigated"] = list(query_plan.get("refusals") or [])
         packet["caveats"].append("nothing was queried; see not_investigated")
         yield _step("refused",
-                    "拒绝调查：缺时区，无法确定时间窗，一条日志都没查（请告知告警时间是哪个时区）"
+                    "拒绝调查：时间窗建不出来（缺日期或时区），一条日志都没查"
                     if query_plan.get("targets") and not query_plan.get("window")
                     else "拒绝调查：告警里读不出服务或用例，不猜",
                     reasons=packet["not_investigated"])
@@ -1052,8 +1112,10 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                     repo=target["repo"], app=match, sources=on_sources)
         # ---- the hop that was missing: find the real log files before reading one ----------------
         window = query_plan.get("window") or {}
-        alert_at = window.get("at") or ""
-        alert_date = re.sub(r"[^0-9-]", "", alert_at.split("T")[0].split(" ")[0])[:10]
+        # The NORMALIZED stamp, not the alert's own words: the real tool rejects
+        # `2026-07-30 03:15 HKT` and wants the zone as its own parameter (intranet, 2026-07-31).
+        alert_at = window.get("alert_time") or ""
+        alert_date = alert_at[:10] if re.match(r"\d{4}-\d{2}-\d{2}", alert_at) else ""
         files_by_source = {}
         for source in on_sources:
             search_payload = _payload("log.search_files", {
@@ -1151,8 +1213,9 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                 app=match, source=source, keyword=term, file=log_file)
             args = _payload("log.read", {
                 "app": match, "source": source, "file": log_file, "keyword": term,
-                # The real tool backtracks from an alert time; it has no from/to window. Passed
-                # through exactly as the alert stated it, zone included — never converted.
+                # The real tool backtracks from an alert time; it has no from/to window. The stamp
+                # goes as `YYYY-MM-DD HH:MM:SS` with the zone in its OWN parameter — the moment is
+                # reformatted, never converted.
                 "alert_time": alert_at or None,
                 "timezone": window.get("timezone") or None,
                 "mode": READ_MODE_BACKTRACK if alert_at else None,

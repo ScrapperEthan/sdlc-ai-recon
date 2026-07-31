@@ -146,7 +146,10 @@ class ModelStillNeverSeesRawTextTests(_Store):
                 "identified": True,
                 "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
                 "use_cases": [], "metric": "CPUUtilization", "notes": [],
-                "times": [{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong"}]}),
+                # A full stamp: the real read tool needs a date, and takes the zone separately
+                # (intranet, 2026-07-31), so a bare `03:15 HKT` no longer plans a runnable window.
+                "times": [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
+                           "normalized": "2026-07-30 03:15:00"}]}),
         ]
         for patcher in self._extra:
             patcher.start()

@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from . import config
+from . import atomic_json, config
 
 _LOCK = threading.Lock()
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -37,13 +37,7 @@ def _load():
 
 
 def _save(data):
-    parent = os.path.dirname(config.LLM_ROUTES_STORE)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    tmp = config.LLM_ROUTES_STORE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp, config.LLM_ROUTES_STORE)
+    atomic_json.write_json(config.LLM_ROUTES_STORE, data)
 
 
 def validate_base_url(base_url):

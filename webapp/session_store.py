@@ -6,6 +6,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 
+from . import atomic_json
 from . import config
 from . import llm_usage
 
@@ -43,10 +44,7 @@ def _load_unlocked():
 
 def _save_unlocked(data):
     _ensure_parent_dir()
-    temp_path = config.SESSION_STORE + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(temp_path, config.SESSION_STORE)
+    atomic_json.write_json(config.SESSION_STORE, data)
 
 
 def _find_session(data, session_id):

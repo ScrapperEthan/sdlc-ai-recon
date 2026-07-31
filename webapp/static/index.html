@@ -1224,7 +1224,11 @@
                 <strong>告警影响面<span class="pc-tag">零生产访问</span></strong>
                 <span>贴一条 CloudWatch 告警 → 受影响的用例、渠道、该通知谁</span>
               </button>
-              <button id="prompt-logs" class="prompt-card is-live" type="button" data-prompt="prodECS_mc-hk-hase-batch-letter-postman-job_service_CPUUtilizationMINOR[80percent] at 03:15 HKT —— 看一下生产日志，这条告警的日志说明了什么？">
+              <!-- The timestamp is load-bearing, and it needs a DATE as well as a zone: the real
+                   log tool backtracks from a full `alert_time`, so a bare `03:15 HKT` plans no
+                   window and queries nothing (correctly, but not mid-demo). Edit the date to
+                   something the logs actually cover before demoing. -->
+              <button id="prompt-logs" class="prompt-card is-live" type="button" data-prompt="prodECS_mc-hk-hase-batch-letter-postman-job_service_CPUUtilizationMINOR[80percent] at 2026-07-30 03:15 HKT —— 看一下生产日志，这条告警的日志说明了什么？">
                 <strong>生产日志根因<span class="pc-tag">MCP · LogDream</span></strong>
                 <span>同一条告警 → 调查员读生产日志，每一步流式显示</span>
               </button>

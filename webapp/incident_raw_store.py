@@ -35,7 +35,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from . import config
+from . import atomic_json, config
 
 _LOCK = threading.Lock()
 
@@ -75,13 +75,7 @@ def _load_unlocked():
 
 
 def _save_unlocked(data):
-    parent = os.path.dirname(config.INCIDENT_RAW_STORE)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    temp_path = config.INCIDENT_RAW_STORE + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(temp_path, config.INCIDENT_RAW_STORE)
+    atomic_json.write_json(config.INCIDENT_RAW_STORE, data)
 
 
 def _expired(entry, now=None):

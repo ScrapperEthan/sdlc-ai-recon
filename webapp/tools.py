@@ -336,11 +336,17 @@ TOOLS = [
             "asks '看日志', 'what does the log show', '为什么挂的', 'root cause', or after "
             "incident_impact when they want to know WHY rather than WHO. "
             "Pass the alert text verbatim. "
-            "TIMEZONE — this is a HARD STOP, not a caveat: if `plan.refusals` contains a BLOCKING "
-            "timezone refusal, the plan was not runnable and ZERO log queries were made. Nothing "
-            "was read. Do not describe the logs at all, and do not retry with a guess — ASK THE "
-            "USER IN CHAT: 'this 03:15 — is it HKT or UTC?' and call again with their answer as "
-            "`timezone`. The reason matters and is worth telling them: CloudWatch writes UTC, "
+            "TIME WINDOW — this is a HARD STOP, not a caveat: the log tool backtracks from a full "
+            "`alert_time`, so a runnable plan needs BOTH a date+time AND a timezone. If "
+            "`plan.refusals` contains a BLOCKING window refusal, the plan was not runnable and ZERO "
+            "log queries were made — nothing was read, so do not describe the logs at all. Read "
+            "WHICH HALF it says is missing and ask only for that: "
+            "a missing DATE ('the alert says 03:15 — which day?') or a missing TIMEZONE ('this "
+            "03:15 — HKT or UTC?'). Then call again passing `alert_time` as "
+            "'YYYY-MM-DD HH:MM:SS' and/or `timezone` as an IANA zone. "
+            "Pass ONLY what the user actually told you — never compute 'yesterday' or fill in "
+            "today's date yourself; guessing the day fails exactly like guessing the zone. "
+            "The reason is worth telling them: CloudWatch writes UTC, "
             "LogDream defaults to Asia/Hong_Kong and the servers are GMT, so the same clock time can "
             "be three moments 8 hours apart; searching the wrong one returns nothing, and nothing "
             "reads as 'no problem'. "
@@ -374,6 +380,7 @@ TOOLS = [
             "returns it; (5) exception classes and counts are evidence, but a log line is not a root "
             "cause on its own — say what it shows, not what you infer.",
             {"alert_text": {"type": "string"}, "timezone": {"type": "string"},
+             "alert_time": {"type": "string"},
              "keywords": {"type": "array", "items": {"type": "string"}},
              "sources": {"type": "array", "items": {"type": "string"}},
              "max_queries": {"type": "integer"}},
@@ -412,6 +419,7 @@ def dispatch_events(name, a, owner=""):
         for event in incident_investigator.investigate_events(
                 text,
                 timezone=(a.get("timezone") or "").strip() or None,
+                alert_time=(a.get("alert_time") or "").strip() or None,
                 keywords=a.get("keywords") or None,
                 sources=a.get("sources") or None,
                 max_queries=a.get("max_queries") or None,

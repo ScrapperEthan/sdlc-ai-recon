@@ -175,6 +175,26 @@ def _known_use_cases(candidates):
     return found, unknown
 
 
+def normalize_stamp(stamp):
+    """`2026-07-30T03:15` / `2026-07-30 03:15 HKT` -> `2026-07-30 03:15:00`; `""` if there is no date.
+
+    FORMAT ONLY — the moment is never moved. The real `read_logdream_log` rejects a stamp with the
+    zone glued on and takes the zone as its own parameter (intranet, 2026-07-31), so the two have
+    to travel separately. Reformatting is not converting: `03:15 HKT` stays 03:15, it just stops
+    carrying `HKT` inside the same string.
+
+    A bare clock time returns `""` rather than being paired with today's date. Guessing which DAY
+    is the same class of error as guessing the zone, and it fails the same way: the wrong window
+    comes back empty, and empty reads as 'no anomaly'.
+    """
+    body = (stamp or "").strip().replace("T", " ").strip()
+    if body.endswith("Z"):
+        body = body[:-1].strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", body):
+        body += ":00"
+    return body if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", body) else ""
+
+
 def _extract_times(text, aliases):
     """Times matter only with a timezone attached. RUNBOOK-55 confirmed THREE coexist (CloudWatch
     UTC / LogDream Asia/Hong_Kong / server GMT), so a bare clock time is reported as ambiguous
@@ -192,6 +212,8 @@ def _extract_times(text, aliases):
             "text": stamp + ((" " + suffix) if suffix else ""),
             "timezone": zone or "",
             "ambiguous": not zone,
+            # The stamp on its own, in the shape a log tool can take. Empty for a clock-only match.
+            "normalized": normalize_stamp(stamp),
         })
 
     for match in _DATETIME.finditer(text):

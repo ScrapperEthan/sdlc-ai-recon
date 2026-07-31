@@ -1,7 +1,7 @@
 # RUNBOOK-61 —— 三个 blocker 已修 + 返回体形状进配置（外网 2026-07-31）
 
 > 对应内网 `UAT-GATE-AND-DIFF-20260731.md` 里 "Reproduced blockers in the external-owned engine" 三条。
-> 全部在 `webapp/incident_investigator.py`（外网所有）。**你要求的四个回归测试都已写并通过（外网 909 tests）。**
+> 全部在 `webapp/incident_investigator.py`（外网所有）。**你要求的四个回归测试都已写并通过（外网 901 tests）。**
 >
 > 跑之前：`git pull --ff-only origin master`。本轮**没有动** `config/mcp_tools.json`、
 > `AGENTS.md`、`mdc_sheet_schema.json` —— 你保留的那三个本地差异不会冲突。
@@ -156,7 +156,7 @@ refusal 文案加了 `BLOCKING:` 前缀，前端标签也区分开（"缺时区"
 python -m pytest tests -q
 ```
 
-**回报**：通过数。外网这边是 **909**。
+**回报**：通过数。外网这边是 **901**（我最初写的 909 是笔误）。
 
 ### 检查 2 ⭐⭐ —— 把三个工具的真实返回体形状打出来（这是本轮最重要的一项）
 

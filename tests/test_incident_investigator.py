@@ -11,7 +11,13 @@ from unittest import mock
 from webapp import config, incident_investigator as inv, mcp_client, mcp_registry
 
 
-ALERT = "prodECS_mc-hk-hase-csl-sms-deli-job_service_CPUUtilizationMINOR[80percent] at 03:15 HKT"
+# A full stamp, not a bare `03:15 HKT`: the real read tool backtracks from an `alert_time` and
+# takes the zone separately (intranet, 2026-07-31), so a clock time with no DATE is not a runnable
+# alert. The old fixture said 03:15 and passed, which is precisely how that gap survived.
+ALERT = ("prodECS_mc-hk-hase-csl-sms-deli-job_service_CPUUtilizationMINOR[80percent] "
+         "at 2026-07-30 03:15 HKT")
+ALERT_TIMES = [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
+                "ambiguous": False, "normalized": "2026-07-30 03:15:00"}]
 DIRTY_LOG = "\n".join([
     "2026-07-30 03:15:01 ERROR SmsDeliveryException customer alice.wong@example.com failed",
     "2026-07-30 03:15:02 WARN  retry for 9123 4567 ref MDCTRACK-9F2K-88H1",
@@ -145,24 +151,26 @@ class PlanTests(unittest.TestCase):
         """Three timezones coexist; a guessed window returns nothing and reads as 'no anomaly'."""
         out = self._plan(ALERT, **{})
         self.assertIsNone(out["window"])
-        self.assertTrue(any("no time with an explicit timezone" in r for r in out["refusals"]))
+        self.assertTrue(any("a TIMEZONE" in r for r in out["refusals"]))
 
     def test_an_explicit_zone_in_the_alert_is_used(self):
-        with mock.patch.object(inv.incident, "parse_alert", self._parsed(
-                ALERT, times=[{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong"}])):
+        with mock.patch.object(inv.incident, "parse_alert", self._parsed(ALERT, times=ALERT_TIMES)):
             out = inv.plan(ALERT)
         self.assertEqual(out["window"]["timezone"], "Asia/Hong_Kong")
         self.assertEqual(out["window"]["source"], "explicit in the alert text")
+        self.assertEqual(out["window"]["alert_time"], "2026-07-30 03:15:00")
 
     def test_the_alerts_own_zone_beats_a_caller_supplied_one(self):
         with mock.patch.object(inv.incident, "parse_alert", self._parsed(
-                ALERT, times=[{"text": "03:15 Z", "timezone": "UTC"}])):
+                ALERT, times=[{"text": "2026-07-30 03:15 Z", "timezone": "UTC",
+                               "normalized": "2026-07-30 03:15:00"}])):
             out = inv.plan(ALERT, timezone="Asia/Hong_Kong")
         self.assertEqual(out["window"]["timezone"], "UTC")
 
     def test_a_caller_supplied_zone_rescues_an_ambiguous_time(self):
         with mock.patch.object(inv.incident, "parse_alert", self._parsed(
-                ALERT, times=[{"text": "03:15", "timezone": "", "ambiguous": True}])):
+                ALERT, times=[{"text": "2026-07-30 03:15", "timezone": "", "ambiguous": True,
+                               "normalized": "2026-07-30 03:15:00"}])):
             out = inv.plan(ALERT, timezone="Asia/Hong_Kong")
         self.assertEqual(out["window"]["timezone"], "Asia/Hong_Kong")
         self.assertIn("caller-supplied", out["window"]["source"])
@@ -240,7 +248,7 @@ class InvestigateTests(unittest.TestCase):
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
-            "times": [{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong"}]})
+            "times": [dict(t) for t in ALERT_TIMES]})
         self._parse.start()
         self._search = mock.patch.object(inv.rcode, "search_code", lambda *a, **k: [])
         self._search.start()
@@ -282,13 +290,17 @@ class InvestigateTests(unittest.TestCase):
         sources = {args.get("source") for op, args in self.calls if op == "log.read"}
         self.assertEqual(sources, set(inv.log_sources()))
 
-    def test_the_window_is_passed_through_verbatim_and_never_converted(self):
+    def test_the_stamp_is_reformatted_but_the_moment_is_never_converted(self):
+        """The real tool REJECTED `2026-07-30 03:15 HKT` and wants the zone as its own parameter
+        (intranet, 2026-07-31). Reformatting is not converting: 03:15 is still 03:15."""
         inv.investigate(ALERT)
         reads = [args for op, args in self.calls if op == "log.read"]
         self.assertTrue(reads)
         # The real read_logdream_log has no from/to window: it backtracks from an alert time.
-        self.assertEqual(reads[0]["alert_time"], "03:15 HKT")
+        self.assertEqual(reads[0]["alert_time"], "2026-07-30 03:15:00")
         self.assertEqual(reads[0]["timezone"], "Asia/Hong_Kong")
+        self.assertNotIn("HKT", reads[0]["alert_time"])       # the zone never rides along
+        self.assertIn("03:15", reads[0]["alert_time"])        # and the hour did not move
         self.assertEqual(reads[0]["mode"], inv.READ_MODE_BACKTRACK)
         self.assertNotIn("from_time", reads[0])
 
@@ -1114,11 +1126,13 @@ class StructuredResponseInvestigationTests(InvestigateTests):
         self.assertIn("no recognised entries field", " ".join(packet["not_investigated"]))
 
 
-class MissingTimezoneIsFailClosedTests(unittest.TestCase):
-    """Reported by the intranet 2026-07-31. `plan()` recorded the refusal and then ran anyway.
+class UnrunnableWindowIsFailClosedTests(unittest.TestCase):
+    """Two rounds of intranet findings, same gate.
 
-    The real read tool backtracks from an ALERT TIME. Without a zone there is no honest query to
-    send — and an untimed sweep that finds nothing is indistinguishable from a healthy service.
+    2026-07-31 (a): `plan()` recorded the timezone refusal and then ran anyway.
+    2026-07-31 (b): the real tool needs a full `alert_time` with the zone as a SEPARATE parameter,
+    so a bare `03:15 HKT` is not runnable either — and guessing which day fails exactly like
+    guessing the zone.
 
     Borrows `InvestigateTests`' fixtures without inheriting its tests: this class changes the alert
     the fixture parses, so re-running the happy-path suite under it would only assert that a
@@ -1129,13 +1143,16 @@ class MissingTimezoneIsFailClosedTests(unittest.TestCase):
 
     def setUp(self):
         InvestigateTests.setUp(self)
-        # Same alert, but the parser finds a time with no zone — the ambiguous 03:15 case.
+        self._repatch([{"text": "2026-07-30 03:15", "timezone": "", "ambiguous": True,
+                        "normalized": "2026-07-30 03:15:00"}])
+
+    def _repatch(self, times):
         self._parse.stop()
         self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
-            "times": [{"text": "03:15", "timezone": "", "ambiguous": True}]})
+            "times": [dict(t) for t in times]})
         self._parse.start()
 
     def test_the_plan_is_not_runnable_without_a_timezone(self):
@@ -1145,7 +1162,7 @@ class MissingTimezoneIsFailClosedTests(unittest.TestCase):
         self.assertTrue(out["targets"])            # the service WAS identified; that is not enough
         self.assertIn("BLOCKING", " ".join(out["refusals"]))
 
-    def test_a_missing_timezone_makes_zero_mcp_calls(self):
+    def test_an_unrunnable_window_makes_zero_mcp_calls(self):
         """The load-bearing assertion: not 'fewer calls', none."""
         packet = inv.investigate(ALERT)
         self.assertEqual(self.calls, [])
@@ -1153,25 +1170,86 @@ class MissingTimezoneIsFailClosedTests(unittest.TestCase):
         self.assertFalse(packet["contains_production_data"])
         self.assertIn("NOTHING was queried", " ".join(packet["not_investigated"]))
 
-    def test_the_refusal_names_the_timezone_as_the_blocker_not_the_service(self):
+    def test_the_refusal_names_the_window_as_the_blocker_not_the_service(self):
         """"we could not identify the service" would send the user to answer the wrong question."""
         step = next(e for e in inv.investigate_events(ALERT) if e.get("step") == "refused")
-        self.assertIn("缺时区", step["label"])
+        self.assertIn("时间窗", step["label"])
 
     def test_supplying_the_timezone_makes_the_same_alert_runnable(self):
         packet = inv.investigate(ALERT, timezone="Asia/Hong_Kong")
         self.assertTrue(packet["queries_executed"])
         self.assertEqual(packet["plan"]["window"]["timezone"], "Asia/Hong_Kong")
 
-    def test_an_alert_with_its_own_zone_is_unaffected(self):
-        self._parse.stop()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
-            "identified": True,
-            "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
-            "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
-            "times": [{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong"}]})
-        self._parse.start()
+    def test_a_clock_time_with_a_zone_but_no_date_is_also_refused(self):
+        """`at 03:15 HKT` used to plan fine and then send a stamp the real tool rejects. Which DAY
+        is a question, not a default."""
+        self._repatch([{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong", "normalized": ""}])
+        packet = inv.investigate(ALERT)
+        self.assertEqual(self.calls, [])
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("a DATE", joined)
+        self.assertNotIn("a TIMEZONE", joined)     # the zone was there; do not ask for it again
+
+    def test_the_caller_can_supply_the_missing_date(self):
+        self._repatch([{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong", "normalized": ""}])
+        packet = inv.investigate(ALERT, alert_time="2026-07-30 03:15")
+        reads = [args for op, args in self.calls if op == "log.read"]
+        self.assertTrue(reads)
+        self.assertEqual(reads[0]["alert_time"], "2026-07-30 03:15:00")
+        self.assertIn("caller-supplied", packet["plan"]["window"]["source"])
+
+    def test_a_refusal_names_both_halves_when_both_are_missing(self):
+        self._repatch([])
+        packet = inv.investigate(ALERT)
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("a DATE", joined)
+        self.assertIn("a TIMEZONE", joined)
+        self.assertIn("no timestamp at all", joined)
+
+    def test_an_alert_with_a_full_stamp_and_zone_is_unaffected(self):
+        self._repatch(ALERT_TIMES)
         self.assertTrue(inv.investigate(ALERT)["queries_executed"])
+
+
+class AlertTimeFormatTests(unittest.TestCase):
+    """`2026-07-30 03:15 HKT` was rejected by the real tool; the stamp and the zone are separate
+    parameters (intranet, 2026-07-31)."""
+
+    def test_normalization_is_a_reformat_not_a_conversion(self):
+        from retriever import incident as ri
+        for raw, want in (("2026-07-30 03:15", "2026-07-30 03:15:00"),
+                          ("2026-07-30T03:15:00", "2026-07-30 03:15:00"),
+                          ("2026-07-30T03:15:07Z", "2026-07-30 03:15:07")):
+            self.assertEqual(ri.normalize_stamp(raw), want, raw)
+
+    def test_a_clock_time_without_a_date_normalizes_to_nothing(self):
+        """Not to today. Pairing a bare 03:15 with today's date is a guess with the same failure
+        mode as guessing the zone."""
+        from retriever import incident as ri
+        for raw in ("03:15", "03:15:00", "", "not a time"):
+            self.assertEqual(ri.normalize_stamp(raw), "", repr(raw))
+
+    def test_the_parser_carries_the_normalized_stamp_alongside_the_verbatim_text(self):
+        from retriever import incident as ri
+        # `repos=` supplied because parse_alert returns before time extraction when the repo
+        # universe is unavailable — which is the case in a checkout without index/repo_tags.json.
+        times = ri.parse_alert("mc-hk-hase-csl-sms-deli-job broke at 2026-07-30 03:15 HKT",
+                               repos=["mc-hk-hase-csl-sms-deli-job"])["times"]
+        self.assertEqual(times[0]["text"], "2026-07-30 03:15 HKT")
+        self.assertEqual(times[0]["normalized"], "2026-07-30 03:15:00")
+        self.assertEqual(times[0]["timezone"], "Asia/Hong_Kong")
+
+    def test_the_wire_format_is_overridable_from_the_intranet_config(self):
+        """Their tool rejected one format once already; the next rename must not need a push."""
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.read": {"request": {"alert_time_format": "%Y-%m-%dT%H:%M:%SZ"}}}):
+            self.assertEqual(inv._format_alert_time("2026-07-30 03:15:00"),
+                             "2026-07-30T03:15:00Z")
+
+    def test_a_broken_format_string_keeps_the_stamp_rather_than_losing_it(self):
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.read": {"request": {"alert_time_format": 12345}}}):
+            self.assertEqual(inv._format_alert_time("2026-07-30 03:15:00"), "2026-07-30 03:15:00")
 
 
 class ToolSurfaceTests(unittest.TestCase):

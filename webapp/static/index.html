@@ -310,6 +310,13 @@
     background: #eef4ff;
     border-color: #cbdaf7;
   }
+  /* An "off" capability is not an error, but it must not read as ready either: the production-log
+     track silently does nothing when SDLC_MCP_ENABLED is unset, and nothing reads as "clean". */
+  .topbar .status-pill.is-off {
+    color: #8a5b12;
+    background: #fdf4e3;
+    border-color: #ecd8ad;
+  }
   .usage-button {
     cursor: pointer;
   }
@@ -413,7 +420,10 @@
   }
 
   .prompt-card strong {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     margin-bottom: 6px;
     font-size: 14px;
   }
@@ -421,6 +431,64 @@
   .prompt-card span {
     color: var(--muted);
     font-size: 13px;
+  }
+
+  /* What the card actually exercises. Worth showing during a demo: "zero production access" and
+     "reads production logs" are the same screen but very different guarantees. */
+  .pc-tag {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #eef3f9;
+    color: #41506a;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .prompt-card.is-live .pc-tag {
+    background: #e7f0ff;
+    color: #0057d9;
+  }
+
+  .prompt-group-title {
+    grid-column: 1 / -1;
+    margin: 6px 0 -4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .03em;
+  }
+
+  .prompt-group-title em {
+    margin-left: 8px;
+    font-style: normal;
+    font-weight: 500;
+    opacity: .85;
+  }
+
+  .prompt-more {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .prompt-chip {
+    padding: 7px 12px;
+    color: var(--ink);
+    background: var(--surface-soft);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: border-color .16s ease;
+  }
+
+  .prompt-chip:hover,
+  .prompt-chip:focus-visible {
+    border-color: #9bb7ea;
+    outline: 0;
   }
 
   .msg {
@@ -1114,9 +1182,12 @@
         <summary class="sidebar-title">Retrieval Tools</summary>
         <ul class="tool-list">
           <li title="Which repos are affected if you change a given repo"><strong>Impact</strong><span>what a change breaks</span></li>
+          <li title="Synchronous call paths — which method calls which, across repos"><strong>Call graph</strong><span>who calls what</span></li>
           <li title="Which service publishes a message to a queue/topic, and which service consumes it"><strong>Message routing</strong><span>who sends &amp; receives</span></li>
           <li title="Search the actual source code and return exact file:line"><strong>Code search</strong><span>find &amp; cite source</span></li>
-          <li title="Synchronous call paths — which method calls which"><strong>Call graph</strong><span>who calls what</span></li>
+          <li title="One use case end to end: channels, rule_text, topics, delivery jobs, outbound APIs, carrier"><strong>Delivery chain</strong><span>use case → carrier</span></li>
+          <li title="Paste a production alert: which repos, topics, use cases and channels are affected. Reads nothing from production"><strong>Incident impact</strong><span>who is affected</span></li>
+          <li title="Reads the actual production logs over MCP in an isolated investigator; returns a redacted evidence packet"><strong>Log investigation</strong><span>what the log says</span></li>
         </ul>
       </details>
     </aside>
@@ -1124,13 +1195,15 @@
     <main class="main">
       <header class="topbar">
         <div>
-          <h1>Ask about the Java estate</h1>
-          <p>Answers are grounded in repository maps, message routes, code search, and cited source lines.</p>
+          <h1>Ask about the MDC estate</h1>
+          <p>Grounded in repository maps, message routes, the business delivery chain, and — when MCP
+            is on — production logs. Every claim cites where it came from.</p>
         </div>
         <div class="topbar-actions" aria-label="Current guarantees">
           <span class="status-pill">No repo writes</span>
           <span class="status-pill">Cited answers</span>
           <span class="status-pill" id="index-status">Index status unknown</span>
+          <span class="status-pill" id="mcp-status" title="Whether production log/metric lookups can run">MCP …</span>
           <button class="status-pill usage-button" id="llm-button" type="button" title="Which LLM your requests use">LLM: shared</button>
           <button class="status-pill usage-button" id="usage-button" type="button">Usage</button>
         </div>
@@ -1140,26 +1213,49 @@
         <div id="log" aria-live="polite">
           <div id="empty" class="empty-state">
             <div>
-              <h2>Investigate changes before they move.</h2>
-              <p>Start from impact, message routing, or code evidence and keep the answer tied to source.</p>
+              <h2>从一条告警，或一次改动开始。</h2>
+              <p>影响面、业务全链路、跨仓库调用链，以及（MCP 打开时）生产日志根因 ——
+                每条结论都带出处。点卡片填入问题，回车发送。</p>
             </div>
             <div class="prompt-grid" aria-label="Prompt starters">
-              <button class="prompt-card" type="button" data-prompt="If I change EventPayload, what breaks?">
-                <strong>Impact analysis</strong>
-                <span>If I change EventPayload, what breaks?</span>
+
+              <p class="prompt-group-title">事故响应 · 已接入 MCP<em>同一条告警的两半：谁受影响 / 为什么挂</em></p>
+              <button class="prompt-card" type="button" data-prompt="prodECS_mc-hk-hase-batch-letter-postman-job_service_CPUUtilizationMINOR[80percent] —— 这个告警影响了谁？涉及哪些 topic、业务用例和渠道，要通知哪些 owner？">
+                <strong>告警影响面<span class="pc-tag">零生产访问</span></strong>
+                <span>贴一条 CloudWatch 告警 → 受影响的用例、渠道、该通知谁</span>
               </button>
-              <button class="prompt-card" type="button" data-prompt="Which repos consume otx_bat_letter?">
-                <strong>Message consumers</strong>
-                <span>Which repos consume otx_bat_letter?</span>
+              <button id="prompt-logs" class="prompt-card is-live" type="button" data-prompt="prodECS_mc-hk-hase-batch-letter-postman-job_service_CPUUtilizationMINOR[80percent] at 03:15 HKT —— 看一下生产日志，这条告警的日志说明了什么？">
+                <strong>生产日志根因<span class="pc-tag">MCP · LogDream</span></strong>
+                <span>同一条告警 → 调查员读生产日志，每一步流式显示</span>
               </button>
-              <button class="prompt-card" type="button" data-prompt="How does a message get from ingress-api to a tracking job?">
-                <strong>Route tracing</strong>
-                <span>How does a message get from ingress-api to a tracking job?</span>
+
+              <p class="prompt-group-title">变更影响 · 代码图</p>
+              <button class="prompt-card" type="button" data-prompt="改 EventPayload 会影响哪些仓库？给出 Maven 直接与传递依赖、跨仓库调用链，以及每条结论的 file:line 出处。">
+                <strong>公共模型变更<span class="pc-tag">Maven · CodeGraph</span></strong>
+                <span>改 EventPayload 会连累谁 —— 依赖 + 调用链 + 消息关系</span>
               </button>
-              <button class="prompt-card" type="button" data-prompt="Find where payment status is mapped and cite the source lines.">
-                <strong>Code evidence</strong>
-                <span>Find where payment status is mapped and cite the source lines.</span>
+              <button class="prompt-card" type="button" data-prompt="谁调用了 IngressService？跨 repo 的调用链是什么？列出真实的跨仓库调用者，并给出每个调用者的源码 file:line。">
+                <strong>跨仓库调用链<span class="pc-tag">含流程图</span></strong>
+                <span>谁调用了 IngressService —— 精确到行，并画出调用图</span>
               </button>
+
+              <p class="prompt-group-title">业务链路 · 用例与消息</p>
+              <button class="prompt-card" type="button" data-prompt="K3002 的完整配置与渠道是什么？把全链路讲到出口 —— topic、投递任务、出站 API、厂商和最终触达方式，并说明厂商结论属于哪一档可信度。">
+                <strong>全链路到出口<span class="pc-tag">含厂商 / SLA</span></strong>
+                <span>K3002 从上游一路到 SMSC / APNs，客户最终收到什么</span>
+              </button>
+              <button class="prompt-card" type="button" data-prompt="谁在消费 otx_bat_letter？生产者又是谁？给出每条边的证据出处。">
+                <strong>消息谁产谁消<span class="pc-tag">消息图</span></strong>
+                <span>otx_bat_letter 的生产者与消费者，逐条带出处</span>
+              </button>
+
+              <div class="prompt-more" aria-label="More prompt starters">
+                <button class="prompt-chip" type="button" data-prompt="最核心、最不能出问题的 10 个仓库是哪些？分维度说明，并说清哪些维度现在算不了、卡在谁那里。">核心仓库 Top 10</button>
+                <button class="prompt-chip" type="button" data-prompt="MDC 一共有哪些仓库？给我完整清单和一张全景图。">MDC 仓库全景</button>
+                <button class="prompt-chip" type="button" data-prompt="PEGA 出问题会影响哪些 Use Case 和渠道？改动要通知谁？">上游系统影响面</button>
+                <button class="prompt-chip" type="button" data-prompt="现在的 Use Case 配置有哪些数据质量问题？按严重程度列出来。">配置数据质量</button>
+                <button class="prompt-chip" type="button" data-prompt="找到支付状态是在哪里映射的，并引用源码行。">代码证据</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1267,6 +1363,7 @@ const log = document.getElementById('log'), q = document.getElementById('q'),
       newSessionButton = document.getElementById('new-session'),
       sessionMeta = document.getElementById('session-meta'),
       indexStatus = document.getElementById('index-status'),
+      mcpStatus = document.getElementById('mcp-status'),
       usageButton = document.getElementById('usage-button'),
       usagePanel = document.getElementById('usage-panel'),
       empty = document.getElementById('empty');
@@ -1717,6 +1814,40 @@ async function refreshIndexStatus() {
     indexStatus.title = title;
   } catch (error) {
     indexStatus.textContent = 'Index status unavailable';
+  }
+}
+
+// Whether the production-log track can actually run, checked BEFORE anyone clicks the log starter.
+// No ?probe=1 here: probing opens connections to production systems, and this is page load.
+async function refreshMcpStatus() {
+  if (!mcpStatus) return;
+  try {
+    const status = await fetchJson('/api/mcp/status');
+    const ready = (status.ready || []).length;
+    const total = Number(status.operations || 0);
+    const card = document.getElementById('prompt-logs');
+    const tag = card && card.querySelector('.pc-tag');
+    if (!status.calling_enabled) {
+      mcpStatus.textContent = 'MCP off';
+      mcpStatus.classList.add('is-off');
+      mcpStatus.title = status.calling_note
+        || 'SDLC_MCP_ENABLED is unset — production log lookups will not run.';
+      // Say it on the card too. The starter still works — the investigator will report that it did
+      // NOT look — but during a demo you want to know that before you click it, not after.
+      if (card) card.classList.remove('is-live');
+      if (tag) tag.textContent = 'MCP 未开启';
+      return;
+    }
+    mcpStatus.classList.remove('is-off');
+    if (card) card.classList.add('is-live');
+    if (tag) tag.textContent = 'MCP · LogDream';
+    mcpStatus.textContent = `MCP ${ready}/${total}`;
+    mcpStatus.title = `${ready} of ${total} declared operations are wired and callable`
+      + (status.config_error ? ` · config error: ${status.config_error}` : '');
+  } catch (error) {
+    mcpStatus.textContent = 'MCP unknown';
+    mcpStatus.classList.add('is-off');
+    mcpStatus.title = 'Could not read /api/mcp/status';
   }
 }
 
@@ -2351,7 +2482,9 @@ async function askStream(text) {
   }
 }
 
-document.querySelectorAll('.prompt-card').forEach((button) => {
+// Cards and the compact chips below them share one contract: fill the composer, do not send. The
+// incident starters carry a repo id and a timestamp the demo box may want edited first.
+document.querySelectorAll('[data-prompt]').forEach((button) => {
   button.addEventListener('click', () => {
     q.value = button.dataset.prompt || '';
     q.focus();
@@ -2697,6 +2830,7 @@ q.addEventListener('keydown', e => {
 resetLog(true);
 initializeSessions();
 refreshIndexStatus();
+refreshMcpStatus();
 refreshLlmStatus();
 </script>
 <style>

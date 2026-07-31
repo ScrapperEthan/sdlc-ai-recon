@@ -309,6 +309,79 @@ def extract_app_names(text, structured=None, operation="log.list_apps"):
     return sorted(set(names)), note, ""
 
 
+_SHAPE_MAX_DEPTH = 6
+_SHAPE_MAX_KEYS = 24
+
+
+def describe_shape(node, _depth=0):
+    """A response body -> its STRUCTURE only: field names, types, lengths. Never a value.
+
+    This exists so "what does your tool actually return?" can be answered from inside the intranet
+    without anyone reading a production response or pasting one out. Three rounds of defects came
+    from me guessing at their shapes; this is how the guessing stops without a log line travelling.
+
+    Values never appear — a string becomes `str(len=42)`. Field NAMES do appear, because they are
+    the whole point, but they are redacted too: a body keyed by account number would otherwise leak
+    through the one field this function has to print.
+    """
+    if _depth >= _SHAPE_MAX_DEPTH:
+        return "...(depth limit)"
+    if isinstance(node, dict):
+        keys = list(node)[:_SHAPE_MAX_KEYS]
+        out = {redact(str(key)): describe_shape(node[key], _depth + 1) for key in keys}
+        if len(node) > len(keys):
+            out["...(%d more keys)" % (len(node) - len(keys))] = ""
+        return out
+    if isinstance(node, list):
+        if not node:
+            return "list[0]"
+        kinds = sorted({type(item).__name__ for item in node})
+        # Only the FIRST element is described. A heterogeneous list is worth knowing about, so the
+        # types are all named even though only one is expanded.
+        return {"list[%d] of %s" % (len(node), "|".join(kinds)): describe_shape(node[0], _depth + 1)}
+    if isinstance(node, str):
+        return "str(len=%d)" % len(node)
+    if isinstance(node, bool):
+        return "bool"
+    return type(node).__name__
+
+
+def describe_response(out, operation):
+    """One MCP result -> a values-free report of its shape AND what our parsers made of it.
+
+    The single thing to paste back from the box when a parse fails: it says what they sent, what we
+    looked for, and where the two disagree, without any production text in it.
+    """
+    text = (out or {}).get("text") or ""
+    structured = (out or {}).get("structured")
+    body = _decode(text, structured)
+    report = {
+        "operation": operation,
+        "outcome": _tool_outcome(out)[0],
+        "carried_structured_content": isinstance(structured, (dict, list)),
+        "body_is_json": body is not None,
+        "shape": describe_shape(body) if body is not None else "not JSON (plain text)",
+        "text_chars": len(text),
+        "declared_shape": {k: list(v) if isinstance(v, tuple) else v
+                           for k, v in response_shape(operation).items()},
+    }
+    if operation == "log.read":
+        lines, reported, error = extract_log_lines(text, structured, operation)
+        report["parsed"] = {"lines": None if lines is None else len(lines),
+                            "server_reported_count": reported, "error": error}
+    elif operation == "log.list_apps":
+        names, note, error = extract_app_names(text, structured, operation)
+        report["parsed"] = {"apps": None if names is None else len(names),
+                            # Names are app/service identifiers, not customer data, and seeing a few
+                            # is how you tell a real listing from JSON keys. Still exit-gated below.
+                            "sample": (names or [])[:5], "note": note, "error": error}
+    elif operation == "log.search_files":
+        picked = select_log_files(text, structured=structured)
+        report["parsed"] = {"files": len(picked), "sample": picked[:5]}
+    cleaned, _check = sanitize_packet(report)
+    return cleaned
+
+
 _MAX_EXCERPTS = 5
 _MAX_EXCERPT_CHARS = 300
 _MAX_KEYWORDS = 8

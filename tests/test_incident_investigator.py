@@ -997,6 +997,67 @@ class StructuredResponseTests(unittest.TestCase):
         self.assertEqual((lines, error), (["ERROR one"], ""))
 
 
+class ShapeProbeTests(unittest.TestCase):
+    """`describe_shape` / `describe_response` — how the intranet answers "what does your tool return?"
+    without a production response leaving the log host, and without anyone reading JSON by eye.
+
+    It is a diagnostic that runs against PRODUCTION responses, so the leak test applies to it just
+    as much as to the evidence packet.
+    """
+
+    def test_no_value_ever_appears_in_a_shape(self):
+        body = {"lines": [{"line": "customer alice.wong@example.com 9123 4567", "level": "ERROR"}],
+                "line_count": 1, "app": "cslSmsDeli"}
+        blob = json.dumps(inv.describe_shape(body), ensure_ascii=False)
+        for secret in ("alice.wong@example.com", "9123 4567", "ERROR", "cslSmsDeli"):
+            self.assertNotIn(secret, blob, secret)
+        self.assertIn("lines", blob)          # names DO survive; that is the entire point
+        self.assertIn("line_count", blob)
+
+    def test_a_field_name_that_is_itself_data_is_redacted(self):
+        """A body keyed by account number would otherwise leak through the one field this has to
+        print."""
+        blob = json.dumps(inv.describe_shape({"4123456789012345": {"hits": 3}}))
+        self.assertNotIn("4123456789012345", blob)
+
+    def test_the_shape_names_types_lengths_and_nesting(self):
+        shape = inv.describe_shape({"data": {"rows": ["a", "bb"]}, "total": 2, "ok": True})
+        self.assertEqual(shape["total"], "int")
+        self.assertEqual(shape["ok"], "bool")
+        self.assertEqual(shape["data"]["rows"], {"list[2] of str": "str(len=1)"})
+
+    def test_deep_or_wide_bodies_are_bounded(self):
+        deep = {}
+        node = deep
+        for _ in range(30):
+            node["next"] = {}
+            node = node["next"]
+        self.assertIn("depth limit", json.dumps(inv.describe_shape(deep)))
+        wide = inv.describe_shape({f"k{i}": 1 for i in range(60)})
+        self.assertTrue(any("more keys" in key for key in wide))
+
+    def test_describe_response_says_what_they_sent_and_what_we_read(self):
+        out = {"ok": True, "text": StructuredResponseTests.TWO_LINES}
+        report = inv.describe_response(out, "log.read")
+        self.assertTrue(report["body_is_json"])
+        self.assertEqual(report["parsed"]["lines"], 2)
+        self.assertEqual(report["parsed"]["server_reported_count"], 2)
+        self.assertIn("lines", report["declared_shape"])
+        self.assertNotIn("SmsDeliveryException", json.dumps(report))   # no log text, even here
+
+    def test_describe_response_on_an_unreadable_body_names_the_fields_it_looked_for(self):
+        report = inv.describe_response({"ok": True, "text": json.dumps({"payload": {"x": [1]}})},
+                                       "log.read")
+        self.assertIsNone(report["parsed"]["lines"])
+        self.assertIn("mcp_tools.json", report["parsed"]["error"])
+        self.assertIn("payload", json.dumps(report["shape"]))          # so they can see the real one
+
+    def test_describe_response_handles_a_tool_error_and_plain_text(self):
+        err = inv.describe_response({"ok": False, "text": "unknown source hkl"}, "log.list_apps")
+        self.assertEqual(err["outcome"], "error")
+        self.assertFalse(err["body_is_json"])
+
+
 class StructuredResponseInvestigationTests(InvestigateTests):
     """The same three defects, end to end through `investigate` rather than the parsers alone."""
 

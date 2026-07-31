@@ -1707,6 +1707,68 @@ class CloudWatchBranchTests(InvestigateTests):
         self.assertIn("UTC", packet["cloudwatch_window"]["timezone_conversion"])
 
 
+class AlarmNameNeverPersistsTests(CloudWatchBranchTests):
+    """Found by the intranet's real-machine UAT (2026-07-31): the chain worked and every other
+    check passed, but the terminal packet still carried the real alarm name in
+    `plan.cloudwatch.alarm_name`.
+
+    It matters because an alarm name EMBEDS the service it watches — their report noted the only
+    place a service identifier appeared in the clear was inside that name. Dimension values were
+    already fingerprinted, so leaving the name whole masked an identifier in one field and printed
+    it in another.
+    """
+
+    REAL_NAME = "prodECS-csl-sms-deli-job-cpu"
+
+    def test_get_alarm_still_receives_the_real_name(self):
+        """The fingerprint is an EXIT rule. Masking the value we look up would break the feature."""
+        self._packet()
+        args = next(a for op, a in self.calls if op == "aws.get_alarm")
+        self.assertEqual(args["alarm_name"], self.REAL_NAME)
+
+    def test_the_terminal_packet_carries_a_fingerprint_not_the_name(self):
+        packet = self._packet()
+        self.assertNotIn(self.REAL_NAME, json.dumps(packet, ensure_ascii=False))
+        self.assertRegex(packet["plan"]["cloudwatch"]["alarm_name"], r"^<alarm:[0-9a-f]{6}>$")
+        self.assertIn("never invent one", packet["plan"]["cloudwatch"]["alarm_name_note"])
+
+    def test_progress_events_carry_no_alarm_name(self):
+        events = [e for e in inv.investigate_events(self.ALERT) if e.get("type") == "subagent_step"]
+        self.assertNotIn(self.REAL_NAME, json.dumps(events, ensure_ascii=False))
+
+    def test_both_ways_in_are_covered_extraction_and_the_explicit_parameter(self):
+        """Two sources of an alarm name, one exit gate."""
+        from_text = self._packet()
+        supplied = inv.investigate(ALERT, alarm_name="operator-supplied-alarm")
+        self.assertNotIn(self.REAL_NAME, json.dumps(from_text, ensure_ascii=False))
+        self.assertNotIn("operator-supplied-alarm", json.dumps(supplied, ensure_ascii=False))
+        self.assertRegex(supplied["plan"]["cloudwatch"]["alarm_name"], r"^<alarm:[0-9a-f]{6}>$")
+
+    def test_the_same_alarm_fingerprints_the_same_way_twice(self):
+        """Two investigations of one alarm must still read as the same alarm."""
+        first, second = self._packet(), self._packet()
+        self.assertEqual(first["plan"]["cloudwatch"]["alarm_name"],
+                         second["plan"]["cloudwatch"]["alarm_name"])
+
+    def test_a_refusal_path_scrubs_it_too(self):
+        """Every return path goes through the same exit gate, including the ones that never call."""
+        self._parse.stop()
+        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            "identified": True,
+            "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
+            "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
+            "times": []})                      # no window -> nothing runs at all
+        self._parse.start()
+        packet = self._packet()
+        self.assertEqual(self.calls, [])
+        self.assertNotIn(self.REAL_NAME, json.dumps(packet, ensure_ascii=False))
+
+    def test_a_name_short_enough_to_collide_with_prose_is_left_alone(self):
+        """Substring replacement over the whole packet is only safe for a real alarm name."""
+        packet = inv.investigate(ALERT, alarm_name="cpu")
+        self.assertEqual(packet["plan"]["cloudwatch"]["alarm_name"], "cpu")
+
+
 class ToolSurfaceTests(unittest.TestCase):
     def test_the_investigator_is_charged_to_the_subagent_lane(self):
         from webapp import tools

@@ -88,6 +88,59 @@ class WriteJsonTests(unittest.TestCase):
         leftovers = [n for n in os.listdir(os.path.dirname(self.path)) if n.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
+    def test_two_writes_from_one_process_never_reuse_a_temp_name(self):
+        """A per-process name meant a scanner still holding the PREVIOUS temp file blocked the next
+        write's open() rather than its replace() — a second way to lose the same write."""
+        seen = []
+        real_open = open
+
+        def _spy(path, *a, **k):
+            if str(path).endswith(".tmp"):
+                seen.append(str(path))
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", _spy):
+            atomic_json.write_json(self.path, {"x": 1})
+            atomic_json.write_json(self.path, {"x": 2})
+        self.assertEqual(len(set(seen)), 2, seen)
+
+    def test_a_blocked_temp_file_open_is_retried_too(self):
+        """The intranet hit this again after the first fix (RUNBOOK-63 send-back): the scanner
+        holds the file we just closed, so both ends of the write need the retry."""
+        calls = {"n": 0}
+        real_open = open
+
+        def _flaky(path, *a, **k):
+            if str(path).endswith(".tmp"):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError(5, "being used by another process")
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", _flaky), \
+             mock.patch.object(atomic_json.time, "sleep", lambda _s: None):
+            atomic_json.write_json(self.path, {"x": 1})
+        self.assertEqual(calls["n"], 3)
+        with open(self.path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), {"x": 1})
+
+    def test_a_non_permission_oserror_is_not_sat_on_for_seconds(self):
+        """No such directory or a full disk is a real problem, not a transient lock."""
+        waits = []
+        with mock.patch.object(atomic_json.os, "replace",
+                               mock.Mock(side_effect=FileNotFoundError(2, "gone"))), \
+             mock.patch.object(atomic_json.time, "sleep", waits.append):
+            with self.assertRaises(FileNotFoundError):
+                atomic_json.write_json(self.path, {"x": 1})
+        self.assertEqual(waits, [])
+
+    def test_the_retry_budget_is_wide_enough_for_a_corporate_scanner(self):
+        """0.5s was not enough — the box still lost one write in a full run. Bounded, but wider."""
+        self.assertGreaterEqual(atomic_json._ATTEMPTS, 8)
+        total = sum(atomic_json._BACKOFF_SECONDS * n for n in range(1, atomic_json._ATTEMPTS))
+        self.assertGreater(total, 1.0)
+        self.assertLess(total, 5.0)
+
     def test_the_backoff_grows_so_a_busy_file_gets_more_than_one_quick_look(self):
         waits = []
         with mock.patch.object(atomic_json.os, "replace",

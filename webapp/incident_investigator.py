@@ -1852,10 +1852,58 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     yield {"type": "result", "packet": final}
 
 
+def _fingerprint_alarm_name(node, name, marker):
+    """Replace every occurrence of the alarm name with its fingerprint, anywhere in the packet.
+
+    Whole-structure rather than one field on purpose: the same reasoning as the PII exit gate. One
+    known field is easy to clear and easy for a future code path to reintroduce somewhere else.
+    """
+    if isinstance(node, str):
+        return node.replace(name, marker)
+    if isinstance(node, dict):
+        return {key: _fingerprint_alarm_name(value, name, marker) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_fingerprint_alarm_name(item, name, marker) for item in node]
+    return node
+
+
+def _scrub_alarm_name(cleaned):
+    """The alarm name identifies a production service, so it leaves as a fingerprint.
+
+    The intranet's UAT found the real name surviving in `plan.cloudwatch.alarm_name` (2026-07-31)
+    — and observed that the only place a service identifier appeared in the clear was INSIDE that
+    name, since alarm names embed the service they watch. Dimension values were already
+    fingerprinted, so leaving the name whole was simply incoherent: the same identifier, masked in
+    one field and printed in another.
+
+    Nothing is lost for the reader. The alarm name came FROM the user, so it is already in the
+    conversation; the packet does not need to be a second copy of it. The fingerprint is stable, so
+    two investigations of the same alarm still read as the same alarm.
+    """
+    plan_block = (cleaned.get("plan") or {}).get("cloudwatch") or {}
+    name = plan_block.get("alarm_name") or ""
+    # A very short name could appear as a substring of unrelated prose; alarm names are not short.
+    if len(name) < 4:
+        return cleaned
+    marker = f"<alarm:{_digest(name)}>"
+    cleaned = _fingerprint_alarm_name(cleaned, name, marker)
+    block = (cleaned.get("plan") or {}).get("cloudwatch")
+    if isinstance(block, dict):
+        block["alarm_name"] = marker
+        block["alarm_name_note"] = (
+            "fingerprinted at the exit — an alarm name embeds the service it watches, and this "
+            "packet is persisted. The USER told you the alarm name, so refer to it as they wrote "
+            "it; never invent one, and never treat this marker as the name to quote back.")
+    return cleaned
+
+
 def _finish(packet, counts):
     """Exit gate: defence 2, plus the accounting that makes the wall auditable."""
     packet["redactions"] = dict(sorted(counts.items()))
     cleaned, report = sanitize_packet(packet)
+    # After the PII gate, before anything else looks at the packet: every return path goes through
+    # here, so there is no branch where the raw name survives.
+    cleaned = _scrub_alarm_name(cleaned)
     cleaned["exit_check"] = report
     if report["sanitized_at_exit"]:
         cleaned["caveats"] = list(cleaned.get("caveats") or []) + [

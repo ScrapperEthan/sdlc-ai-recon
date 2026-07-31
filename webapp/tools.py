@@ -330,11 +330,24 @@ TOOLS = [
             "dev/SCT route snapshot does not cover that repo's topics, NEVER 'no business impact'.",
             {"top": {"type": "integer"}}, []),
     _schema("incident_investigate",
-            "ROOT-CAUSE track: read the actual PRODUCTION LOGS for an alert. This is the other half "
+            "ROOT-CAUSE track: read the actual PRODUCTION LOGS and CloudWatch METRICS for an alert. "
+            "This is the other half "
             "of incident response — `incident_impact` answers 'who is affected' with zero "
             "production access, this one answers 'what does the log say'. Call it when the user "
             "asks '看日志', 'what does the log show', '为什么挂的', 'root cause', or after "
             "incident_impact when they want to know WHY rather than WHO. "
+            "TWO INDEPENDENT BRANCHES run and are reported separately: LogDream logs (needs the "
+            "repo/app plus a time window) and the CloudWatch metric around the alarm (needs an "
+            "alarm name plus a time window). Either can succeed while the other refuses — read "
+            "`plan.cloudwatch.refusals` and `cloudwatch_queries` for the metric side, and never "
+            "let one branch's silence stand in for the other's result. "
+            "METRIC EVIDENCE (`kind: cloudwatch_metric`) carries CATEGORIES only — direction, "
+            "variability, threshold_relation, points_seen. The datapoints are computed on and "
+            "discarded, so there is no average/min/max/latest to quote and asking for one will not "
+            "produce it. Report these honestly: `points_seen: 0` means no datapoint in EXACTLY "
+            "that window, NOT that the service was healthy — many metrics are only published while "
+            "traffic flows; and a direction is a shape, never a root cause. The alarm name is "
+            "never guessed: pass `alarm_name` when the user gives you one. "
             "Pass the alert text verbatim. "
             "TIME WINDOW — this is a HARD STOP, not a caveat: the log tool backtracks from a full "
             "`alert_time`, so a runnable plan needs BOTH a date+time AND a timezone. If "
@@ -353,7 +366,9 @@ TOOLS = [
             "DRILL-DOWN — for a follow-up like '再宽一点时间窗', '换 ConnectException 再查', "
             "'只看 hkp3', '多查几个关键词': call this again with `keywords` (REPLACES the "
             "graph-derived list — spend the budget on what they asked for), `sources` (subset of "
-            "hk1/hkp3; both are production with DIFFERENT content, so say which you searched), "
+            "the configured LogDream sources, e.g. hkl/hkp3 — read `plan.sources` for the live "
+            "list rather than typing one; they are ALL production with DIFFERENT content, so say "
+            "which you searched), "
             "and/or `max_queries` (raise it when they want a wider sweep and are willing to wait — "
             "each read can take ~3-10s). Report that the keywords were user-supplied rather than "
             "derived, because a nil result on a derived keyword list means much more than a nil "
@@ -380,7 +395,7 @@ TOOLS = [
             "returns it; (5) exception classes and counts are evidence, but a log line is not a root "
             "cause on its own — say what it shows, not what you infer.",
             {"alert_text": {"type": "string"}, "timezone": {"type": "string"},
-             "alert_time": {"type": "string"},
+             "alert_time": {"type": "string"}, "alarm_name": {"type": "string"},
              "keywords": {"type": "array", "items": {"type": "string"}},
              "sources": {"type": "array", "items": {"type": "string"}},
              "max_queries": {"type": "integer"}},
@@ -420,6 +435,7 @@ def dispatch_events(name, a, owner=""):
                 text,
                 timezone=(a.get("timezone") or "").strip() or None,
                 alert_time=(a.get("alert_time") or "").strip() or None,
+                alarm_name=(a.get("alarm_name") or "").strip() or None,
                 keywords=a.get("keywords") or None,
                 sources=a.get("sources") or None,
                 max_queries=a.get("max_queries") or None,

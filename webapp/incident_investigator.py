@@ -54,9 +54,11 @@ Everything in the plan fails closed:
 """
 import hashlib
 import json
+import math
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import timezone as _utc_tz          # `timezone` is a parameter name all over this file
 
 from retriever import code as rcode, incident, messages as msg, repo_tags
 from . import config, incident_raw_store, mcp_client, mcp_registry
@@ -308,6 +310,221 @@ def extract_app_names(text, structured=None, operation="log.list_apps"):
     if unnamed:
         note = (note + "; " if note else "") + f"{unnamed} entry/entries had no readable name"
     return sorted(set(names)), note, ""
+
+
+# ---- CloudWatch: the metric half of an incident ------------------------------------------------
+# The log branch answers "what did the service say". This one answers "what was the shape of the
+# thing that fired the alarm". They are kept apart on purpose: separate accounting, separate
+# refusals, and either can run when the other cannot (intranet handoff, 2026-07-31 §7).
+#
+# The rules that differ from the log branch, and why:
+#
+# * **Metric identity is read from the ALARM, never derived.** `resource` is not a namespace and a
+#   repo name is not a dimension. `get_alarm` returns Namespace/MetricName/Dimensions/Statistic/
+#   Period; anything missing means we stop, because a guessed identity silently returns a DIFFERENT
+#   service's numbers.
+# * **This is the one place a moment IS converted.** CloudWatch wants UTC. The log branch never
+#   converts (it sends the stamp and the zone separately); mixing the two rules up puts the metric
+#   window eight hours from the incident.
+# * **Only categories leave.** The datapoints are used in local variables to decide rising/flat/
+#   high-variability and are then dropped. No value, no average, no min/max, no delta reaches the
+#   packet — the session is persisted, and a metric series is production data.
+
+# The window is a QUERY STRATEGY, not a fact about the alarm, so it is bounded, configurable, and
+# stated in the evidence.
+_METRIC_MINUTES_BEFORE = int(os.environ.get("SDLC_INCIDENT_METRIC_MINUTES_BEFORE", "15"))
+_METRIC_MINUTES_AFTER = int(os.environ.get("SDLC_INCIDENT_METRIC_MINUTES_AFTER", "15"))
+# Hard ceiling on either side. `Period x EvaluationPeriods` widens the "before" side so the window
+# covers what the alarm actually evaluated, but a pathological alarm config must not be able to ask
+# for a week of datapoints.
+_METRIC_MAX_MINUTES = int(os.environ.get("SDLC_INCIDENT_METRIC_MAX_MINUTES", "180"))
+_METRIC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_MAX_DIMENSIONS = 10
+
+# Zones with no DST, where a fixed offset is exact rather than an approximation. Hong Kong has not
+# observed DST since 1979, which covers every incident anyone will investigate here. This exists
+# because a bare Windows box has no tz database — `zoneinfo` needs the `tzdata` package, which an
+# air-gapped install does not have — and "convert with whatever offset" is not an option.
+_FIXED_OFFSET_ZONES = {
+    "ASIA/HONG_KONG": 8 * 3600, "HONGKONG": 8 * 3600,
+    "UTC": 0, "GMT": 0, "ETC/UTC": 0, "ETC/GMT": 0, "Z": 0,
+}
+
+
+def to_utc(stamp, zone):
+    """`2026-07-30 03:15:00` + `Asia/Hong_Kong` -> (aware UTC datetime, how), or (None, why).
+
+    `zoneinfo` first, so any zone with DST is handled correctly where the tz database exists; the
+    fixed-offset table backs it up for the no-DST zones when it does not. An unknown zone returns
+    None and the metric call is skipped: a window converted with the wrong offset comes back full
+    of datapoints from the wrong hour, which is worse than no window at all.
+    """
+    try:
+        naive = datetime.strptime(stamp, ALERT_TIME_FORMAT)
+    except (TypeError, ValueError):
+        return None, f"the alert time {stamp!r} is not in {ALERT_TIME_FORMAT}"
+    key = (zone or "").strip()
+    if not key:
+        return None, "no timezone, so the alert time cannot be placed on the UTC timeline"
+    try:
+        from zoneinfo import ZoneInfo
+        return naive.replace(tzinfo=ZoneInfo(key)).astimezone(_utc_tz.utc), "zoneinfo"
+    except Exception:                     # noqa: BLE001 -- absent tzdata, unknown key: same handling
+        pass
+    offset = _FIXED_OFFSET_ZONES.get(key.upper())
+    if offset is None:
+        return None, (f"timezone {key!r} could not be resolved (no tz database on this host and it "
+                      f"is not one of the fixed-offset zones). The metric window was NOT built — a "
+                      f"wrongly converted window returns the wrong hour's datapoints.")
+    shifted = naive.replace(tzinfo=_utc_tz(timedelta(seconds=offset))).astimezone(_utc_tz.utc)
+    return shifted, f"fixed offset table ({key}, no DST)"
+
+
+def metric_window_bounds(alert_utc, period_seconds=300, evaluation_periods=1):
+    """The UTC window to query around an alert. Bounded and stated, never derived from `now()`."""
+    evaluated = max(1, int(period_seconds or 300)) * max(1, int(evaluation_periods or 1))
+    before = min(_METRIC_MAX_MINUTES,
+                 max(_METRIC_MINUTES_BEFORE, math.ceil(evaluated / 60)))
+    after = min(_METRIC_MAX_MINUTES, max(0, _METRIC_MINUTES_AFTER))
+    start = alert_utc - timedelta(minutes=before)
+    end = alert_utc + timedelta(minutes=after)
+    fmt = ((mcp_registry.operations().get("aws.metric_window") or {}).get("request") or {}).get(
+        "time_format")
+    fmt = fmt if isinstance(fmt, str) and fmt.strip() else _METRIC_TIME_FORMAT
+    return {
+        "start_utc": start.strftime(fmt),
+        "end_utc": end.strftime(fmt),
+        "basis": "the alert time plus its explicit timezone, converted to UTC",
+        "policy": (f"{before} minute(s) before and {after} after the alert. This is OUR query "
+                   f"strategy, not a window CloudWatch defines; the 'before' side is widened to "
+                   f"cover Period x EvaluationPeriods ({evaluated}s) and capped at "
+                   f"{_METRIC_MAX_MINUTES} minutes."),
+    }
+
+
+def alarm_metric_identity(body):
+    """A `get_alarm` body -> the metric to query, or (None, why).
+
+    Read strictly from the alarm's own configuration. Nothing here may be inferred from the alarm
+    NAME, the repo, or an ECS resource string: `resource != namespace` and `resource != dimensions`.
+    """
+    if not isinstance(body, dict):
+        return None, "the get_alarm response was not a JSON object"
+    namespace = body.get("Namespace")
+    metric = body.get("MetricName")
+    if not isinstance(namespace, str) or not namespace.strip():
+        return None, "the alarm carries no Namespace, so the metric identity is unknown"
+    if not isinstance(metric, str) or not metric.strip():
+        return None, "the alarm carries no MetricName, so the metric identity is unknown"
+    raw_dims = body.get("Dimensions")
+    if raw_dims is None:
+        raw_dims = []
+    if not isinstance(raw_dims, list):
+        return None, "the alarm's Dimensions field was not a list"
+    dimensions = []
+    for item in raw_dims[:_MAX_DIMENSIONS]:
+        if not isinstance(item, dict):
+            return None, "a Dimensions entry was not an object"
+        name, value = item.get("Name"), item.get("Value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            return None, "a Dimensions entry had no string Name/Value pair"
+        dimensions.append({"Name": name, "Value": value})
+
+    def _int(key, default):
+        value = body.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+    statistic = body.get("Statistic")
+    return {
+        "namespace": namespace,
+        "metric": metric,
+        "dimensions": dimensions,
+        # The alarm's OWN statistic/period. Letting the model pick a default would mean querying a
+        # different aggregation from the one that fired.
+        "statistic": statistic if isinstance(statistic, str) and statistic.strip() else "Average",
+        "period_seconds": _int("Period", 300),
+        "evaluation_periods": _int("EvaluationPeriods", 1),
+        "threshold": body.get("Threshold") if isinstance(body.get("Threshold"), (int, float))
+                     and not isinstance(body.get("Threshold"), bool) else None,
+        "comparison": body.get("ComparisonOperator")
+                      if isinstance(body.get("ComparisonOperator"), str) else "",
+    }, ""
+
+
+def parse_metric_window(body):
+    """A `get_metric_window` body -> (points, status_code, error). `points is None` = fail closed.
+
+    `points` is a list of (datetime, float) that stays in the caller's local variables. An EMPTY
+    list is a real answer — "no datapoint in exactly this window" — and must never be reported as
+    "the system was fine". An unreadable shape is OUR wiring problem and must never be reported as
+    either.
+    """
+    if not isinstance(body, dict):
+        return None, "", "the metric response was not a JSON object"
+    stamps, values = body.get("Timestamps"), body.get("Values")
+    if not isinstance(stamps, list) or not isinstance(values, list):
+        return None, "", "the metric response has no Timestamps/Values lists"
+    if len(stamps) != len(values):
+        return None, "", (f"the metric response returned {len(stamps)} timestamps and "
+                          f"{len(values)} values — mismatched lengths, so the series cannot be "
+                          f"read. This is a wiring/parser failure, not a quiet metric.")
+    status = body.get("StatusCode") if isinstance(body.get("StatusCode"), str) else ""
+    points = []
+    for raw_stamp, raw_value in zip(stamps, values):
+        if not isinstance(raw_stamp, str):
+            return None, status, "a metric timestamp was not a string"
+        try:
+            when = datetime.fromisoformat(raw_stamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None, status, f"a metric timestamp could not be parsed ({len(raw_stamp)} chars)"
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            return None, status, "a metric value was not a number"
+        if not math.isfinite(raw_value):
+            return None, status, "a metric value was NaN or infinite"
+        points.append((when, float(raw_value)))
+    points.sort(key=lambda pair: pair[0])
+    return points, status, ""
+
+
+def summarize_points(points, threshold=None, comparison=""):
+    """Datapoints -> CATEGORIES. The numbers are used here and go no further.
+
+    Deliberately coarse. `direction` and `variability` describe the window that was queried and
+    nothing else; a rising line is not a root cause, and this summary must not be phrased as one.
+    """
+    values = [value for _when, value in points or []]
+    out = {"data_presence": "present" if values else "absent",
+           "direction": "insufficient_data",
+           "variability": "insufficient_data",
+           "threshold_relation": "not_evaluated"}
+    if len(values) >= 2:
+        third = max(1, len(values) // 3)
+        head = sum(values[:third]) / third
+        tail = sum(values[-third:]) / third
+        scale = max(abs(head), abs(tail), 1e-9)
+        change = (tail - head) / scale
+        out["direction"] = "rising" if change > 0.1 else "falling" if change < -0.1 else "flat"
+
+        mean = sum(values) / len(values)
+        spread = math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
+        if abs(mean) < 1e-9:
+            out["variability"] = "high" if spread > 1e-9 else "low"
+        else:
+            ratio = spread / abs(mean)
+            out["variability"] = "low" if ratio < 0.1 else "medium" if ratio < 0.3 else "high"
+
+    if values and isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+        op = (comparison or "").lower()
+        if "greater" in op:
+            breaching, side, other = [v > threshold for v in values], "above", "below"
+        elif "less" in op:
+            breaching, side, other = [v < threshold for v in values], "below", "above"
+        else:
+            breaching = side = other = None
+        if breaching is not None:
+            out["threshold_relation"] = (side if all(breaching)
+                                         else other if not any(breaching) else "crossing")
+    return out
 
 
 _SHAPE_MAX_DEPTH = 6
@@ -604,7 +821,8 @@ def _format_alert_time(normalized, operation="log.read"):
         return normalized                     # a bad format string must not lose the stamp
 
 
-def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None):
+def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None,
+         alarm_name=None):
     """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
 
     `keywords` and `sources` are the drill-down path: a follow-up question ("search for
@@ -623,16 +841,24 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
                    or list(log_sources()),
         "log_files": ["otx_trace.log", "exception.log"],
         "refusals": [],
+        # The CloudWatch half. Kept separate so either branch can run when the other cannot: an
+        # unresolvable alarm name must not block a log investigation that is ready to go, and an
+        # unidentifiable repo must not block a metric lookup that only needs the alarm name.
+        "cloudwatch": {"runnable": False, "alarm_name": "", "alarm_name_source": "",
+                       "refusals": []},
     }
     if out["sources"] != list(log_sources()):
-        out["sources_note"] = ("sources narrowed by the caller. hk1 and hkp3 are BOTH production "
-                               "with different content, so a single-source result covers less than "
-                               "the default — say which one was searched.")
-    if not parsed["identified"]:
+        # Built from the configured source names, never a literal: the last time these were spelled
+        # out by hand the text said `hk1` where the server accepts `hkl`.
+        out["sources_note"] = (
+            "sources narrowed by the caller. %s are ALL production with different content, so a "
+            "single-source result covers less than the default — say which one was searched."
+            % " and ".join(log_sources()))
+    identified = bool(parsed["identified"])
+    if not identified:
         out["refusals"].append(
             "no repo and no known use-case id could be read from this alert, so there is nothing to "
             "query. Ask for the service name or the use-case id; do not guess an app.")
-        return out
 
     seen_keywords = {}
 
@@ -641,7 +867,7 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         if term and term.lower() not in seen_keywords:
             seen_keywords[term.lower()] = {"term": term, "why": why}
 
-    for entry in parsed["repos"]:
+    for entry in parsed["repos"] if identified else []:
         repo = entry["repo"]
         target = {"repo": repo, "app_candidates": app_candidates(repo),
                   "app_resolved": "", "app_note": ""}
@@ -658,10 +884,10 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         for name in exception_classes(repo):
             _add_keyword(name, f"exception class present in {repo}'s source")
 
-    for item in parsed["use_cases"]:
+    for item in parsed["use_cases"] if identified else []:
         _add_keyword(item.get("use_case"), "use-case id named in the alert text")
 
-    if parsed.get("metric"):
+    if identified and parsed.get("metric"):
         _add_keyword(parsed["metric"], "metric named in the alert")
 
     # Filtered BEFORE the branch: an all-whitespace override would otherwise leave zero keywords,
@@ -734,6 +960,46 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
             "'2026-07-30 03:15:00') and/or `timezone` explicitly. Do not guess either half: a "
             "wrong window returns nothing, and nothing reads as 'no anomaly'.")
 
+    # ---- the CloudWatch half: an alarm name, and the same window converted to UTC ---------------
+    # Priority is fixed and narrowing: what the user said, then what the alert literally contains.
+    # There is no third guess — a wrong alarm name does not error, it returns a DIFFERENT service's
+    # metrics under this incident's heading.
+    cw = out["cloudwatch"]
+    supplied_alarm = incident.valid_alarm_name(alarm_name) if alarm_name else ""
+    if alarm_name and not supplied_alarm:
+        cw["refusals"].append(
+            "the supplied alarm_name is not usable (empty, multi-line, or over "
+            f"{incident.MAX_ALARM_NAME} chars), so no CloudWatch call was made.")
+    if supplied_alarm:
+        cw["alarm_name"], cw["alarm_name_source"] = supplied_alarm, "supplied by the caller"
+    else:
+        extracted = incident.extract_alarm_name(alert_text)
+        if extracted:
+            cw["alarm_name"] = extracted
+            cw["alarm_name_source"] = "extracted from the alert text (single `AlarmName:` line)"
+        else:
+            cw["refusals"].append(
+                "no single CloudWatch alarm name could be read from this alert, so the metric "
+                "branch was skipped. Pass `alarm_name` if you know it. The name is NOT guessed and "
+                "the alarm list is NOT scanned: a wrong alarm returns another service's metrics "
+                "under this incident's heading, and scanning every alarm takes ~26s.")
+
+    if cw["alarm_name"] and out["window"]:
+        alert_utc, how = to_utc(out["window"]["alert_time"], out["window"]["timezone"])
+        if alert_utc is None:
+            cw["refusals"].append(f"BLOCKING for the metric branch: {how}")
+        else:
+            cw["runnable"] = True
+            # Filled in once `get_alarm` gives us the Period/EvaluationPeriods it evaluated over.
+            cw["alert_utc"] = alert_utc.strftime(_METRIC_TIME_FORMAT)
+            cw["conversion"] = (
+                f"converted to UTC via {how}. This branch DOES convert the moment, unlike the log "
+                f"branch, because CloudWatch takes UTC start/end times.")
+    elif cw["alarm_name"] and not out["window"]:
+        cw["refusals"].append(
+            "the alarm name is known but no time window could be built, so no metric was queried. "
+            "A metric window is never built from `now()` — it is built around the alert.")
+
     # Runnable, not merely "we understood the alert". Identifying the service is necessary and not
     # sufficient: this tool's real parameter is an ALERT TIME it backtracks from, so without a
     # window there is no honest query to send. The plan used to stay ok=True here and the
@@ -741,6 +1007,9 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
     # calls were made anyway, which is the worst of both: production reads, and an answer nobody
     # can scope.
     out["ok"] = bool(out["targets"] or parsed["use_cases"]) and bool(out["window"])
+    # Either branch alone is enough to be worth running. A CloudWatch failure must not break a log
+    # investigation that works, and the reverse holds too.
+    out["any_runnable"] = bool(out["ok"] or cw["runnable"])
     return out
 
 
@@ -774,10 +1043,13 @@ def _evidence_from_lines(lines, keyword, source, app, log_file, counts, owner=""
             if ref else
             "raw retention is off, so there is no original to click through to. The redacted "
             "excerpts are the whole record."),
+        # The packet now carries two shapes of evidence (log lines and CloudWatch metrics), so each
+        # says which it is rather than leaving a reader to infer it from the fields present.
+        "kind": "log_lines",
         "source": source,
         "app": app,
         "file": log_file,
-        # LogDream hk1/hkp3 are both production (owner, 2026-07-29). Labelled on every item so a
+        # Both LogDream sources are production (owner, 2026-07-29). Labelled on every item so a
         # caller never has to infer it from the source name.
         "environment": "production" if source in log_sources() else "unknown",
         "matched_keyword": keyword,
@@ -798,6 +1070,40 @@ def _evidence_from_lines(lines, keyword, source, app, log_file, counts, owner=""
         "excerpt_policy": (f"redacted, first {_MAX_EXCERPTS} matching lines, "
                            f"{_MAX_EXCERPT_CHARS} chars each. The full response was held in memory "
                            f"and discarded; it is not retrievable from this packet."),
+    }
+
+
+def _cloudwatch_evidence(identity, window, points, status_code, counts):
+    """Metric datapoints -> a categorised, redacted evidence item. The numbers stop here.
+
+    What is deliberately absent: every datapoint, every aggregate (no average, min, max, latest or
+    delta), the alarm ARN, its actions, its StateReasonData, and the raw dimension VALUES. The
+    packet is persisted to the chat session, and a metric series taken from production is
+    production data — the categories are what a reader actually needs.
+    """
+    return {
+        "kind": "cloudwatch_metric",
+        "environment": "production",
+        "source": "cloudwatch",
+        "metric": identity["metric"],
+        "namespace": identity["namespace"],
+        "statistic": identity["statistic"],
+        "period_seconds": identity["period_seconds"],
+        "window": {"start_utc": window["start_utc"], "end_utc": window["end_utc"],
+                   "basis": window["basis"], "policy": window["policy"]},
+        # Dimension NAMES identify the metric and are safe; the VALUES are service/cluster/customer
+        # identifiers, so they are fingerprinted — same value still reads as the same value.
+        "dimensions": [{"name": redact(d["Name"], counts), "value": f"<dim:{_digest(d['Value'])}>"}
+                       for d in identity["dimensions"]],
+        "status_code": status_code,
+        "points_seen": len(points),
+        "summary": summarize_points(points, identity.get("threshold"),
+                                    identity.get("comparison") or ""),
+        "reading_rule": (
+            "These are CATEGORIES computed in memory from the datapoints; the values themselves are "
+            "not in this packet and no tool returns them. They describe ONLY the window queried. "
+            "`points_seen: 0` means no datapoint in exactly this window — NOT that the system was "
+            "healthy. A direction is not a root cause."),
     }
 
 
@@ -943,8 +1249,182 @@ def investigate(alert_text, **kwargs):
     return packet
 
 
+def _cloudwatch_branch(query_plan, packet, counts):
+    """The metric half: alarm -> its own metric identity -> a bounded UTC window -> categories.
+
+    A generator that yields progress steps and writes into `packet`. It NEVER raises and never
+    returns early out of the whole investigation: a CloudWatch failure has to leave a working log
+    investigation alone (intranet handoff §16), so every outcome here ends in a recorded reason.
+    """
+    cw = query_plan.get("cloudwatch") or {}
+    log = packet["cloudwatch_queries"]
+
+    def _record(bucket, operation, args_sent, **extra):
+        log[bucket].append({"server": "cloudwatch", "operation": operation,
+                            "args_sent": sorted(args_sent), **extra})
+
+    if cw.get("refusals"):
+        packet["not_investigated"].extend(cw["refusals"])
+    if not cw.get("runnable"):
+        if cw.get("alarm_name") or cw.get("refusals"):
+            yield _step("alarm_resolve", "CloudWatch 指标分支跳过（告警名或时间窗不确定），不猜",
+                        resolved=False)
+        return
+
+    yield _step("alarm_resolve", "确定告警名（%s）" % cw.get("alarm_name_source") or "",
+                resolved=True, source=cw.get("alarm_name_source"))
+
+    # ---- 1. the alarm's own configuration ------------------------------------------------------
+    yield _step("alarm_lookup", "取告警配置：命名空间 / 指标 / 维度 / 统计量 / 周期",
+                server="cloudwatch", operation="aws.get_alarm")
+    _record("attempted", "aws.get_alarm", ["alarm_name"])
+    try:
+        out = mcp_client.call("aws.get_alarm", {"alarm_name": cw["alarm_name"]})
+    except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+        _record("failed", "aws.get_alarm", ["alarm_name"], refused_locally=True,
+                reason=redact(str(exc)[:200], counts))
+        packet["not_investigated"].append(
+            f"the CloudWatch alarm lookup is not wired ({exc}), so no metric was read. The log "
+            f"investigation is unaffected.")
+        yield _step("alarm_lookup_failed", "告警配置查询未接通（未发出请求）",
+                    server="cloudwatch", operation="aws.get_alarm", refused_locally=True)
+        return
+    except mcp_client.TransportError as exc:
+        _record("failed", "aws.get_alarm", ["alarm_name"], refused_locally=False,
+                reason=redact(str(exc)[:200], counts))
+        packet["not_investigated"].append(
+            f"CloudWatch did not respond to the alarm lookup ({exc}). This is NOT evidence that the "
+            f"alarm does not exist, and no metric was read.")
+        yield _step("alarm_lookup_failed", "CloudWatch 没响应 —— 这不等于“告警不存在”",
+                    server="cloudwatch", operation="aws.get_alarm")
+        return
+
+    _record("executed", "aws.get_alarm", ["alarm_name"], elapsed_ms=out.get("elapsed_ms"))
+    outcome, text = _tool_outcome(out)
+    if outcome != "hit":
+        reason = redact(text[:200], counts) if outcome == "error" else "an empty response"
+        packet["not_investigated"].append(
+            f"the alarm lookup returned {'an error' if outcome == 'error' else 'nothing'} "
+            f"({reason}). No metric was read, and this is not evidence about the service.")
+        yield _step("alarm_lookup_failed", "告警配置查询失败，不作为证据",
+                    server="cloudwatch", operation="aws.get_alarm", rejected=True,
+                    elapsed_ms=out.get("elapsed_ms"))
+        return
+
+    identity, why = alarm_metric_identity(_decode(text, out.get("structured")))
+    if identity is None:
+        packet["not_investigated"].append(
+            f"the alarm was found but its metric identity could not be read: {why}. Nothing was "
+            f"inferred from the alarm name, the repo or the resource string — a guessed namespace "
+            f"or dimension returns a DIFFERENT service's numbers under this incident's heading.")
+        yield _step("alarm_lookup_failed", "告警配置读不出指标身份，不猜命名空间/维度",
+                    server="cloudwatch", operation="aws.get_alarm", shape_error=True)
+        return
+
+    # ---- 2. the window, built around the ALERT and never around now() --------------------------
+    alert_utc = datetime.strptime(cw["alert_utc"], _METRIC_TIME_FORMAT).replace(tzinfo=_utc_tz.utc)
+    window = metric_window_bounds(alert_utc, identity["period_seconds"],
+                                  identity["evaluation_periods"])
+    packet["cloudwatch_window"] = dict(window, timezone_conversion=cw.get("conversion", ""))
+
+    args = {"namespace": identity["namespace"], "metric": identity["metric"],
+            "dimensions": identity["dimensions"], "statistic": identity["statistic"],
+            "period_seconds": identity["period_seconds"],
+            "from_time": window["start_utc"], "to_time": window["end_utc"]}
+    payload = _payload("aws.metric_window", args)
+    # Metric identity is not optional. If the config cannot pass namespace/metric/times, sending a
+    # partial request would query something other than what the alarm watches.
+    missing = [name for name in ("namespace", "metric", "from_time", "to_time")
+               if name not in payload]
+    if missing:
+        _record("failed", "aws.metric_window", payload, refused_locally=True,
+                reason=f"config does not map {', '.join(missing)}")
+        packet["not_investigated"].append(
+            f"aws.metric_window cannot be called: config/mcp_tools.json does not map "
+            f"{', '.join(missing)}. Nothing was queried — a partial metric request would return a "
+            f"different metric, not a smaller answer.")
+        yield _step("metric_window_failed", "指标查询缺参数映射：%s（未发出请求）" % "、".join(missing),
+                    server="cloudwatch", operation="aws.metric_window", refused_locally=True,
+                    missing=missing)
+        return
+
+    yield _step("metric_window", "取指标窗口：%s / %s（告警前后有界窗口，UTC）" % (
+        identity["namespace"], identity["metric"]),
+        server="cloudwatch", operation="aws.metric_window",
+        namespace=identity["namespace"], metric=identity["metric"],
+        statistic=identity["statistic"], period_seconds=identity["period_seconds"],
+        start_utc=window["start_utc"], end_utc=window["end_utc"],
+        args_sent=sorted(payload))
+    _record("attempted", "aws.metric_window", payload)
+    try:
+        out = mcp_client.call("aws.metric_window", payload)
+    except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+        _record("failed", "aws.metric_window", payload, refused_locally=True,
+                reason=redact(str(exc)[:200], counts))
+        packet["not_investigated"].append(f"aws.metric_window is not callable: {exc}.")
+        yield _step("metric_window_failed", "指标查询被本地拒绝（未发出请求）",
+                    server="cloudwatch", operation="aws.metric_window", refused_locally=True)
+        return
+    except mcp_client.TransportError as exc:
+        _record("failed", "aws.metric_window", payload, refused_locally=False,
+                reason=redact(str(exc)[:200], counts))
+        packet["not_investigated"].append(
+            f"CloudWatch did not respond to the metric query ({exc}). NO metric was obtained — this "
+            f"is not 'the metric was normal'.")
+        yield _step("metric_window_failed", "指标查询没响应 —— 这不等于“指标正常”",
+                    server="cloudwatch", operation="aws.metric_window")
+        return
+
+    _record("executed", "aws.metric_window", payload, elapsed_ms=out.get("elapsed_ms"))
+    outcome, text = _tool_outcome(out)
+    if outcome == "error":
+        _record("failed", "aws.metric_window", payload, refused_locally=False,
+                reason=redact(text[:200], counts))
+        packet["not_investigated"].append(
+            f"the metric tool reported an error ({redact(text[:200], counts)}). Its message is not a "
+            f"datapoint and not evidence.")
+        yield _step("metric_window_failed", "指标工具报错，不作为证据",
+                    server="cloudwatch", operation="aws.metric_window", rejected=True,
+                    elapsed_ms=out.get("elapsed_ms"))
+        return
+
+    points, status_code, error = parse_metric_window(_decode(text, out.get("structured")))
+    if points is None:
+        packet["not_investigated"].append(
+            f"the metric query SUCCEEDED but its response could not be read: {error}. This is our "
+            f"parser/wiring, NOT a quiet metric — do not report it as 'no anomaly'. Declare the "
+            f"real field names under operations['aws.metric_window'].response in mcp_tools.json.")
+        yield _step("metric_window_failed", "指标返回体格式看不懂，不作为证据（查询本身成功）",
+                    server="cloudwatch", operation="aws.metric_window", shape_error=True,
+                    elapsed_ms=out.get("elapsed_ms"))
+        return
+
+    if not points:
+        packet["not_investigated"].append(
+            f"CloudWatch returned NO datapoint for {identity['namespace']}/{identity['metric']} "
+            f"between {window['start_utc']} and {window['end_utc']}. That is a fact about this "
+            f"exact window — it does NOT mean the service was healthy, and it is a normal result "
+            f"when a metric is only published while traffic flows.")
+        yield _step("metric_window_empty", "该时间窗内没有数据点 —— 这不等于“系统正常”",
+                    server="cloudwatch", operation="aws.metric_window",
+                    namespace=identity["namespace"], metric=identity["metric"],
+                    points_seen=0, elapsed_ms=out.get("elapsed_ms"))
+        return
+
+    item = _cloudwatch_evidence(identity, window, points, status_code, counts)
+    packet["evidence"].append(item)
+    packet["contains_production_data"] = True
+    yield _step("metric_evidence", "指标窗口：%d 个数据点，趋势 %s，波动 %s" % (
+        item["points_seen"], item["summary"]["direction"], item["summary"]["variability"]),
+        server="cloudwatch", operation="aws.metric_window",
+        namespace=identity["namespace"], metric=identity["metric"],
+        points_seen=item["points_seen"], summary=item["summary"],
+        elapsed_ms=out.get("elapsed_ms"))
+
+
 def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
-                        sources=None, max_queries=None, owner="", alert_time=None):
+                        sources=None, max_queries=None, owner="", alert_time=None,
+                        alarm_name=None):
     """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
 
     A generator rather than a callback so the caller can relay progress to a browser without threads
@@ -959,7 +1439,8 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     budget = max(1, int(max_queries or _MAX_LOG_QUERIES))
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
     query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
-                                    keywords=keywords, sources=sources, alert_time=alert_time)
+                                    keywords=keywords, sources=sources, alert_time=alert_time,
+                                    alarm_name=alarm_name)
     if query_plan.get("targets") or query_plan.get("keywords"):
         yield _step(
             "plan_done",
@@ -982,18 +1463,26 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         "queries_attempted": [],
         "queries_executed": [],
         "queries_failed": [],
+        # CloudWatch is accounted separately rather than squeezed into the log shape: an
+        # app/source/file/keyword tuple is meaningless for a metric, and a fake one would make the
+        # two branches impossible to tell apart when reading what was actually spent.
+        "cloudwatch_queries": {"attempted": [], "executed": [], "failed": []},
         "not_investigated": [],
         "contains_production_data": False,
         "environments": {
-            "logs": "production (LogDream hk1 + hkp3, both production, different content)",
+            # Built from the configured names: the last hand-written copy said `hk1` for `hkl`.
+            "logs": "production (LogDream %s — all production, different content)"
+                    % " + ".join(log_sources()),
+            "metrics": "production (CloudWatch, queried in UTC around the alert time)",
             "route_snapshot": "dev/SCT — absence there is NOT evidence of absence in production",
         },
         "caveats": [],
     }
-    if not query_plan.get("ok"):
-        # Not runnable. Zero MCP calls from here — the refusals ARE the answer, and every one of
-        # them is a question for the user rather than something to work around.
-        packet["not_investigated"] = list(query_plan.get("refusals") or [])
+    if not query_plan.get("any_runnable", query_plan.get("ok")):
+        # Neither branch is runnable. Zero MCP calls from here — the refusals ARE the answer, and
+        # every one of them is a question for the user rather than something to work around.
+        packet["not_investigated"] = list(query_plan.get("refusals") or []) + list(
+            (query_plan.get("cloudwatch") or {}).get("refusals") or [])
         packet["caveats"].append("nothing was queried; see not_investigated")
         yield _step("refused",
                     "拒绝调查：时间窗建不出来（缺日期或时区），一条日志都没查"
@@ -1005,10 +1494,28 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
 
     if not config.MCP_ENABLED:
         packet["not_investigated"].append(
-            "log querying is switched off (SDLC_MCP_ENABLED unset), so this answer rests on local "
-            "artefacts only. The blast-radius answer does not need it; a root-cause answer does.")
+            "production querying is switched off (SDLC_MCP_ENABLED unset), so this answer rests on "
+            "local artefacts only — no logs and no metrics were read. The blast-radius answer does "
+            "not need it; a root-cause answer does.")
         packet["caveats"].append("no production data was read")
-        yield _step("disabled", "日志查询开关未开（SDLC_MCP_ENABLED），没有读任何生产数据")
+        yield _step("disabled", "生产查询开关未开（SDLC_MCP_ENABLED），日志和指标都没读")
+        yield {"type": "result", "packet": _finish(packet, counts)}
+        return
+
+    # ---- CloudWatch first: it is 2 calls, it needs no app-name mapping, and it must not be
+    # skipped when the log branch stops early on an unwired read or an unresolvable app name.
+    for event in _cloudwatch_branch(query_plan, packet, counts):
+        yield event
+    # Everything the metric branch could not do is already recorded. The log branch's own "we ran
+    # and found nothing" verdict has to be judged against ITS reasons only — a CloudWatch refusal
+    # saying nothing about the logs must not silently suppress it.
+    cloudwatch_notes = len(packet["not_investigated"])
+
+    if not query_plan.get("ok"):
+        # The metric branch ran (or recorded why it did not); the log branch cannot.
+        packet["not_investigated"].extend(query_plan.get("refusals") or [])
+        yield _step("refused", "日志分支不可运行（服务或时间窗不确定），只跑了指标分支",
+                    reasons=list(query_plan.get("refusals") or []))
         yield {"type": "result", "packet": _finish(packet, counts)}
         return
 
@@ -1326,13 +1833,15 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         raw_ref=item["raw_ref"])
 
     packet["ok"] = bool(packet["evidence"]) or not packet["not_investigated"]
-    if not packet["evidence"] and packet["queries_executed"] and not packet["not_investigated"]:
+    log_notes = packet["not_investigated"][cloudwatch_notes:]
+    if not packet["evidence"] and packet["queries_executed"] and not log_notes:
         packet["caveats"].append(
             "the queries ran and matched nothing. That is a real finding only for the keywords and "
             "window actually used — see `queries_executed`.")
     final = _finish(packet, counts)
-    yield _step("summary", "调查完成：%d 条证据，实际执行 %d 次读取，%d 项没查（脱敏 %d 处）" % (
+    yield _step("summary", "调查完成：%d 条证据，日志读取 %d 次，指标查询 %d 次，%d 项没查（脱敏 %d 处）" % (
         len(final.get("evidence") or []), len(final.get("queries_executed") or []),
+        len((final.get("cloudwatch_queries") or {}).get("executed") or []),
         len(final.get("not_investigated") or []),
         sum((final.get("redactions") or {}).values())),
         evidence=len(final.get("evidence") or []),

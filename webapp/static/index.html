@@ -2066,20 +2066,25 @@ function showLiveTools(container, trace, completed = false) {
 // was skipped, is a "we did not look" — the whole point of surfacing these is that the user can tell
 // that apart from "we looked and found nothing".
 const SUBAGENT_WARN = new Set(['budget_spent', 'query_failed', 'app_unresolved', 'query_empty',
-                               'no_files']);
+                               'no_files', 'metric_window_empty']);
 // `query_rejected` / `apps_failed` mean the tool RAN and refused — a different escalation from a
 // server that did not answer, and emphatically not a finding. `query_unreadable` is a third thing
 // again: the call SUCCEEDED and our own parser could not read the response shape. It escalates to
 // us (a config/mcp_tools.json `response` mapping), never to the log team, and it must never look
 // like an empty result.
 const SUBAGENT_STOP = new Set(['refused', 'disabled', 'apps_failed', 'unwired', 'query_rejected',
-                               'query_unreadable']);
+                               'query_unreadable', 'alarm_lookup_failed', 'metric_window_failed']);
+// The CloudWatch branch runs alongside the log branch and gets its own marks, so a reader can see
+// at a glance which half a step belongs to. `metric_window_empty` is a WARNING, not a hit: no
+// datapoint in a window is not the same as a healthy service.
 const SUBAGENT_MARKS = {
   plan: '◇', plan_done: '◆', apps: '◇', apps_done: '◆', app_resolved: '→',
   app_unresolved: '⚠', search_files: '◇', files_found: '→', no_files: '⚠',
   query: '·', query_empty: '○', query_failed: '⚠', evidence: '●',
   query_rejected: '✖', budget_spent: '⚠', refused: '■', disabled: '■', apps_failed: '■',
-  unwired: '■', query_unreadable: '✖', summary: '✓'
+  unwired: '■', query_unreadable: '✖', summary: '✓',
+  alarm_resolve: '◇', alarm_lookup: '◇', alarm_lookup_failed: '✖',
+  metric_window: '·', metric_window_empty: '○', metric_window_failed: '✖', metric_evidence: '●'
 };
 
 function showSubagent(container, steps, completed = false) {

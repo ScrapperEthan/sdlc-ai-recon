@@ -244,6 +244,18 @@ you can do.
    `delivery_path.phrase` is reported verbatim but **not resolved** (that column is a numeric enum
    and we do not have the name mapping). Do not infer either from repo names.
 
+A root-cause investigation has **two independent branches** and they are reported separately:
+production **logs** (LogDream) and the **CloudWatch metric** around the alarm. Either can succeed
+while the other refuses, so never let one branch's silence stand in for the other's result — say
+which ran. Three things about metric evidence must be reported honestly:
+
+- **`points_seen: 0` is not "the service was fine."** It means no datapoint in exactly the window
+  queried, and many metrics are only published while traffic flows.
+- **A trend is not a root cause.** `direction: rising` describes the shape of one window. Say what
+  it shows, not what it implies.
+- **There are no numbers to quote.** The datapoints are used to derive the categories and then
+  discarded, so there is no average, peak or latest value in the packet — do not imply one.
+
 A log query needs **both a full date+time and a timezone**, and if either is missing, **stop and
 ask**. Three zones coexist here — CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong, the
 server is GMT — so an unlabelled time is genuinely ambiguous, and a bare `03:15` does not say which

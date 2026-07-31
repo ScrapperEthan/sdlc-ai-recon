@@ -175,6 +175,55 @@ def _known_use_cases(candidates):
     return found, unknown
 
 
+# CloudWatch's own limit on an alarm name. A "name" longer than this is a captured block, not a name.
+MAX_ALARM_NAME = 255
+# A single line, anchored at both ends, so a greedy capture cannot cross into the next field. The
+# optional quotes admit a pretty-printed JSON fragment pasted into an email without loosening the
+# one-line rule.
+_ALARM_NAME_LINE = re.compile(r'(?m)^[ \t]*"?AlarmName"?[ \t]*:[ \t]*([^\r\n]+?)[ \t]*,?[ \t]*$')
+
+
+def valid_alarm_name(value):
+    """A candidate alarm name, cleaned — or `""` if it cannot be one.
+
+    Applied to EVERY source of an alarm name, including the server's own
+    `parse_cloudwatch_alert`. The intranet fed that tool a synthetic multi-line alert and got back
+    an `AlarmName` 243 characters long — the whole block rather than the value (2026-07-31). A
+    wrong alarm name does not error: it looks up a DIFFERENT service's metrics and reports them as
+    this incident's, which is the quietest way to be confidently wrong.
+    """
+    value = (value or "").strip()
+    for quote in ('"', "'"):
+        if len(value) >= 2 and value.startswith(quote) and value.endswith(quote):
+            value = value[1:-1].strip()
+    if not value or len(value) > MAX_ALARM_NAME or "\n" in value or "\r" in value:
+        return ""
+    return value
+
+
+def extract_alarm_name(text):
+    """A raw alert -> its CloudWatch alarm name, or `""` when it is not UNIQUELY determined.
+
+    Strict and local: no MCP call, no fuzzy matching, and emphatically no falling back to scanning
+    every alarm on the account. Two different names in one text is a question for the user, not a
+    coin flip — so it returns nothing rather than picking one.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        body = None
+    if isinstance(body, dict):
+        # A JSON object answers for itself: only the TOP-LEVEL string field, never a nested hunt.
+        return valid_alarm_name(body["AlarmName"]) if isinstance(body.get("AlarmName"), str) else ""
+    if body is not None:
+        return ""                       # valid JSON but not an object: not an alert we can read
+    found = {name for name in (valid_alarm_name(m) for m in _ALARM_NAME_LINE.findall(text)) if name}
+    return found.pop() if len(found) == 1 else ""
+
+
 def normalize_stamp(stamp):
     """`2026-07-30T03:15` / `2026-07-30 03:15 HKT` -> `2026-07-30 03:15:00`; `""` if there is no date.
 

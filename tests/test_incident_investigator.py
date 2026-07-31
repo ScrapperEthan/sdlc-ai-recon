@@ -503,7 +503,10 @@ class DrillDownTests(InvestigateTests):
     def test_narrowing_sources_is_honoured_and_flagged_as_covering_less(self):
         packet = inv.investigate(ALERT, sources=["hkp3"])
         self.assertEqual({q["source"] for q in packet["queries_executed"]}, {"hkp3"})
-        self.assertIn("BOTH production", packet["plan"]["sources_note"])
+        # Built from `log_sources()`, never a literal: the hand-written copy of these names is
+        # exactly where `hk1` crept in for `hkl`.
+        self.assertIn("ALL production", packet["plan"]["sources_note"])
+        self.assertIn(inv.log_sources()[0], packet["plan"]["sources_note"])
 
     def test_raising_the_query_budget_lets_a_wider_sweep_run(self):
         hits = ["a/B.java:1: throw new SmsDeliveryException(m);",
@@ -1250,6 +1253,458 @@ class AlertTimeFormatTests(unittest.TestCase):
         with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.read": {"request": {"alert_time_format": 12345}}}):
             self.assertEqual(inv._format_alert_time("2026-07-30 03:15:00"), "2026-07-30 03:15:00")
+
+
+ALARM_BODY = {
+    "AlarmName": "prodECS-csl-sms-deli-job-cpu", "AlarmArn": "arn:aws:cloudwatch:ap-east-1:9:alarm",
+    "AlarmActions": ["arn:aws:sns:ap-east-1:9:ops"], "StateReasonData": '{"secret": "x"}',
+    "Namespace": "AWS/ECS", "MetricName": "CPUUtilization",
+    "Dimensions": [{"Name": "ServiceName", "Value": "prod-csl-sms-deli"},
+                   {"Name": "ClusterName", "Value": "prod-mdc"}],
+    "Statistic": "Maximum", "Period": 60, "EvaluationPeriods": 5,
+    "Threshold": 80.0, "ComparisonOperator": "GreaterThanThreshold",
+}
+METRIC_BODY = {"Id": "m1", "Label": "CPUUtilization", "StatusCode": "Complete",
+               "Timestamps": ["2026-07-29T19:05:00Z", "2026-07-29T19:10:00Z",
+                              "2026-07-29T19:15:00Z"],
+               "Values": [12.0, 55.0, 91.0]}
+
+
+class AlarmNameExtractionTests(unittest.TestCase):
+    """The server's own `parse_cloudwatch_alert` cannot be trusted with this yet: fed a synthetic
+    multi-line alert it returned an `AlarmName` 243 chars long — the whole block, not the value
+    (intranet, 2026-07-31). A wrong alarm name does not error; it returns a DIFFERENT service's
+    metrics under this incident's heading."""
+
+    def test_a_json_alert_yields_its_top_level_alarm_name(self):
+        text = json.dumps({"AlarmName": "synthetic-alarm", "NewStateValue": "ALARM"})
+        self.assertEqual(inv.incident.extract_alarm_name(text), "synthetic-alarm")
+
+    def test_a_single_alarm_name_line_is_extracted(self):
+        text = "AlarmName: synthetic-alarm\nNewStateValue: ALARM\nNamespace: AWS/ECS"
+        self.assertEqual(inv.incident.extract_alarm_name(text), "synthetic-alarm")
+
+    def test_a_greedy_multi_line_capture_is_impossible(self):
+        """The exact failure the intranet saw: everything after `AlarmName:` swallowed as the name."""
+        text = "AlarmName: synthetic-alarm\nStateChangeTime: 2026-07-30T03:15:00Z\n" + "x" * 400
+        got = inv.incident.extract_alarm_name(text)
+        self.assertEqual(got, "synthetic-alarm")
+        self.assertNotIn("\n", got)
+        self.assertLess(len(got), inv.incident.MAX_ALARM_NAME)
+
+    def test_two_different_names_yield_nothing_rather_than_a_coin_flip(self):
+        text = "AlarmName: alarm-one\nAlarmName: alarm-two"
+        self.assertEqual(inv.incident.extract_alarm_name(text), "")
+
+    def test_the_same_name_twice_is_still_unique(self):
+        self.assertEqual(inv.incident.extract_alarm_name("AlarmName: a\nAlarmName: a"), "a")
+
+    def test_an_alert_with_no_alarm_name_yields_nothing(self):
+        for text in ("", "prodECS_repo_service_CPUUtilizationMINOR[80percent]",
+                     json.dumps({"Namespace": "AWS/ECS"}), json.dumps(["AlarmName"])):
+            self.assertEqual(inv.incident.extract_alarm_name(text), "", repr(text))
+
+    def test_validation_rejects_multi_line_and_over_long_values(self):
+        """Applied to the server's parse output too, not just to our own extraction."""
+        self.assertEqual(inv.incident.valid_alarm_name("a\nb"), "")
+        self.assertEqual(inv.incident.valid_alarm_name("x" * 300), "")
+        self.assertEqual(inv.incident.valid_alarm_name('  "quoted-alarm"  '), "quoted-alarm")
+
+
+class MetricTimeAndWindowTests(unittest.TestCase):
+    """CloudWatch is the ONE place a moment is converted. The log branch never converts — mixing
+    the two rules up puts the metric window eight hours from the incident."""
+
+    def test_hong_kong_converts_to_utc(self):
+        got, how = inv.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
+        self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-29T19:15:00Z")
+        self.assertTrue(how)
+
+    def test_utc_is_not_converted_twice(self):
+        got, _how = inv.to_utc("2026-07-30 03:15:00", "UTC")
+        self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-30T03:15:00Z")
+
+    def test_a_zone_that_cannot_be_resolved_returns_nothing_rather_than_an_offset(self):
+        got, why = inv.to_utc("2026-07-30 03:15:00", "Mars/Olympus")
+        self.assertIsNone(got)
+        self.assertIn("NOT built", why)
+
+    def test_conversion_survives_a_host_with_no_tz_database(self):
+        """A bare Windows box has no tzdata and this project ships stdlib-only, so `zoneinfo` can
+        raise. Hong Kong has had no DST since 1979, so the fixed offset is exact, not a guess."""
+        import builtins
+        real_import = builtins.__import__
+
+        def _no_zoneinfo(name, *a, **k):
+            if name == "zoneinfo":
+                raise ImportError("no tzdata on this host")
+            return real_import(name, *a, **k)
+
+        with mock.patch.object(builtins, "__import__", _no_zoneinfo):
+            got, how = inv.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
+        self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-29T19:15:00Z")
+        self.assertIn("fixed offset", how)
+
+    def test_the_window_is_built_around_the_alert_never_around_now(self):
+        alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
+        window = inv.metric_window_bounds(alert, period_seconds=60, evaluation_periods=5)
+        self.assertEqual(window["end_utc"], "2026-07-29T19:30:00Z")
+        self.assertEqual(window["start_utc"], "2026-07-29T19:00:00Z")
+        self.assertIn("query strategy", window["policy"])
+
+    def test_the_before_side_covers_what_the_alarm_evaluated(self):
+        alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
+        window = inv.metric_window_bounds(alert, period_seconds=300, evaluation_periods=12)
+        self.assertEqual(window["start_utc"], "2026-07-29T18:15:00Z")     # 60 min, not the 15 default
+
+    def test_a_pathological_alarm_config_cannot_ask_for_a_week(self):
+        alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
+        window = inv.metric_window_bounds(alert, period_seconds=86400, evaluation_periods=30)
+        start = inv.datetime.strptime(window["start_utc"], "%Y-%m-%dT%H:%M:%SZ")
+        self.assertLessEqual((alert.replace(tzinfo=None) - start).total_seconds() / 60,
+                             inv._METRIC_MAX_MINUTES)
+
+
+class AlarmIdentityAndMetricParsingTests(unittest.TestCase):
+    def test_the_metric_identity_comes_from_the_alarms_own_configuration(self):
+        identity, why = inv.alarm_metric_identity(ALARM_BODY)
+        self.assertEqual(why, "")
+        self.assertEqual((identity["namespace"], identity["metric"]), ("AWS/ECS", "CPUUtilization"))
+        self.assertEqual(identity["statistic"], "Maximum")       # the alarm's, not a default
+        self.assertEqual(identity["period_seconds"], 60)
+        self.assertEqual(len(identity["dimensions"]), 2)
+
+    def test_a_missing_namespace_or_metric_fails_closed(self):
+        """`resource != namespace` and `resource != dimensions`; there is nothing to fall back to."""
+        for key in ("Namespace", "MetricName"):
+            body = {k: v for k, v in ALARM_BODY.items() if k != key}
+            identity, why = inv.alarm_metric_identity(body)
+            self.assertIsNone(identity, key)
+            self.assertIn("metric identity is unknown", why)
+
+    def test_dimensions_must_be_a_list_of_name_value_pairs(self):
+        for dims in ("ServiceName=x", [{"Name": "a"}], [["a", "b"]], 5):
+            identity, _why = inv.alarm_metric_identity(dict(ALARM_BODY, Dimensions=dims))
+            self.assertIsNone(identity, repr(dims))
+
+    def test_absent_dimensions_are_allowed_and_become_empty(self):
+        identity, why = inv.alarm_metric_identity(
+            {k: v for k, v in ALARM_BODY.items() if k != "Dimensions"})
+        self.assertEqual((identity["dimensions"], why), ([], ""))
+
+    def test_timestamps_and_values_are_parsed_into_points(self):
+        points, status, error = inv.parse_metric_window(METRIC_BODY)
+        self.assertEqual((len(points), status, error), (3, "Complete", ""))
+
+    def test_mismatched_lengths_fail_closed_rather_than_zipping_short(self):
+        points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Values=[1.0]))
+        self.assertIsNone(points)
+        self.assertIn("mismatched lengths", error)
+
+    def test_a_non_numeric_or_infinite_value_fails_closed(self):
+        for bad in ([1.0, True, 3.0], [1.0, "2", 3.0], [1.0, float("nan"), 3.0],
+                    [1.0, float("inf"), 3.0]):
+            points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Values=bad))
+            self.assertIsNone(points, repr(bad))
+            self.assertTrue(error)
+
+    def test_an_unparseable_timestamp_fails_closed(self):
+        points, _status, error = inv.parse_metric_window(
+            dict(METRIC_BODY, Timestamps=["not-a-time", "x", "y"]))
+        self.assertIsNone(points)
+        self.assertIn("timestamp", error)
+
+    def test_an_unknown_shape_is_a_parser_failure_not_a_quiet_metric(self):
+        points, _status, error = inv.parse_metric_window({"datapoints": []})
+        self.assertIsNone(points)
+        self.assertIn("no Timestamps/Values", error)
+
+    def test_empty_lists_are_a_real_answer_not_a_failure(self):
+        points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Timestamps=[], Values=[]))
+        self.assertEqual((points, error), ([], ""))
+
+    def test_the_summary_is_categories_only(self):
+        points = [(inv.datetime(2026, 7, 29, 19, 0), 12.0),
+                  (inv.datetime(2026, 7, 29, 19, 5), 55.0),
+                  (inv.datetime(2026, 7, 29, 19, 10), 91.0)]
+        got = inv.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
+        self.assertEqual(got["direction"], "rising")
+        self.assertEqual(got["threshold_relation"], "crossing")     # 12 and 55 below, 91 above
+        self.assertIn(got["variability"], ("low", "medium", "high"))
+        self.assertNotIn("91", json.dumps(got))                     # no value leaks into the label
+
+    def test_all_points_on_the_breaching_side_read_as_above(self):
+        points = [(inv.datetime(2026, 7, 29, 19, 0), 95.0), (inv.datetime(2026, 7, 29, 19, 5), 97.0)]
+        got = inv.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
+        self.assertEqual(got["threshold_relation"], "above")
+
+    def test_no_threshold_means_not_evaluated_rather_than_a_guess(self):
+        points = [(inv.datetime(2026, 7, 29, 19, 0), 95.0)]
+        self.assertEqual(inv.summarize_points(points)["threshold_relation"], "not_evaluated")
+
+    def test_too_few_points_say_insufficient_rather_than_flat(self):
+        got = inv.summarize_points([(inv.datetime(2026, 7, 29, 19, 0), 5.0)])
+        self.assertEqual(got["direction"], "insufficient_data")
+        self.assertEqual(got["variability"], "insufficient_data")
+        self.assertEqual(got["data_presence"], "present")
+
+    def test_no_points_is_absent_not_normal(self):
+        self.assertEqual(inv.summarize_points([])["data_presence"], "absent")
+
+
+class CloudWatchBranchTests(InvestigateTests):
+    """The metric branch end to end, alongside the log branch it must never break."""
+
+    ALERT = ("AlarmName: prodECS-csl-sms-deli-job-cpu\n"
+             "prodECS_mc-hk-hase-csl-sms-deli-job_service_CPUUtilizationMINOR[80percent]\n"
+             "StateChangeTime: 2026-07-30 03:15 HKT")
+
+    def setUp(self):
+        super().setUp()
+        self._ops.stop()
+        self._ops = mock.patch.object(
+            inv.mcp_registry, "operations",
+            lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source",
+                                               "keyword": "keyword", "date_hint": "date_hint"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                       "mode": "read_mode", "keyword": "keyword",
+                                       "alert_time": "alert_time", "timezone": "timezone",
+                                       "max_lines": "lines", "backtrack_lines": "backtrack_lines"}},
+                "aws.get_alarm": {"args": {"alarm_name": "alarmName"}},
+                # Exactly the mapping the intranet locked in (handoff §2).
+                "aws.metric_window": {"args": {
+                    "namespace": "namespace", "metric": "metricName", "dimensions": "dimensions",
+                    "statistic": "statistic", "period_seconds": "periodSeconds",
+                    "from_time": "startTime", "to_time": "endTime"}}})
+        self._ops.start()
+        self._mcp.stop()
+        self._mcp = mock.patch.object(mcp_client, "call", self._call)
+        self._mcp.start()
+
+    def _call(self, operation, args=None, **_kw):
+        self.calls.append((operation, dict(args or {})))
+        if operation == "log.list_apps":
+            return {"ok": True, "text": '["cslSmsDeli", "otherApp"]'}
+        if operation == "log.search_files":
+            return {"ok": True, "text": json.dumps(["/apps/cslSmsDeli/log/otx_trace.log"])}
+        if operation == "aws.get_alarm":
+            return {"ok": True, "text": json.dumps(ALARM_BODY), "elapsed_ms": 40}
+        if operation == "aws.metric_window":
+            return {"ok": True, "text": json.dumps(METRIC_BODY), "elapsed_ms": 60}
+        return {"ok": True, "text": DIRTY_LOG}
+
+    def _packet(self, **kw):
+        return inv.investigate(self.ALERT, **kw)
+
+    # ---- the chain ----------------------------------------------------------------------------
+    def test_the_chain_runs_get_alarm_then_metric_window(self):
+        self._packet()
+        order = [op for op, _ in self.calls if op.startswith("aws.")]
+        self.assertEqual(order, ["aws.get_alarm", "aws.metric_window"])
+
+    def test_get_alarm_is_called_with_the_abstract_arg_name(self):
+        """The registry maps it to `alarmName`; nothing in this module names a real parameter."""
+        self._packet()
+        args = next(a for op, a in self.calls if op == "aws.get_alarm")
+        self.assertEqual(args, {"alarm_name": "prodECS-csl-sms-deli-job-cpu"})
+
+    def test_metric_window_sends_exactly_the_seven_mapped_arguments(self):
+        self._packet()
+        args = next(a for op, a in self.calls if op == "aws.metric_window")
+        self.assertEqual(set(args), {"namespace", "metric", "dimensions", "statistic",
+                                     "period_seconds", "from_time", "to_time"})
+        self.assertEqual(args["namespace"], "AWS/ECS")
+        self.assertEqual(args["statistic"], "Maximum")            # from the alarm, not a default
+        self.assertEqual(args["period_seconds"], 60)
+
+    def test_the_window_sent_is_utc_around_the_alert(self):
+        self._packet()
+        args = next(a for op, a in self.calls if op == "aws.metric_window")
+        # 03:15 HKT is 19:15 UTC the previous day; 60s x 5 evaluation periods -> the 15-min default.
+        self.assertEqual(args["from_time"], "2026-07-29T19:00:00Z")
+        self.assertEqual(args["to_time"], "2026-07-29T19:30:00Z")
+
+    def test_the_packet_carries_categorised_metric_evidence(self):
+        packet = self._packet()
+        metric = next(e for e in packet["evidence"] if e["kind"] == "cloudwatch_metric")
+        self.assertEqual(metric["points_seen"], 3)
+        self.assertEqual(metric["summary"]["direction"], "rising")
+        self.assertEqual(metric["environment"], "production")
+        self.assertTrue(packet["contains_production_data"])
+        self.assertIn("not that the system was healthy", metric["reading_rule"].lower())
+
+    def test_log_and_metric_evidence_coexist_and_are_labelled(self):
+        kinds = {e["kind"] for e in self._packet()["evidence"]}
+        self.assertEqual(kinds, {"log_lines", "cloudwatch_metric"})
+
+    def test_cloudwatch_queries_are_accounted_separately_from_log_queries(self):
+        packet = self._packet()
+        executed = packet["cloudwatch_queries"]["executed"]
+        self.assertEqual([q["operation"] for q in executed],
+                         ["aws.get_alarm", "aws.metric_window"])
+        for entry in executed:
+            self.assertEqual(entry["server"], "cloudwatch")
+            self.assertNotIn("app", entry)          # never squeezed into the log shape
+        self.assertTrue(packet["queries_executed"])  # the log branch kept its own ledger
+
+    # ---- what must never leave ----------------------------------------------------------------
+    def test_the_packet_never_carries_the_alarm_arn_actions_or_state_reason_data(self):
+        blob = json.dumps(self._packet(), ensure_ascii=False)
+        for secret in (ALARM_BODY["AlarmArn"], ALARM_BODY["AlarmActions"][0],
+                       ALARM_BODY["StateReasonData"]):
+            self.assertNotIn(secret, blob, secret)
+
+    def test_dimension_values_are_fingerprinted_and_names_survive(self):
+        metric = next(e for e in self._packet()["evidence"] if e["kind"] == "cloudwatch_metric")
+        blob = json.dumps(metric)
+        self.assertNotIn("prod-csl-sms-deli", blob)
+        self.assertNotIn("prod-mdc", blob)
+        self.assertIn("ServiceName", blob)
+        self.assertRegex(metric["dimensions"][0]["value"], r"^<dim:[0-9a-f]{6}>$")
+
+    def test_no_datapoint_value_or_numeric_aggregate_reaches_the_packet(self):
+        """The categories are computed in memory; the numbers behind them do not travel."""
+        blob = json.dumps(self._packet(), ensure_ascii=False)
+        for value in ("12.0", "55.0", "91.0", "52.6", "80.0"):
+            self.assertNotIn(value, blob, value)
+
+    def test_progress_events_carry_no_alarm_name_or_datapoint(self):
+        events = [e for e in inv.investigate_events(self.ALERT)
+                  if e.get("type") == "subagent_step"]
+        blob = json.dumps(events, ensure_ascii=False)
+        self.assertNotIn("prodECS-csl-sms-deli-job-cpu", blob)
+        for value in ("12.0", "55.0", "91.0"):
+            self.assertNotIn(value, blob, value)
+        steps = [e["step"] for e in events]
+        for expected in ("alarm_resolve", "alarm_lookup", "metric_window", "metric_evidence"):
+            self.assertIn(expected, steps)
+
+    # ---- the two branches must not break each other -------------------------------------------
+    def test_an_unresolvable_alarm_name_skips_the_metric_branch_but_not_the_logs(self):
+        packet = inv.investigate(ALERT)          # the plain alert: no AlarmName line in it
+        self.assertEqual([op for op, _ in self.calls if op.startswith("aws.")], [])
+        self.assertTrue(packet["queries_executed"])
+        self.assertTrue(any(e["kind"] == "log_lines" for e in packet["evidence"]))
+        self.assertIn("no single CloudWatch alarm name", " ".join(packet["not_investigated"]))
+
+    def test_an_explicit_alarm_name_beats_extraction(self):
+        inv.investigate(ALERT, alarm_name="operator-supplied-alarm")
+        args = next(a for op, a in self.calls if op == "aws.get_alarm")
+        self.assertEqual(args["alarm_name"], "operator-supplied-alarm")
+
+    def test_an_unusable_supplied_alarm_name_is_refused_not_sent(self):
+        packet = inv.investigate(ALERT, alarm_name="line one\nline two")
+        self.assertEqual([op for op, _ in self.calls if op.startswith("aws.")], [])
+        self.assertIn("not usable", " ".join(packet["not_investigated"]))
+
+    def test_a_transport_failure_on_get_alarm_is_not_alarm_not_found(self):
+        def _call(operation, args=None, **_kw):
+            if operation.startswith("aws."):
+                raise mcp_client.TransportError("CloudWatch unreachable")
+            return self._call(operation, args)
+        with mock.patch.object(mcp_client, "call", _call):
+            packet = self._packet()
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("NOT evidence that the alarm does not exist", joined)
+        self.assertTrue(packet["cloudwatch_queries"]["failed"])
+        self.assertFalse(any(e["kind"] == "cloudwatch_metric" for e in packet["evidence"]))
+
+    def test_a_tool_error_never_becomes_metric_evidence(self):
+        def _call(operation, args=None, **_kw):
+            if operation == "aws.metric_window":
+                self.calls.append((operation, dict(args or {})))
+                return {"ok": False, "tool_reported_error": True, "text": "invalid namespace"}
+            return self._call(operation, args)
+        with mock.patch.object(mcp_client, "call", _call):
+            packet = self._packet()
+        self.assertFalse(any(e["kind"] == "cloudwatch_metric" for e in packet["evidence"]))
+        self.assertIn("not a datapoint and not evidence", " ".join(packet["not_investigated"]))
+
+    def test_an_empty_window_is_reported_as_no_datapoint_not_as_healthy(self):
+        def _call(operation, args=None, **_kw):
+            if operation == "aws.metric_window":
+                self.calls.append((operation, dict(args or {})))
+                return {"ok": True, "text": json.dumps(
+                    dict(METRIC_BODY, Timestamps=[], Values=[]))}
+            return self._call(operation, args)
+        with mock.patch.object(mcp_client, "call", _call):
+            events = list(inv.investigate_events(self.ALERT))
+        packet = events[-1]["packet"]
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("does NOT mean the service was healthy", joined)
+        self.assertIn("metric_window_empty", [e.get("step") for e in events])
+
+    def test_a_missing_namespace_stops_before_the_metric_call(self):
+        def _call(operation, args=None, **_kw):
+            if operation == "aws.get_alarm":
+                self.calls.append((operation, dict(args or {})))
+                return {"ok": True, "text": json.dumps(
+                    {k: v for k, v in ALARM_BODY.items() if k != "Namespace"})}
+            return self._call(operation, args)
+        with mock.patch.object(mcp_client, "call", _call):
+            packet = self._packet()
+        self.assertEqual([op for op, _ in self.calls if op == "aws.metric_window"], [])
+        self.assertIn("Nothing was inferred from the alarm name", " ".join(
+            packet["not_investigated"]))
+
+    def test_an_unwired_metric_operation_does_not_stop_the_log_branch(self):
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                       "keyword": "keyword"}},
+                "aws.get_alarm": {"args": {"alarm_name": "alarmName"}},
+                "aws.metric_window": {"args": {"namespace": "?", "metric": "?"}}}):
+            packet = self._packet()
+        self.assertEqual([op for op, _ in self.calls if op == "aws.metric_window"], [])
+        self.assertTrue(any(e["kind"] == "log_lines" for e in packet["evidence"]))
+        self.assertIn("does not map", " ".join(packet["not_investigated"]))
+
+    def test_a_missing_window_makes_zero_calls_on_both_branches(self):
+        """A known alarm name is not enough: a metric window is built around the alert, never
+        around `now()`, so no time means no query on either side."""
+        self._parse.stop()
+        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            "identified": True,
+            "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
+            "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
+            "times": []})
+        self._parse.start()
+        packet = self._packet()
+        self.assertEqual(self.calls, [])
+        self.assertFalse(packet["contains_production_data"])
+        self.assertIn("no metric was queried", " ".join(packet["not_investigated"]))
+
+    def test_an_unreadable_metric_body_is_not_reported_as_no_anomaly(self):
+        def _call(operation, args=None, **_kw):
+            if operation == "aws.metric_window":
+                self.calls.append((operation, dict(args or {})))
+                return {"ok": True, "text": json.dumps({"datapoints": [1, 2, 3]})}
+            return self._call(operation, args)
+        with mock.patch.object(mcp_client, "call", _call):
+            packet = self._packet()
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("SUCCEEDED", joined)
+        self.assertIn("do not report it as 'no anomaly'", joined)
+
+    def test_the_metric_branch_runs_even_when_no_repo_could_be_identified(self):
+        """An alarm name is enough for the metric half; a repo is not required."""
+        self._parse.stop()
+        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            "identified": False, "repos": [], "use_cases": [], "metric": "", "notes": [],
+            "environment": "prod", "times": [dict(t) for t in ALERT_TIMES]})
+        self._parse.start()
+        packet = self._packet()
+        self.assertEqual([op for op, _ in self.calls if op.startswith("log.")], [])
+        self.assertTrue(any(e["kind"] == "cloudwatch_metric" for e in packet["evidence"]))
+        self.assertIn("no repo and no known use-case id", " ".join(packet["not_investigated"]))
+
+    def test_the_window_policy_is_stated_as_ours_not_as_cloudwatchs(self):
+        packet = self._packet()
+        self.assertIn("query strategy", packet["cloudwatch_window"]["policy"])
+        self.assertIn("UTC", packet["cloudwatch_window"]["timezone_conversion"])
 
 
 class ToolSurfaceTests(unittest.TestCase):

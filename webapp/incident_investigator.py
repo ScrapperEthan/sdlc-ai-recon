@@ -147,8 +147,11 @@ def _residual_pii(text):
 # false positive in a leak detector is not harmless; it trains you to ignore it.
 #
 # Safe because these values never come from log content: `raw_ref` is set only from
-# `incident_raw_store.put()`. Do not add a key here that could carry log-derived text.
-_IDENTIFIER_KEYS = frozenset({"raw_ref"})
+# `incident_raw_store.put()`, and app/source/file names come from the server's own listings by way of
+# our selection. A dated log file (`otx_trace.log.20260701`) is eight consecutive digits and matches
+# the phone pattern, so without this the gate mangles the one field an operator needs to go look at
+# the file themselves. Do not add a key here that could carry log-derived text.
+_IDENTIFIER_KEYS = frozenset({"raw_ref", "file", "app", "source"})
 
 
 def sanitize_packet(node, report=None):
@@ -173,7 +176,12 @@ def sanitize_packet(node, report=None):
         if kinds:
             report["sanitized_at_exit"] += 1
             report["kinds"] = sorted(set(report["kinds"]) | set(kinds))
-            return f"[removed at exit: matched {', '.join(kinds)}]", report
+            # Mask the matching span rather than discarding the whole string. Blanking it protected
+            # the data but destroyed the message around it — and most of these strings are prose WE
+            # composed ("the query budget ran out, so these were never tried: ..."), where losing the
+            # sentence costs an operator the reason and gains nothing. `redact` is the same masking
+            # used upstream, so a genuine leak is still neutralised here.
+            return redact(node), report
         return node, report
     return node, report
 
@@ -417,6 +425,112 @@ def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", w
     }
 
 
+# The abstract argument vocabulary this module speaks. The intranet maps each of these to the real
+# parameter name in `config/mcp_tools.json`; nothing here ever names a real parameter.
+#
+# `alert_time` / `mode` / `backtrack_lines` replace the `from_time` / `to_time` the committed template
+# still declares: the real `read_logdream_log` has no such parameters. It backtracks from an alert
+# time, which is a different shape of question, not a renamed one.
+READ_ARGS = ("app", "source", "file", "mode", "keyword", "alert_time", "timezone",
+             "max_lines", "backtrack_lines")
+SEARCH_ARGS = ("app", "source", "keyword", "date_hint", "filename_pattern")
+# Required before a read can possibly succeed — the real tool cannot read without a file name.
+READ_REQUIRED = ("app", "source", "file")
+# Observed on the box (intranet report 2026-07-30). Only sent when `mode` is mapped AND the config's
+# `const` does not already pin that parameter, so the box can override without a code change.
+READ_MODE_BACKTRACK = os.environ.get("SDLC_INCIDENT_READ_MODE", "alert_time_backtrack")
+BACKTRACK_LINES = int(os.environ.get("SDLC_INCIDENT_BACKTRACK_LINES", "200"))
+_MAX_FILES_PER_SOURCE = int(os.environ.get("SDLC_INCIDENT_MAX_FILES", "2"))
+# Real names confirmed in RUNBOOK-55. Used only to RANK candidates that the server returned — never
+# to invent a file name, which is what hard-coding `otx_trace.log` amounted to.
+_PREFERRED_LOG_FILES = ("otx_trace.log", "exception.log", "sftp.log")
+_FILE_TOKEN = re.compile(r"[\w./\\-]*\.log(?:[._-]?\d{6,8})?")
+
+
+def _usable_args(operation):
+    """Abstract arg names this operation can actually pass right now.
+
+    An arg declared as `"?"` is *known about* but unfilled, and `build_call` refuses it — so it is
+    not usable. Distinguishing that from "not declared" is what lets this module send exactly what
+    the current config supports and name precisely what is missing, instead of sending a doomed
+    request or waiting for a config it cannot edit.
+    """
+    spec = mcp_registry.operations().get(operation) or {}
+    args = spec.get("args") or {}
+    return {name for name, target in args.items()
+            if not str(name).startswith("_") and target and target != mcp_registry.UNSET}
+
+
+def _pinned_params(operation):
+    """Real parameter names the config pins via `const` — the box's override channel."""
+    spec = mcp_registry.operations().get(operation) or {}
+    const = spec.get("const") or {}
+    return {str(name) for name in const if not str(name).startswith("_")}
+
+
+def _payload(operation, wanted):
+    """Keep only the args this operation can pass, and never fight a `const` the box has pinned."""
+    spec = mcp_registry.operations().get(operation) or {}
+    arg_map = spec.get("args") or {}
+    usable = _usable_args(operation)
+    pinned = _pinned_params(operation)
+    return {name: value for name, value in wanted.items()
+            if value not in (None, "") and name in usable and arg_map.get(name) not in pinned}
+
+
+def select_log_files(text, alert_date="", limit=None):
+    """Parse a `log.search_files` response into a bounded, ranked list of real file names.
+
+    Returns [] when nothing parses. That is the whole point: an empty candidate list must end in
+    "we could not identify a log file", never in a guessed name. Hard-coding `otx_trace.log` was
+    exactly that guess, and it also mislabelled evidence when the real read was something else.
+    """
+    limit = _MAX_FILES_PER_SOURCE if limit is None else limit
+    names = []
+    try:
+        import json as _json
+        parsed = _json.loads(text)
+    except (ValueError, TypeError):
+        parsed = None
+
+    def _harvest(node):
+        if isinstance(node, str):
+            names.append(node)
+        elif isinstance(node, dict):
+            for key in ("file", "file_name", "filename", "name", "path"):
+                if isinstance(node.get(key), str):
+                    names.append(node[key])
+                    return
+            for value in node.values():
+                _harvest(value)
+        elif isinstance(node, list):
+            for item in node:
+                _harvest(item)
+
+    if parsed is not None:
+        _harvest(parsed)
+    if not names:
+        names = _FILE_TOKEN.findall(text or "")
+
+    cleaned, seen = [], set()
+    for name in names:
+        name = (name or "").strip().strip("\"',")
+        if not name or ".log" not in name.lower() or name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+
+    def _rank(name):
+        base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        # Same-day files first when the alert date is known, then the known log types, then shortest
+        # (a bare `otx_trace.log` beats a rotated `otx_trace.log.20260701`).
+        return (0 if alert_date and alert_date.replace("-", "") in base else 1,
+                next((i for i, known in enumerate(_PREFERRED_LOG_FILES) if known in base), 99),
+                len(base))
+
+    return sorted(cleaned, key=_rank)[:max(1, limit)]
+
+
 def _tool_outcome(out):
     """An MCP result -> ("error"|"empty"|"hit", text). Four outcomes, not two.
 
@@ -489,7 +603,12 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         "evidence": [],
         # Exactly which app/source/keyword combinations were spent. A nil result is only meaningful
         # against this list, so it travels with the packet rather than being reconstructable.
-        "queries_run": [],
+        # Split three ways on purpose. One `queries_run` list, written BEFORE the request, made a
+        # locally-refused call look queried — so "we asked and found nothing" and "we never asked"
+        # became indistinguishable, which is the same confusion this whole module exists to prevent.
+        "queries_attempted": [],
+        "queries_executed": [],
+        "queries_failed": [],
         "not_investigated": [],
         "contains_production_data": False,
         "environments": {
@@ -540,7 +659,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
             # The tool ran and refused — e.g. an unknown source name. Its error body is non-empty, so
             # without this branch it would be split on whitespace and become "app names".
             packet["not_investigated"].append(
-                f"source {source!r} was REJECTED by LogDream ({text[:200]}). Nothing was searched "
+                f"source {source!r} was REJECTED by LogDream ({redact(text[:200], counts)}). Nothing was searched "
                 f"there. If the name is wrong, fix `servers.logdream.sources` in the intranet's "
                 f"mcp_tools.json — a bad source name otherwise costs half the log coverage silently.")
             yield _step("apps_failed", "%s 被服务器拒绝，该 source 不查（可能是 source 名写错）" % source,
@@ -598,78 +717,174 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         yield _step("app_resolved",
                     "%s → 应用 %s（在 %s 上核对到）" % (target["repo"], match, "、".join(on_sources)),
                     repo=target["repo"], app=match, sources=on_sources)
+        # ---- the hop that was missing: find the real log files before reading one ----------------
+        window = query_plan.get("window") or {}
+        alert_at = window.get("at") or ""
+        alert_date = re.sub(r"[^0-9-]", "", alert_at.split("T")[0].split(" ")[0])[:10]
+        files_by_source = {}
+        for source in on_sources:
+            search_payload = _payload("log.search_files", {
+                "app": match, "source": source,
+                "keyword": (query_plan["keywords"][0]["term"] if query_plan["keywords"] else None),
+                "date_hint": alert_date or None})
+            yield _step("search_files", "在 %s / %s 上找候选日志文件" % (match, source),
+                        server="logdream", operation="log.search_files",
+                        app=match, source=source, args_sent=sorted(search_payload))
+            try:
+                found = mcp_client.call("log.search_files", search_payload)
+            except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+                packet["not_investigated"].append(
+                    f"{match}/{source}: log.search_files is not wired ({exc}), so no file name could "
+                    f"be determined and nothing was read. The real read tool REQUIRES a file name.")
+                yield _step("unwired", "%s / %s：文件搜索未接通，无法确定文件名" % (match, source),
+                            server="logdream", operation="log.search_files", refused_locally=True)
+                continue
+            except mcp_client.TransportError as exc:
+                packet["not_investigated"].append(
+                    f"{match}/{source}: file search did not respond ({exc}). Nothing was read — this "
+                    f"is NOT evidence of no matching lines.")
+                yield _step("query_failed", "%s / %s：文件搜索没响应" % (match, source),
+                            server="logdream", operation="log.search_files",
+                            app=match, source=source)
+                continue
+            outcome, text = _tool_outcome(found)
+            if outcome == "error":
+                packet["not_investigated"].append(
+                    f"{match}/{source}: the file-search tool REPORTED AN ERROR ({redact(text[:200], counts)}). "
+                    f"Nothing was read.")
+                yield _step("query_rejected", "%s / %s：文件搜索工具报错" % (match, source),
+                            server="logdream", operation="log.search_files",
+                            app=match, source=source, rejected=True,
+                            elapsed_ms=found.get("elapsed_ms"))
+                continue
+            picked = select_log_files(text, alert_date=alert_date)
+            if not picked:
+                packet["not_investigated"].append(
+                    f"{match}/{source}: the file search returned no recognisable log file, so "
+                    f"nothing was read. A file name is never guessed.")
+                yield _step("no_files", "%s / %s：没找到可用的日志文件，不读" % (match, source),
+                            server="logdream", operation="log.search_files",
+                            app=match, source=source, elapsed_ms=found.get("elapsed_ms"))
+                continue
+            files_by_source[source] = picked
+            target.setdefault("files", {})[source] = picked
+            yield _step("files_found", "%s / %s：选中 %s" % (match, source, "、".join(picked)),
+                        server="logdream", operation="log.search_files",
+                        app=match, source=source, files=picked,
+                        elapsed_ms=found.get("elapsed_ms"))
+
+        if not files_by_source:
+            continue
+
+        # A read needs a file name; if the config cannot pass one, say exactly what to add.
+        missing_map = [name for name in READ_REQUIRED if name not in _usable_args("log.read")]
+        if missing_map:
+            packet["not_investigated"].append(
+                f"log.read cannot be called: config/mcp_tools.json does not map "
+                f"{', '.join(missing_map)} (still `?` or absent). The intranet fills these from a "
+                f"live tools/list; until then no log can be read.")
+            packet["caveats"].append("the log read operation is not fully wired yet")
+            yield _step("unwired",
+                        "log.read 缺少参数映射：%s（未发出请求）" % "、".join(missing_map),
+                        server="logdream", operation="log.read", refused_locally=True,
+                        missing=missing_map)
+            yield {"type": "result", "packet": _finish(packet, counts)}
+            return
+
         # Built up front and then truncated, so what got SKIPPED is exact rather than inferred from
         # where a loop happened to stop.
-        wanted = [(keyword["term"], source) for keyword in query_plan["keywords"]
-                  for source in on_sources]
-        budget_left = max(0, budget - len(packet["queries_run"]))
+        wanted = [(keyword["term"], source, log_file)
+                  for keyword in query_plan["keywords"]
+                  for source in sorted(files_by_source)
+                  for log_file in files_by_source[source]]
+        budget_left = max(0, budget - len(packet["queries_executed"]))
         running, skipped = wanted[:budget_left], wanted[budget_left:]
         if skipped:
             packet["not_investigated"].append(
                 f"{match}: the {budget}-read query budget ran out, so these "
-                f"keyword/source pairs were never tried: "
-                + ", ".join(f"{term} on {source}" for term, source in skipped)
+                f"keyword/source/file combinations were never tried: "
+                + ", ".join(f"{term} on {source}:{log_file}" for term, source, log_file in skipped)
                 + ". Raise SDLC_INCIDENT_MAX_LOG_QUERIES or narrow the keywords — do NOT read this "
                   "as 'those keywords found nothing'.")
             yield _step("budget_spent",
-                        "查询预算用完（%d 次），%d 个关键词/source 组合没查" % (budget, len(skipped)),
+                        "查询预算用完（%d 次），%d 个关键词/文件组合没查" % (budget, len(skipped)),
                         budget=budget,
-                        skipped=[f"{term}@{source}" for term, source in skipped])
-        for index, (term, source) in enumerate(running, 1):
-            yield _step("query", "查 %s / %s：关键词 %s（%d/%d）" % (
-                match, source, term, index, len(running)),
+                        skipped=[f"{term}@{source}:{f}" for term, source, f in skipped])
+        for index, (term, source, log_file) in enumerate(running, 1):
+            yield _step("query", "读 %s / %s / %s：关键词 %s（%d/%d）" % (
+                match, source, log_file, term, index, len(running)),
                 server="logdream", operation="log.read",
-                app=match, source=source, keyword=term)
-            args = {"app": match, "source": source, "keyword": term}
-            packet["queries_run"].append({"app": match, "source": source, "keyword": term})
-            window = query_plan.get("window")
-            if window and window.get("at"):
-                # Passed through as given; this module never converts or defaults a time.
-                args["from_time"] = window["at"]
-                args["timezone"] = window.get("timezone")
+                app=match, source=source, keyword=term, file=log_file)
+            args = _payload("log.read", {
+                "app": match, "source": source, "file": log_file, "keyword": term,
+                # The real tool backtracks from an alert time; it has no from/to window. Passed
+                # through exactly as the alert stated it, zone included — never converted.
+                "alert_time": alert_at or None,
+                "timezone": window.get("timezone") or None,
+                "mode": READ_MODE_BACKTRACK if alert_at else None,
+                "backtrack_lines": BACKTRACK_LINES if alert_at else None,
+            })
+            attempt = {"app": match, "source": source, "keyword": term, "file": log_file,
+                       "args_sent": sorted(args)}
+            # Recorded as ATTEMPTED here and promoted to executed only once a response comes back.
+            # Counting before the request meant a locally-refused call still looked queried.
+            packet["queries_attempted"].append(attempt)
             try:
                 out = mcp_client.call("log.read", args)
             except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
-                packet["not_investigated"].append(f"log.read unavailable: {exc}")
-                packet["caveats"].append("the log read operation is not fully wired yet")
                 # Refused by the allow-list / naming seam, NOT a failure to reach the server. Ops
                 # need these apart: one is "nobody finished wiring this", the other is "the log
-                # service is down", and they get escalated to different people.
+                # service is down", and they get escalated to different people. Never sent, so it
+                # stays out of `queries_executed`.
+                packet["queries_failed"].append({**attempt, "reason": str(exc),
+                                                  "refused_locally": True})
+                packet["not_investigated"].append(f"log.read unavailable: {exc}")
+                packet["caveats"].append("the log read operation is not fully wired yet")
                 yield _step("unwired", "日志读取操作还没接通完（被本地白名单/命名层拒绝，未发出请求）：%s"
                             % exc, server="logdream", operation="log.read", refused_locally=True)
                 yield {"type": "result", "packet": _finish(packet, counts)}
                 return
             except mcp_client.TransportError as exc:
+                packet["queries_failed"].append({**attempt, "reason": str(exc),
+                                                  "refused_locally": False})
                 packet["not_investigated"].append(
-                    f"{match}/{source} keyword {term!r}: log service did not respond ({exc}). "
-                    f"This is NOT evidence of no matching lines.")
+                    f"{match}/{source}:{log_file} keyword {term!r}: log service did not respond "
+                    f"({exc}). This is NOT evidence of no matching lines.")
                 yield _step("query_failed",
-                            "%s / %s 没响应 —— 这不等于“没有匹配的日志”" % (match, source),
+                            "%s / %s / %s 没响应 —— 这不等于“没有匹配的日志”" % (
+                                match, source, log_file),
                             server="logdream", operation="log.read",
-                            app=match, source=source, keyword=term)
+                            app=match, source=source, keyword=term, file=log_file)
                 continue
+            packet["queries_executed"].append(attempt)
             outcome, text = _tool_outcome(out)
             if outcome == "error":
                 # The tool ran and reported failure. Its message is NON-EMPTY, so treating text as
                 # content here would wrap "unknown source hkl" up as a log finding and report a failed
                 # call as "we found logs" — the worst outcome this feature can produce.
+                packet["queries_failed"].append({**attempt, "reason": redact(text[:200], counts),
+                                                  "refused_locally": False})
                 packet["not_investigated"].append(
-                    f"{match}/{source} keyword {term!r}: the log tool REPORTED AN ERROR "
-                    f"({text[:200]}). This is not a log finding and not evidence of no matching "
+                    f"{match}/{source}:{log_file} keyword {term!r}: the log tool REPORTED AN ERROR "
+                    f"({redact(text[:200], counts)}). This is not a log finding and not evidence of no matching "
                     f"lines — the query did not succeed.")
                 yield _step("query_rejected",
-                            "%s / %s：%s 工具报错，不作为日志证据" % (match, source, term),
+                            "%s / %s / %s：%s 工具报错，不作为日志证据" % (
+                                match, source, log_file, term),
                             server="logdream", operation="log.read",
-                            app=match, source=source, keyword=term, rejected=True,
+                            app=match, source=source, keyword=term, file=log_file, rejected=True,
                             elapsed_ms=out.get("elapsed_ms"))
                 continue
             if outcome == "empty":
-                yield _step("query_empty", "%s / %s：%s 无匹配" % (match, source, term),
+                yield _step("query_empty", "%s / %s / %s：%s 无匹配" % (
+                    match, source, log_file, term),
                             server="logdream", operation="log.read",
-                            app=match, source=source, keyword=term,
+                            app=match, source=source, keyword=term, file=log_file,
                             elapsed_ms=out.get("elapsed_ms"))
                 continue
-            item = _evidence_from_text(text, term, source, match, "otx_trace.log", counts,
+            # The file ACTUALLY read, not a hard-coded name: mislabelling `exception.log` as
+            # `otx_trace.log` would misdirect whoever goes to check it.
+            item = _evidence_from_text(text, term, source, match, log_file, counts,
                                        owner=owner, window=query_plan.get("window"))
             packet["evidence"].append(item)
             packet["contains_production_data"] = True
@@ -690,15 +905,18 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         raw_ref=item["raw_ref"])
 
     packet["ok"] = bool(packet["evidence"]) or not packet["not_investigated"]
-    if not packet["evidence"] and packet["queries_run"] and not packet["not_investigated"]:
+    if not packet["evidence"] and packet["queries_executed"] and not packet["not_investigated"]:
         packet["caveats"].append(
             "the queries ran and matched nothing. That is a real finding only for the keywords and "
-            "window actually used — see `queries_run`.")
+            "window actually used — see `queries_executed`.")
     final = _finish(packet, counts)
-    yield _step("summary", "调查完成：%d 条证据，%d 项没查（脱敏 %d 处）" % (
-        len(final.get("evidence") or []), len(final.get("not_investigated") or []),
+    yield _step("summary", "调查完成：%d 条证据，实际执行 %d 次读取，%d 项没查（脱敏 %d 处）" % (
+        len(final.get("evidence") or []), len(final.get("queries_executed") or []),
+        len(final.get("not_investigated") or []),
         sum((final.get("redactions") or {}).values())),
         evidence=len(final.get("evidence") or []),
+        executed=len(final.get("queries_executed") or []),
+        failed=len(final.get("queries_failed") or []),
         not_investigated=len(final.get("not_investigated") or []),
         redactions=final.get("redactions") or {})
     yield {"type": "result", "packet": final}

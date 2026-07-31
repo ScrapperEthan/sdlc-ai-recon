@@ -52,12 +52,27 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("2026-07-30 03:15:01", out)
 
     def test_the_exit_gate_strips_what_upstream_redaction_missed(self):
-        """Defence 2. Reaching it means a bug, so it must be counted, not fixed quietly."""
+        """Defence 2. Reaching it means a bug, so it must be counted, not fixed quietly.
+
+        It MASKS the matching span rather than discarding the whole string: most strings that reach
+        it are prose we composed, where blanking the sentence costs an operator the reason and
+        protects nothing extra."""
         packet, report = inv.sanitize_packet(
             {"evidence": [{"excerpts": ["leaked bob@example.com here"], "lines_seen": 1}]})
         self.assertEqual(report["sanitized_at_exit"], 1)
         self.assertEqual(report["kinds"], ["email"])
         self.assertNotIn("bob@example.com", json.dumps(packet))
+        masked = packet["evidence"][0]["excerpts"][0]
+        self.assertTrue(masked.startswith("leaked ") and masked.endswith(" here"), masked)
+
+    def test_a_dated_log_filename_is_not_mistaken_for_a_phone_number(self):
+        """`otx_trace.log.20260701` is eight consecutive digits. Before the identifier exemption the
+        gate blanked whole operator messages containing one — and inflated `sanitized_at_exit`, the
+        counter whose only job is to flag a REAL leak."""
+        packet, report = inv.sanitize_packet(
+            {"file": "otx_trace.log.20260701", "app": "cslSmsDeli", "source": "hkl"})
+        self.assertEqual(packet["file"], "otx_trace.log.20260701")
+        self.assertEqual(report["sanitized_at_exit"], 0)
 
     def test_the_exit_gate_leaves_clean_text_alone(self):
         packet, report = inv.sanitize_packet({"note": "SmsDeliveryException x12 on hk1"})
@@ -193,11 +208,18 @@ class InvestigateTests(unittest.TestCase):
         # these tests describe the CODE, and must not be graded against whatever config is on disk.
         self._sources = mock.patch.object(inv, "log_sources", lambda: inv.DEFAULT_LOG_SOURCES)
         self._sources.start()
+        # Mirrors what the intranet will fill in: every abstract arg mapped to a real parameter name.
         self._ops = mock.patch.object(
             inv.mcp_registry, "operations",
-            lambda cfg=None: {"log.list_apps": {"args": {"source": "source"}},
-                              "log.read": {"args": {"app": "app", "source": "source",
-                                                     "keyword": "keyword"}}})
+            lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source",
+                                               "keyword": "keyword", "date_hint": "date_hint"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                       "mode": "read_mode", "keyword": "keyword",
+                                       "alert_time": "alert_time", "timezone": "timezone",
+                                       "max_lines": "lines",
+                                       "backtrack_lines": "backtrack_lines"}}})
         self._ops.start()
         self.calls = []
 
@@ -205,6 +227,11 @@ class InvestigateTests(unittest.TestCase):
             self.calls.append((operation, dict(args or {})))
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli", "otherApp"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": json.dumps(
+                    ["/apps/cslSmsDeli/log/otx_trace.log",
+                     "/apps/cslSmsDeli/log/exception.log",
+                     "/apps/cslSmsDeli/log/otx_trace.log.20260701"])}
             return {"ok": True, "text": DIRTY_LOG}
 
         self._mcp = mock.patch.object(mcp_client, "call", _fake_call)
@@ -259,8 +286,11 @@ class InvestigateTests(unittest.TestCase):
         inv.investigate(ALERT)
         reads = [args for op, args in self.calls if op == "log.read"]
         self.assertTrue(reads)
-        self.assertEqual(reads[0]["from_time"], "03:15 HKT")
+        # The real read_logdream_log has no from/to window: it backtracks from an alert time.
+        self.assertEqual(reads[0]["alert_time"], "03:15 HKT")
         self.assertEqual(reads[0]["timezone"], "Asia/Hong_Kong")
+        self.assertEqual(reads[0]["mode"], inv.READ_MODE_BACKTRACK)
+        self.assertNotIn("from_time", reads[0])
 
     def test_an_app_name_the_server_does_not_know_is_not_queried(self):
         """Querying a guessed app returns an empty result that reads exactly like 'no problem'."""
@@ -280,6 +310,8 @@ class InvestigateTests(unittest.TestCase):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             raise mcp_client.TransportError("LogDream unreachable")
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
@@ -298,6 +330,8 @@ class InvestigateTests(unittest.TestCase):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             raise mcp_registry.NotWired("log.read cannot pass 'mode' yet")
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
@@ -312,16 +346,16 @@ class InvestigateTests(unittest.TestCase):
         with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits), \
              mock.patch.object(inv, "_MAX_LOG_QUERIES", 3):
             packet = inv.investigate(ALERT)
-        self.assertEqual(len(packet["queries_run"]), 3)      # 3 keywords x 2 sources, capped at 3
+        self.assertEqual(len(packet["queries_executed"]), 3)      # 3 keywords x 2 sources, capped at 3
         skipped = " ".join(packet["not_investigated"])
         self.assertIn("query budget", skipped)
         self.assertIn("do NOT read this as", skipped)
         self.assertIn("hkp3", skipped)                       # names the pairs it never tried
 
-    def test_queries_run_records_exactly_what_was_spent(self):
+    def test_queries_executed_records_exactly_what_was_spent(self):
         packet = inv.investigate(ALERT)
-        self.assertTrue(packet["queries_run"])
-        for entry in packet["queries_run"]:
+        self.assertTrue(packet["queries_executed"])
+        for entry in packet["queries_executed"]:
             self.assertEqual(entry["app"], "cslSmsDeli")
             self.assertIn(entry["source"], inv.log_sources())
             self.assertTrue(entry["keyword"])
@@ -330,6 +364,8 @@ class InvestigateTests(unittest.TestCase):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             return {"ok": True, "text": "   "}
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
@@ -382,7 +418,8 @@ class StreamingTests(InvestigateTests):
         self.assertTrue(called)
         for event in called:
             self.assertEqual(event["detail"]["server"], "logdream")
-            self.assertIn(event["detail"]["operation"], ("log.list_apps", "log.read"))
+            self.assertIn(event["detail"]["operation"],
+                          ("log.list_apps", "log.search_files", "log.read"))
 
     def test_local_steps_carry_no_mcp_badge(self):
         """Reading the alert and building the plan touch nothing external; claiming otherwise would
@@ -401,6 +438,8 @@ class StreamingTests(InvestigateTests):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             raise mcp_registry.NotWired("log.read cannot pass 'mode' yet")
         with mock.patch.object(mcp_client, "call", _fake_call):
             event = next(e for e in inv.investigate_events(ALERT) if e.get("step") == "unwired")
@@ -451,7 +490,7 @@ class DrillDownTests(InvestigateTests):
 
     def test_narrowing_sources_is_honoured_and_flagged_as_covering_less(self):
         packet = inv.investigate(ALERT, sources=["hkp3"])
-        self.assertEqual({q["source"] for q in packet["queries_run"]}, {"hkp3"})
+        self.assertEqual({q["source"] for q in packet["queries_executed"]}, {"hkp3"})
         self.assertIn("BOTH production", packet["plan"]["sources_note"])
 
     def test_raising_the_query_budget_lets_a_wider_sweep_run(self):
@@ -460,15 +499,15 @@ class DrillDownTests(InvestigateTests):
         with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits):
             narrow = inv.investigate(ALERT, max_queries=2)
             wide = inv.investigate(ALERT, max_queries=6)
-        self.assertEqual(len(narrow["queries_run"]), 2)
-        self.assertEqual(len(wide["queries_run"]), 6)
+        self.assertEqual(len(narrow["queries_executed"]), 2)
+        self.assertEqual(len(wide["queries_executed"]), 6)
         self.assertTrue(narrow["not_investigated"])          # says what it skipped
         self.assertIn("2-read query budget", " ".join(narrow["not_investigated"]))
 
     def test_the_default_budget_still_applies_when_no_override_is_given(self):
         with mock.patch.object(inv, "_MAX_LOG_QUERIES", 3):
             packet = inv.investigate(ALERT)
-        self.assertLessEqual(len(packet["queries_run"]), 3)
+        self.assertLessEqual(len(packet["queries_executed"]), 3)
 
     def test_blank_keywords_fall_back_to_the_derived_list(self):
         """Zero keywords would mean zero queries — an investigation that searched nothing while
@@ -476,11 +515,11 @@ class DrillDownTests(InvestigateTests):
         packet = inv.investigate(ALERT, keywords=["", "  "])
         self.assertNotIn("keywords_note", packet["plan"])
         self.assertIn("CPUUtilization", [k["term"] for k in packet["plan"]["keywords"]])
-        self.assertTrue(packet["queries_run"])
+        self.assertTrue(packet["queries_executed"])
 
     def test_blank_sources_fall_back_to_both_production_sources(self):
         packet = inv.investigate(ALERT, sources=[" "])
-        self.assertEqual({q["source"] for q in packet["queries_run"]}, set(inv.log_sources()))
+        self.assertEqual({q["source"] for q in packet["queries_executed"]}, set(inv.log_sources()))
         self.assertNotIn("sources_note", packet["plan"])
 
 
@@ -542,6 +581,8 @@ class ToolErrorIsNeverEvidenceTests(InvestigateTests):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             return {"ok": False, "tool_reported_error": True, "text": "unknown source hkl"}
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
@@ -556,6 +597,8 @@ class ToolErrorIsNeverEvidenceTests(InvestigateTests):
         def _fake_call(operation, args=None, **_kw):
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             return {"ok": False, "tool_reported_error": True, "text": "unknown source hkl"}
         with mock.patch.object(mcp_client, "call", _fake_call):
             steps = [e["step"] for e in inv.investigate_events(ALERT)
@@ -583,10 +626,12 @@ class ToolErrorIsNeverEvidenceTests(InvestigateTests):
                 if source == inv.log_sources()[0]:
                     return {"ok": False, "tool_reported_error": True, "text": "unknown source"}
                 return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             return {"ok": True, "text": DIRTY_LOG}
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
-        searched = {q["source"] for q in packet["queries_run"]}
+        searched = {q["source"] for q in packet["queries_executed"]}
         self.assertEqual(searched, {inv.log_sources()[1]})
         self.assertTrue(packet["evidence"])
         self.assertIn("REJECTED", " ".join(packet["not_investigated"]))
@@ -642,10 +687,12 @@ class SourceHandlingTests(InvestigateTests):
             source = (args or {}).get("source")
             if operation == "log.list_apps":
                 return {"ok": True, "text": '["cslSmsDeli"]' if source == only else '["other"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
             return {"ok": True, "text": DIRTY_LOG}
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
-        self.assertEqual({q["source"] for q in packet["queries_run"]}, {only})
+        self.assertEqual({q["source"] for q in packet["queries_executed"]}, {only})
         self.assertIn("but NOT on", " ".join(packet["not_investigated"]))
 
     def test_source_is_omitted_when_the_operation_does_not_map_it(self):
@@ -657,6 +704,193 @@ class SourceHandlingTests(InvestigateTests):
         listings = [args for op, args in self.calls if op == "log.list_apps"]
         self.assertTrue(listings)
         self.assertEqual([a.get("source") for a in listings], [None] * len(listings))
+
+
+class FileSelectionTests(unittest.TestCase):
+    """`select_log_files` — parsing only, no sockets.
+
+    The rule it enforces: an empty candidate list ends in "we could not identify a log file", never
+    in a guessed name. Hard-coding `otx_trace.log` was exactly that guess, and it ALSO mislabelled
+    evidence whenever the real read was something else.
+    """
+
+    def test_a_json_list_of_paths_is_parsed_and_ranked(self):
+        got = inv.select_log_files(json.dumps(
+            ["/apps/x/log/otx_trace.log.20260701", "/apps/x/log/otx_trace.log"]), limit=2)
+        self.assertEqual(got, ["/apps/x/log/otx_trace.log", "/apps/x/log/otx_trace.log.20260701"])
+
+    def test_objects_with_a_name_field_are_parsed(self):
+        got = inv.select_log_files(json.dumps(
+            [{"file_name": "exception.log", "size": 12}, {"name": "otx_trace.log"}]), limit=2)
+        self.assertEqual(sorted(got), ["exception.log", "otx_trace.log"])
+
+    def test_plain_text_output_still_yields_file_names(self):
+        got = inv.select_log_files("found:\n  otx_trace.log  (2MB)\n  sftp.log  (1MB)\n", limit=5)
+        self.assertIn("otx_trace.log", got)
+        self.assertIn("sftp.log", got)
+
+    def test_the_alert_date_wins_over_the_preferred_type(self):
+        got = inv.select_log_files(
+            json.dumps(["otx_trace.log", "exception.log.20260730"]),
+            alert_date="2026-07-30", limit=1)
+        self.assertEqual(got, ["exception.log.20260730"])
+
+    def test_nothing_recognisable_yields_nothing_rather_than_a_guess(self):
+        for text in ("", "no files here", json.dumps({"error": "bad app"})):
+            self.assertEqual(inv.select_log_files(text), [], repr(text))
+
+    def test_the_candidate_list_is_bounded(self):
+        many = json.dumps([f"otx_trace.log.2026070{i}" for i in range(9)])
+        self.assertLessEqual(len(inv.select_log_files(many)), inv._MAX_FILES_PER_SOURCE)
+
+
+class SearchFilesHopTests(InvestigateTests):
+    """The hop that was missing entirely: the real read tool REQUIRES a file name."""
+
+    def test_search_files_runs_before_any_read(self):
+        inv.investigate(ALERT)
+        order = [op for op, _ in self.calls]
+        self.assertIn("log.search_files", order)
+        self.assertLess(order.index("log.search_files"), order.index("log.read"))
+
+    def test_the_real_selected_file_name_is_passed_to_read(self):
+        inv.investigate(ALERT)
+        reads = [args for op, args in self.calls if op == "log.read"]
+        self.assertTrue(reads)
+        for args in reads:
+            self.assertIn("file", args)
+            # A rotated file (`otx_trace.log.20260701`) is a real candidate, so match on `.log`
+            # appearing rather than on the name ending there.
+            self.assertIn(".log", args["file"])
+
+    def test_evidence_records_the_file_actually_read_not_a_hard_coded_name(self):
+        """Mislabelling `exception.log` as `otx_trace.log` misdirects whoever goes to check it."""
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["exception.log"]'}
+            return {"ok": True, "text": DIRTY_LOG}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertTrue(packet["evidence"])
+        self.assertEqual({item["file"] for item in packet["evidence"]}, {"exception.log"})
+
+    def test_no_candidate_file_means_nothing_is_read(self):
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": "no matching files"}
+            raise AssertionError("log.read must not run without a file name")
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        self.assertIn("never guessed", " ".join(packet["not_investigated"]))
+
+    def test_a_file_search_error_is_not_treated_as_a_file_list(self):
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": False, "tool_reported_error": True,
+                        "text": "app not found: cslSmsDeli.log"}
+            raise AssertionError("log.read must not run after a failed file search")
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        self.assertIn("file-search tool REPORTED AN ERROR", " ".join(packet["not_investigated"]))
+
+    def test_read_is_refused_locally_when_the_config_cannot_pass_a_file_name(self):
+        """Before the intranet maps `file`, a read cannot possibly succeed — so it is not sent, and
+        the message names exactly which mapping is missing."""
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "?"}}}):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        self.assertEqual([op for op, _ in self.calls].count("log.read"), 0)
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("does not map", joined)
+        self.assertIn("file", joined)
+
+
+class QueryAccountingTests(InvestigateTests):
+    """attempted / executed / failed. One list written before the request made a locally-refused
+    call look queried — "we asked and found nothing" and "we never asked" became the same thing."""
+
+    def test_a_successful_read_is_counted_as_executed(self):
+        packet = inv.investigate(ALERT)
+        self.assertTrue(packet["queries_executed"])
+        self.assertEqual(len(packet["queries_attempted"]), len(packet["queries_executed"]))
+        self.assertEqual(packet["queries_failed"], [])
+
+    def test_a_locally_refused_read_is_attempted_but_never_executed(self):
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
+            raise mcp_registry.NotWired("log.read cannot pass 'mode' yet")
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertTrue(packet["queries_attempted"])
+        self.assertEqual(packet["queries_executed"], [])
+        self.assertTrue(packet["queries_failed"][0]["refused_locally"])
+
+    def test_a_tool_error_counts_as_executed_and_failed(self):
+        """It DID reach the server — that is a different fact from never having asked."""
+        def _fake_call(operation, args=None, **_kw):
+            if operation == "log.list_apps":
+                return {"ok": True, "text": '["cslSmsDeli"]'}
+            if operation == "log.search_files":
+                return {"ok": True, "text": '["otx_trace.log"]'}
+            return {"ok": False, "tool_reported_error": True, "text": "bad file"}
+        with mock.patch.object(mcp_client, "call", _fake_call):
+            packet = inv.investigate(ALERT)
+        self.assertTrue(packet["queries_executed"])
+        self.assertTrue(packet["queries_failed"])
+        self.assertFalse(packet["queries_failed"][0]["refused_locally"])
+        self.assertEqual(packet["evidence"], [])
+
+    def test_every_attempt_records_which_args_were_actually_sent(self):
+        packet = inv.investigate(ALERT)
+        for entry in packet["queries_attempted"]:
+            self.assertIn("file", entry["args_sent"])
+            self.assertIn("app", entry["args_sent"])
+
+
+class ArgumentContractTests(InvestigateTests):
+    """Only args the config maps are sent, and a `const` the box pinned is never fought."""
+
+    def test_unmapped_args_are_dropped_rather_than_sent(self):
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name"}}}):
+            inv.investigate(ALERT)
+        reads = [args for op, args in self.calls if op == "log.read"]
+        self.assertTrue(reads)
+        self.assertEqual(set(reads[0]), {"app", "source", "file"})
+        self.assertNotIn("alert_time", reads[0])
+
+    def test_a_const_pinned_by_the_box_is_not_overridden(self):
+        """`const` is the intranet's override channel; sending our own value would silently beat it."""
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                       "mode": "read_mode"},
+                              "const": {"read_mode": "pinned_by_intranet"}}}):
+            inv.investigate(ALERT)
+        reads = [args for op, args in self.calls if op == "log.read"]
+        self.assertNotIn("mode", reads[0])
+
+    def test_a_placeholder_mapping_counts_as_unusable(self):
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.read": {"args": {"app": "app", "source": "?", "file": "file_name"}}}):
+            self.assertEqual(inv._usable_args("log.read"), {"app", "file"})
 
 
 class ToolSurfaceTests(unittest.TestCase):

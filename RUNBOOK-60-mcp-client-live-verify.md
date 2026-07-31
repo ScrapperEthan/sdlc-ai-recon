@@ -264,6 +264,104 @@ not_investigated: ___ 条(逐条贴前 160 字)
 
 ---
 
+---
+
+## 追加(2026-07-30 第二轮):补上 `log.search_files` 那一跳,并改用真实的时间参数
+
+你第二轮查得更深,发现的是**整条链缺了一跳**,不是几个参数写错。全部照做了。
+
+### 我改了什么(外网侧,已推)
+
+| 你报的 | 已修 |
+| --- | --- |
+| 缺 `log.search_files` → 没有 `file_name`,而 `read_logdream_log` 必须要 | app 核对成功后**先调 `log.search_files`**,解析候选文件,按「告警日期 → 已知日志类型 → 名字最短」排序,每个 source 取前 2 个,把**真实 `file_name`** 传给 `log.read` |
+| 传了不存在的 `from_time`/`to_time` | 改成 **`alert_time` + `mode=alert_time_backtrack` + `backtrack_lines`**;`from_time`/`to_time` 不再出现 |
+| 证据里文件名硬编码 `otx_trace.log` | 证据记录**实际读的那个文件名** |
+| `queries_run` 记得太早 | 拆成 **`queries_attempted` / `queries_executed` / `queries_failed`**,只有拿到响应才算 executed,被本地拒绝的带 `refused_locally: true` |
+| repo → app 映射缺失 | 代码**已经**同时认 `config/logdream_app_map.json` 和 `config/logdream_apps.json`,两种结构都认(`{"repo_to_app": {...}}` 或扁平 `{repo: app}`)。**只差你把文件建起来** |
+
+另外两条我顺手加固的:
+
+- **只发配置真正映射过的参数。** 某个抽象参数在 `mcp_tools.json` 里还是 `"?"` 或没声明 → **不发**。
+  所以在你更新配置之前,不会有注定失败的请求打到真机上。
+- **`const` 优先于我传的值。** 你在 `const` 里钉死某个参数(比如 `read_mode`),我不会用自己的值去覆盖它。
+  这是给你一个**不需要我改代码**的覆盖通道。
+
+### 需要你做的(内网侧):把这些抽象参数映射到真实参数名
+
+我这边现在会用下面这些**抽象名**。请对着**真实 `tools/list`** 填 `config/mcp_tools.json`,
+**具体真实参数名以 tools/list 为准,不要照抄我下面的猜测**:
+
+```jsonc
+"log.search_files": {
+  "tool": "search_logdream_log_files",
+  "args": {
+    "app":              "<真实参数名>",
+    "source":           "<真实参数名>",
+    "keyword":          "<真实参数名>",     // 可选,没有就删掉这一行
+    "date_hint":        "<真实参数名>",     // 可选
+    "filename_pattern": "<真实参数名>"      // 可选
+  }
+},
+"log.read": {
+  "tool": "read_logdream_log",
+  "args": {
+    "app":             "<真实参数名>",
+    "source":          "<真实参数名>",
+    "file":            "file_name",        // ← 必需,没有它一条日志都读不了
+    "mode":            "read_mode",        // 值我传 alert_time_backtrack
+    "keyword":         "<真实参数名>",
+    "alert_time":      "alert_time",
+    "timezone":        "<真实参数名>",      // 可选
+    "max_lines":       "<真实参数名>",      // 可选
+    "backtrack_lines": "backtrack_lines"   // 可选
+  }
+}
+```
+
+**左边是我的抽象名(固定,别改),右边是真机参数名(以 tools/list 为准)。**
+可选的那几个没有就删掉整行——**删掉比填错好**,因为我只发映射过的参数。
+
+⚠️ 已提交模板里 `log.read` 现在写的是 `from_time`/`to_time`,**那两个真机没有**,请删掉换成
+`alert_time` / `backtrack_lines`。
+
+### 还需要你建一个文件
+
+```
+config/logdream_app_map.json     （或 config/logdream_apps.json,两个名字我都认）
+{ "repo_to_app": { "mc-hk-hase-csl-sms-deli-job": "cslSmsDeli", ... } }
+```
+
+**先给告警最多的 20–30 个仓库就够解锁演示**,不必 460 个全填。
+没有这个文件不会导致误查(候选名核对不上就拒绝查),但会导致**很多仓库根本查不了日志**。
+
+### 追加检查 E —— 补完之后跑这个
+
+```bash
+python -c "
+from webapp import incident_investigator as inv, mcp_registry
+print('search_files 可用参数:', sorted(inv._usable_args('log.search_files')))
+print('read 可用参数        :', sorted(inv._usable_args('log.read')))
+print('read 必需项是否齐全  :', [n for n in inv.READ_REQUIRED if n not in inv._usable_args('log.read')] or 'OK')
+"
+```
+
+**`read 必需项是否齐全` 必须是 `OK`**,否则调查员会在本地就拒绝读取(并明确告诉你缺哪个)。
+
+然后跑一次真实调查,回报:
+
+```
+search_files 调用次数 / 每个 source 找到几个候选文件 / 选中了哪几个
+log.read 实际发出的参数名(只报 key,不要报值)
+queries_attempted / queries_executed / queries_failed 三个计数
+evidence 条数,以及每条的 file 字段
+```
+
+🔴 **重点看两件事:** `evidence` 里的 `file` 必须是**真实选中的文件名**;
+`queries_executed` 必须**只包含真正发出去并拿到响应的**那些。
+
+---
+
 ## 附:这一步之后**还差什么**才能真正答事故问题
 
 传输层通了不等于助手会用它。剩下的顺序是:

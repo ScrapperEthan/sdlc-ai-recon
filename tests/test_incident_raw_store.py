@@ -130,8 +130,16 @@ class ModelStillNeverSeesRawTextTests(_Store):
         dirty = "\n".join(LINES)
         self._extra = [
             mock.patch.object(config, "MCP_ENABLED", True),
+            mock.patch.object(inv, "log_sources", lambda: inv.DEFAULT_LOG_SOURCES),
+            mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                       "keyword": "keyword", "mode": "read_mode",
+                                       "alert_time": "alert_time", "timezone": "timezone"}}}),
             mock.patch.object(mcp_client, "call", lambda op, args=None, **k: (
                 {"ok": True, "text": '["cslSmsDeli"]'} if op == "log.list_apps"
+                else {"ok": True, "text": '["otx_trace.log"]'} if op == "log.search_files"
                 else {"ok": True, "text": dirty, "elapsed_ms": 12})),
             mock.patch.object(inv.rcode, "search_code", lambda *a, **k: []),
             mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
@@ -195,8 +203,10 @@ class ModelStillNeverSeesRawTextTests(_Store):
             self.assertEqual(packet["exit_check"]["sanitized_at_exit"], 0)
 
     def test_the_exemption_does_not_extend_to_content_fields(self):
-        """Only machine-generated identifiers are exempt; anything log-derived is still scanned."""
-        self.assertEqual(self.inv._IDENTIFIER_KEYS, frozenset({"raw_ref"}))
+        """Only our OWN identifiers are exempt (ref, app, source, file); anything log-derived is
+        still scanned. `excerpts` is the log itself and must never be on that list."""
+        self.assertNotIn("excerpts", self.inv._IDENTIFIER_KEYS)
+        self.assertNotIn("text", self.inv._IDENTIFIER_KEYS)
         cleaned, report = self.inv.sanitize_packet(
             {"raw_ref": "3047878912345678abcd", "excerpts": ["leaked bob@example.com"]})
         self.assertEqual(cleaned["raw_ref"], "3047878912345678abcd")

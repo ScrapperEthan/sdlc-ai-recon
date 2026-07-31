@@ -1930,13 +1930,15 @@ function showLiveTools(container, trace, completed = false) {
 // Step kinds that must not read as routine progress. A server that did not answer, or a repo that
 // was skipped, is a "we did not look" — the whole point of surfacing these is that the user can tell
 // that apart from "we looked and found nothing".
-const SUBAGENT_WARN = new Set(['budget_spent', 'query_failed', 'app_unresolved', 'query_empty']);
+const SUBAGENT_WARN = new Set(['budget_spent', 'query_failed', 'app_unresolved', 'query_empty',
+                               'no_files']);
 // `query_rejected` / `apps_failed` mean the tool RAN and refused — a different escalation from a
 // server that did not answer, and emphatically not a finding.
 const SUBAGENT_STOP = new Set(['refused', 'disabled', 'apps_failed', 'unwired', 'query_rejected']);
 const SUBAGENT_MARKS = {
   plan: '◇', plan_done: '◆', apps: '◇', apps_done: '◆', app_resolved: '→',
-  app_unresolved: '⚠', query: '·', query_empty: '○', query_failed: '⚠', evidence: '●',
+  app_unresolved: '⚠', search_files: '◇', files_found: '→', no_files: '⚠',
+  query: '·', query_empty: '○', query_failed: '⚠', evidence: '●',
   query_rejected: '✖', budget_spent: '⚠', refused: '■', disabled: '■', apps_failed: '■',
   unwired: '■', summary: '✓'
 };

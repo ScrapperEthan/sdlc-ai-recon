@@ -893,6 +893,226 @@ class ArgumentContractTests(InvestigateTests):
             self.assertEqual(inv._usable_args("log.read"), {"app", "file"})
 
 
+class StructuredResponseTests(unittest.TestCase):
+    """Reported by the intranet 2026-07-31: three parsers read a structured JSON body as text.
+
+    One root cause, three symptoms. The body arrives as JSON; splitting it counts JSON source lines
+    and turns JSON keys into data. The rule now: a body that parses as JSON is read structurally,
+    and a shape we cannot read fails closed instead of scraping tokens out of it.
+    """
+
+    # The intranet's synthetic: two log lines, pretty-printed to ~11 lines of JSON source. The old
+    # `raw.splitlines()` reported 11.
+    TWO_LINES = json.dumps({
+        "app": "cslSmsDeli",
+        "file": "otx_trace.log",
+        "line_count": 2,
+        "lines": [
+            "2026-07-30 03:15:01 ERROR SmsDeliveryException failed",
+            "2026-07-30 03:15:02 ERROR TimeoutException gave up",
+        ],
+    }, indent=2)
+    # One directory (the app) and one file beside it. The old regex split produced seven "apps":
+    # README.txt, cslSmsDeli, dir, entries, entry_type, file, name.
+    APP_LISTING = json.dumps({"entries": [
+        {"name": "cslSmsDeli", "entry_type": "dir"},
+        {"name": "README.txt", "entry_type": "file"},
+    ]})
+
+    def test_a_structured_two_line_response_counts_two_lines_not_eleven(self):
+        self.assertGreater(len(self.TWO_LINES.splitlines()), 2)      # the trap is really there
+        lines, reported, error = inv.extract_log_lines(self.TWO_LINES)
+        self.assertEqual(error, "")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(reported, 2)
+        self.assertNotIn("line_count", " ".join(lines))
+
+    def test_line_objects_are_read_by_their_text_field(self):
+        body = json.dumps({"lines": [{"line": "ERROR one", "ts": 1}, {"line": "ERROR two", "ts": 2}]})
+        lines, _reported, error = inv.extract_log_lines(body)
+        self.assertEqual(lines, ["ERROR one", "ERROR two"])
+        self.assertEqual(error, "")
+
+    def test_plain_log_text_still_takes_the_legacy_split(self):
+        lines, reported, error = inv.extract_log_lines(DIRTY_LOG)
+        self.assertEqual(len(lines), 6)
+        self.assertIsNone(reported)
+        self.assertEqual(error, "")
+
+    def test_an_unreadable_json_body_fails_closed_rather_than_being_split(self):
+        """The whole point: an unknown shape must produce NOTHING, and say what it looked for."""
+        for body in (json.dumps({"result": {"payload": "x"}}),
+                     json.dumps({"lines": {"not": "a list"}}),
+                     json.dumps([{"no_text_field": 1}])):
+            lines, _reported, error = inv.extract_log_lines(body)
+            self.assertIsNone(lines, body)
+            self.assertIn("mcp_tools.json", error)
+
+    def test_structured_list_apps_accepts_only_directory_names(self):
+        names, note, error = inv.extract_app_names(self.APP_LISTING)
+        self.assertEqual(error, "")
+        self.assertEqual(names, ["cslSmsDeli"])
+        for token in ("README.txt", "dir", "entries", "entry_type", "file", "name"):
+            self.assertNotIn(token, names, token)
+        self.assertIn("files are not apps", note)
+
+    def test_a_legacy_list_of_strings_is_still_accepted(self):
+        names, _note, error = inv.extract_app_names('["cslSmsDeli", "otherApp"]')
+        self.assertEqual(names, ["cslSmsDeli", "otherApp"])
+        self.assertEqual(error, "")
+
+    def test_entries_without_a_kind_field_are_accepted_but_said_so(self):
+        """Requiring a field no server has been observed to send would refuse every real app —
+        its own silent outage. Accepting them is fine; leaving it unsaid is not."""
+        names, note, error = inv.extract_app_names(json.dumps({"apps": [{"name": "cslSmsDeli"}]}))
+        self.assertEqual((names, error), (["cslSmsDeli"], ""))
+        self.assertIn("no entry-type field", note)
+
+    def test_an_unreadable_app_listing_yields_no_names_rather_than_json_tokens(self):
+        for body in (json.dumps({"payload": {"deep": ["cslSmsDeli"]}}),
+                     json.dumps({"entries": "cslSmsDeli"}),
+                     json.dumps([{"nope": 1}])):
+            names, _note, error = inv.extract_app_names(body)
+            self.assertIsNone(names, body)
+            self.assertIn("mcp_tools.json", error)
+
+    def test_structured_content_wins_over_the_text_block(self):
+        """`structuredContent` is the server's own typed answer; mcp_client already carries it."""
+        lines, _reported, _error = inv.extract_log_lines(
+            "ignored text", structured={"lines": ["only real line"]})
+        self.assertEqual(lines, ["only real line"])
+
+    def test_search_files_does_not_fall_back_to_regex_on_a_json_body(self):
+        """A JSON body whose shape we do not recognise must not be mined for `.log` substrings."""
+        self.assertEqual(
+            inv.select_log_files(json.dumps({"error": "otx_trace.log is not readable"})), [])
+
+    def test_the_response_shape_is_overridable_from_the_intranet_config(self):
+        """The field names are THEIR environment, so fixing one must be a config edit on the box —
+        not a push from outside. Dotted paths so a nested body needs no code change either."""
+        with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.read": {"response": {"lines": "data.rows", "line_text": "msg"}}}):
+            lines, _reported, error = inv.extract_log_lines(
+                json.dumps({"data": {"rows": [{"msg": "ERROR one"}]}}))
+        self.assertEqual((lines, error), (["ERROR one"], ""))
+
+
+class StructuredResponseInvestigationTests(InvestigateTests):
+    """The same three defects, end to end through `investigate` rather than the parsers alone."""
+
+    def _calls(self, list_apps, search_files, read):
+        def _fake_call(operation, args=None, **_kw):
+            self.calls.append((operation, dict(args or {})))
+            if operation == "log.list_apps":
+                return {"ok": True, "text": list_apps}
+            if operation == "log.search_files":
+                return {"ok": True, "text": search_files}
+            return {"ok": True, "text": read}
+        return mock.patch.object(mcp_client, "call", _fake_call)
+
+    def test_a_structured_read_reports_the_real_line_count_in_the_packet(self):
+        with self._calls(StructuredResponseTests.APP_LISTING,
+                         json.dumps(["otx_trace.log"]),
+                         StructuredResponseTests.TWO_LINES):
+            packet = inv.investigate(ALERT)
+        self.assertTrue(packet["evidence"])
+        self.assertEqual(packet["evidence"][0]["lines_seen"], 2)
+        self.assertIn("SmsDeliveryException", packet["evidence"][0]["exception_classes"])
+        # And none of the JSON scaffolding became an excerpt.
+        self.assertNotIn("line_count", json.dumps(packet["evidence"][0]))
+
+    def test_a_structured_app_listing_only_verifies_the_directory_entry(self):
+        with self._calls(StructuredResponseTests.APP_LISTING,
+                         json.dumps(["otx_trace.log"]),
+                         StructuredResponseTests.TWO_LINES):
+            packet = inv.investigate(ALERT)
+        self.assertTrue(packet["queries_executed"])
+        self.assertEqual({q["app"] for q in packet["queries_executed"]}, {"cslSmsDeli"})
+
+    def test_an_unreadable_read_response_is_not_reported_as_nothing_found(self):
+        """The query SUCCEEDED. Calling our own parse failure 'no matching lines' is the same
+        family of lie as reporting a tool error as evidence."""
+        with self._calls(StructuredResponseTests.APP_LISTING,
+                         json.dumps(["otx_trace.log"]),
+                         json.dumps({"unknown_shape": {"x": 1}})):
+            events = list(inv.investigate_events(ALERT))
+        packet = events[-1]["packet"]
+        self.assertEqual(packet["evidence"], [])
+        joined = " ".join(packet["not_investigated"])
+        self.assertIn("The query SUCCEEDED", joined)
+        self.assertIn("do not report it as 'nothing found'", joined)
+        self.assertIn("query_unreadable", [e.get("step") for e in events])
+
+    def test_an_unreadable_app_listing_stops_that_source_instead_of_guessing(self):
+        with self._calls(json.dumps({"payload": ["cslSmsDeli"]}),
+                         json.dumps(["otx_trace.log"]),
+                         DIRTY_LOG):
+            packet = inv.investigate(ALERT)
+        self.assertEqual(packet["evidence"], [])
+        self.assertEqual([op for op, _ in self.calls if op == "log.read"], [])
+        self.assertIn("no recognised entries field", " ".join(packet["not_investigated"]))
+
+
+class MissingTimezoneIsFailClosedTests(unittest.TestCase):
+    """Reported by the intranet 2026-07-31. `plan()` recorded the refusal and then ran anyway.
+
+    The real read tool backtracks from an ALERT TIME. Without a zone there is no honest query to
+    send — and an untimed sweep that finds nothing is indistinguishable from a healthy service.
+
+    Borrows `InvestigateTests`' fixtures without inheriting its tests: this class changes the alert
+    the fixture parses, so re-running the happy-path suite under it would only assert that a
+    deliberately unrunnable plan does not run.
+    """
+
+    tearDown = InvestigateTests.tearDown
+
+    def setUp(self):
+        InvestigateTests.setUp(self)
+        # Same alert, but the parser finds a time with no zone — the ambiguous 03:15 case.
+        self._parse.stop()
+        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            "identified": True,
+            "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
+            "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
+            "times": [{"text": "03:15", "timezone": "", "ambiguous": True}]})
+        self._parse.start()
+
+    def test_the_plan_is_not_runnable_without_a_timezone(self):
+        out = inv.plan(ALERT)
+        self.assertFalse(out["ok"])
+        self.assertIsNone(out["window"])
+        self.assertTrue(out["targets"])            # the service WAS identified; that is not enough
+        self.assertIn("BLOCKING", " ".join(out["refusals"]))
+
+    def test_a_missing_timezone_makes_zero_mcp_calls(self):
+        """The load-bearing assertion: not 'fewer calls', none."""
+        packet = inv.investigate(ALERT)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(packet["evidence"], [])
+        self.assertFalse(packet["contains_production_data"])
+        self.assertIn("NOTHING was queried", " ".join(packet["not_investigated"]))
+
+    def test_the_refusal_names_the_timezone_as_the_blocker_not_the_service(self):
+        """"we could not identify the service" would send the user to answer the wrong question."""
+        step = next(e for e in inv.investigate_events(ALERT) if e.get("step") == "refused")
+        self.assertIn("缺时区", step["label"])
+
+    def test_supplying_the_timezone_makes_the_same_alert_runnable(self):
+        packet = inv.investigate(ALERT, timezone="Asia/Hong_Kong")
+        self.assertTrue(packet["queries_executed"])
+        self.assertEqual(packet["plan"]["window"]["timezone"], "Asia/Hong_Kong")
+
+    def test_an_alert_with_its_own_zone_is_unaffected(self):
+        self._parse.stop()
+        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            "identified": True,
+            "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
+            "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
+            "times": [{"text": "03:15 HKT", "timezone": "Asia/Hong_Kong"}]})
+        self._parse.start()
+        self.assertTrue(inv.investigate(ALERT)["queries_executed"])
+
+
 class ToolSurfaceTests(unittest.TestCase):
     def test_the_investigator_is_charged_to_the_subagent_lane(self):
         from webapp import tools

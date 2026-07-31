@@ -46,9 +46,14 @@ Everything in the plan fails closed:
   *candidate*, never an answer.
 * A time window is never invented. Three timezones coexist (CloudWatch UTC / LogDream
   Asia/Hong_Kong / servers GMT); a helpfully-defaulted window returns nothing and reads as "no
-  anomaly", which is the worst possible failure for this feature.
+  anomaly", which is the worst possible failure for this feature. Without one the plan is NOT
+  runnable and zero calls are made — see `plan()`.
+* A structured response is read structurally. Their bodies are JSON; reading JSON as text is how a
+  2-line response was reported as 11 lines and how `entries`/`entry_type` became "app names"
+  (intranet, 2026-07-31). See the response-shape section below.
 """
 import hashlib
+import json
 import os
 import re
 
@@ -83,6 +88,225 @@ def log_sources():
         if names:
             return tuple(names)
     return DEFAULT_LOG_SOURCES
+
+
+# ---- reading THEIR response bodies -----------------------------------------------------------
+# Three parsers were wrong in the same way (intranet, 2026-07-31): each treated a structured JSON
+# body as if it were text. `log.read` split the JSON source and reported 11 lines for a 2-line
+# response; `log.list_apps` split the whole body on punctuation, so `entries`, `entry_type`, `name`
+# and a `README.txt` sitting beside the app all became "app names".
+#
+# The rule now, the same seam the argument names already follow:
+#
+#   * a body that parses as JSON is read STRUCTURALLY and never with a regex;
+#   * which fields hold the data is declared by the intranet in `config/mcp_tools.json` under the
+#     operation's `response` key — the shapes below are only the fallback, so a field rename is a
+#     config edit on the box, not an external push;
+#   * a JSON body no declared field fits FAILS CLOSED — no lines, no app names, and a stated reason
+#     naming what was looked for. The alternative is the bug that was found: JSON metadata reported
+#     as production evidence, which is worse than no answer;
+#   * only a body that is not JSON at all takes the legacy text path.
+#
+# A value may be a dotted path (`data.entries`) so a nested body needs no code change either.
+RESPONSE_SHAPES = {
+    "log.read": {
+        "lines": ("lines", "log_lines", "records", "entries", "results", "items", "matches", "data"),
+        "line_text": ("line", "text", "message", "content", "log", "raw"),
+        # Their own count, reported next to ours so a disagreement is visible rather than assumed.
+        "count": ("line_count", "total_lines", "matched_lines", "total", "count"),
+    },
+    "log.list_apps": {
+        "entries": ("entries", "apps", "applications", "items", "results", "data"),
+        "name": ("name", "app", "app_name"),
+        # An app is a DIRECTORY on the log host; a file beside it is not an app. Enforced whenever
+        # the batch actually carries a kind field — see `extract_app_names` for why not always.
+        "kind": ("entry_type", "type", "kind"),
+        "kind_value": "dir",
+    },
+    "log.search_files": {
+        "entries": ("files", "entries", "items", "results", "matches", "data"),
+        "name": ("file", "file_name", "filename", "name", "path"),
+        "kind": ("entry_type", "type", "kind"),
+        # Inverted here: exclude what declares itself a directory, rather than require "file". The
+        # shapes already verified on the box carry no kind field at all, and a `.log` name is
+        # required regardless, so demanding a field nobody has observed would refuse real answers.
+        "kind_exclude": ("dir", "directory", "folder"),
+    },
+}
+
+
+def response_shape(operation):
+    """Field names for one operation's response body: intranet config first, built-in as fallback."""
+    shape = dict(RESPONSE_SHAPES.get(operation) or {})
+    declared = (mcp_registry.operations().get(operation) or {}).get("response")
+    if not isinstance(declared, dict):
+        return shape
+    for key, value in declared.items():
+        if str(key).startswith("_"):
+            continue
+        if key == "kind_value":
+            shape[key] = value if isinstance(value, str) else None
+        elif value is None:
+            shape[key] = ()             # "this server has no such field" — an explicit answer
+        elif isinstance(value, str):
+            shape[key] = (value,)
+        elif isinstance(value, (list, tuple)):
+            shape[key] = tuple(str(v) for v in value)
+    return shape
+
+
+def _decode(text, structured=None):
+    """The response body as data, or None when it is not JSON at all.
+
+    `structuredContent` is the server's own typed answer and wins when present. A bare JSON scalar
+    counts as text, not structure: a log body of `null` or `42` must not be mistaken for a shape.
+    """
+    if isinstance(structured, (dict, list)):
+        return structured
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return body if isinstance(body, (dict, list)) else None
+
+
+def _dig(body, path):
+    """`data.entries` -> body["data"]["entries"], or None. Never walks looking for a match."""
+    node = body
+    for part in str(path).split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _rows(body, keys):
+    """The declared list inside a JSON body, or None when no declared field holds one.
+
+    None is not "empty". It means the body had a shape we do not know how to read, which must fail
+    closed — scraping tokens out of it is exactly the defect this replaces.
+    """
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in keys:
+            value = _dig(body, key)
+            if isinstance(value, list):
+                return value
+    return None
+
+
+def _shape_error(operation, field, keys, extra=""):
+    return (f"{operation} returned a JSON body with no recognised {field} field (looked for: "
+            f"{', '.join(keys) or 'nothing declared'}). {extra}Nothing was taken from it — reading "
+            f"a structured body as text reports JSON metadata as evidence. Declare the real field "
+            f"under operations['{operation}'].response.{field} in the intranet's mcp_tools.json.")
+
+
+def extract_log_lines(text, structured=None, operation="log.read"):
+    """A log response -> (lines, reported_count, error). `lines is None` means fail closed.
+
+    `reported_count` is the server's own count when it states one, kept so "they said 200, we can
+    read 50" is visible instead of silently becoming 50.
+    """
+    shape = response_shape(operation)
+    body = _decode(text, structured)
+    if body is None:
+        # Plain log text: the legacy shape, and the only case where splitting is correct.
+        return [line for line in (text or "").splitlines() if line.strip()], None, ""
+    rows = _rows(body, shape.get("lines") or ())
+    if rows is None:
+        return None, None, _shape_error(operation, "lines", shape.get("lines") or ())
+    reported = None
+    if isinstance(body, dict):
+        for key in shape.get("count") or ():
+            value = _dig(body, key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                reported = value
+                break
+    text_keys = shape.get("line_text") or ()
+    lines = []
+    for row in rows:
+        if isinstance(row, str):
+            if row.strip():
+                lines.append(row)
+            continue
+        if isinstance(row, dict):
+            value = next((row[k] for k in text_keys if isinstance(row.get(k), str)), None)
+            if value is None:
+                return None, None, _shape_error(
+                    operation, "line_text", text_keys,
+                    extra="The line container was found but its entries carry no known text field. ")
+            if value.strip():
+                lines.append(value)
+            continue
+        return None, None, _shape_error(
+            operation, "lines", shape.get("lines") or (),
+            extra=f"An entry was a {type(row).__name__}, not a line. ")
+    return lines, reported, ""
+
+
+def extract_app_names(text, structured=None, operation="log.list_apps"):
+    """A `log.list_apps` response -> (names, note, error). `names is None` means fail closed.
+
+    This list is a VERIFICATION set: a candidate app name is queried only if it appears here. So
+    over-inclusion is the dangerous direction — a fabricated entry lets an unverified name through,
+    the query comes back empty, and empty reads as "no problem". Hence directories only, and hence
+    failing closed rather than harvesting whatever tokens the body happens to contain.
+
+    The kind filter is enforced whenever the batch carries a kind field at all. Requiring it
+    unconditionally would refuse a server that simply does not send one — that is a shape we have
+    never observed, and refusing every app over it is its own silent outage.
+    """
+    shape = response_shape(operation)
+    body = _decode(text, structured)
+    if body is None:
+        names = {token.strip(" \t\"',[]{}:") for token in re.split(r"[\s,]+", text or "")}
+        return sorted(n for n in names if n), "plain-text listing (legacy shape)", ""
+    rows = _rows(body, shape.get("entries") or ())
+    if rows is None:
+        return None, "", _shape_error(operation, "entries", shape.get("entries") or ())
+    kind_keys = shape.get("kind") or ()
+    want = shape.get("kind_value")
+    name_keys = shape.get("name") or ()
+    kinds = [next((str(row[k]) for k in kind_keys if isinstance(row.get(k), str)), None)
+             for row in rows if isinstance(row, dict)]
+    enforce = bool(want) and any(kind is not None for kind in kinds)
+    names, filtered, unnamed = [], 0, 0
+    for row in rows:
+        if isinstance(row, str):
+            if row.strip():
+                names.append(row.strip())        # legacy list-of-strings, still accepted
+            continue
+        if not isinstance(row, dict):
+            return None, "", _shape_error(
+                operation, "entries", shape.get("entries") or (),
+                extra=f"An entry was a {type(row).__name__}. ")
+        if enforce:
+            kind = next((str(row[k]) for k in kind_keys if isinstance(row.get(k), str)), None)
+            if kind != want:
+                filtered += 1                    # a file, or something that is not an app
+                continue
+        name = next((row[k] for k in name_keys if isinstance(row.get(k), str)), "")
+        if name.strip():
+            names.append(name.strip())
+        else:
+            unnamed += 1
+    if unnamed and not names:
+        # Entries were present and NONE carried a name we recognise. Returning [] here would say
+        # "this source has no apps", which is a claim about their environment we have no basis for.
+        return None, "", _shape_error(
+            operation, "name", name_keys,
+            extra=f"{unnamed} entry/entries were found but none carried a known name field. ")
+    note = ""
+    if filtered:
+        note = f"{filtered} non-{want} entry/entries ignored (files are not apps)"
+    elif not enforce and any(isinstance(row, dict) for row in rows):
+        note = ("no entry-type field was present, so files could not be told apart from apps; "
+                "every named entry was accepted")
+    if unnamed:
+        note = (note + "; " if note else "") + f"{unnamed} entry/entries had no readable name"
+    return sorted(set(names)), note, ""
 
 
 _MAX_EXCERPTS = 5
@@ -371,25 +595,35 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None):
                          "source": "caller-supplied timezone (the alert's own time was ambiguous)"}
     else:
         out["refusals"].append(
-            "the alert carries no time with an explicit timezone, so no window was built. "
-            "CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong and the servers are GMT — a "
-            "guessed window returns nothing and reads as 'no anomaly'. Ask which zone the alert "
-            "timestamp is in, or pass timezone= explicitly.")
+            "BLOCKING: the alert carries no time with an explicit timezone, so no window could be "
+            "built and NOTHING was queried. CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong "
+            "and the servers are GMT — the same clock time is three moments 8 hours apart, and a "
+            "read against the wrong one returns nothing, which reads as 'no anomaly'. Ask the user "
+            "which zone the alert timestamp is in and pass timezone= explicitly; do not guess.")
 
-    out["ok"] = bool(out["targets"] or parsed["use_cases"])
+    # Runnable, not merely "we understood the alert". Identifying the service is necessary and not
+    # sufficient: this tool's real parameter is an ALERT TIME it backtracks from, so without a
+    # window there is no honest query to send. The plan used to stay ok=True here and the
+    # investigation went ahead untimed (intranet, 2026-07-31) — the refusal was reported while the
+    # calls were made anyway, which is the worst of both: production reads, and an answer nobody
+    # can scope.
+    out["ok"] = bool(out["targets"] or parsed["use_cases"]) and bool(out["window"])
     return out
 
 
 # ---- the investigation ----------------------------------------------------------------------
 
-def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", window=None):
-    """One log response -> an aggregate. `raw` is local and stays local.
+def _evidence_from_lines(lines, keyword, source, app, log_file, counts, owner="", window=None,
+                         reported_count=None):
+    """The log LINES -> an aggregate. They are local and stay local.
 
-    When raw retention is on (UAT internal test only) the original lines are handed to
+    Takes lines rather than a response body on purpose: extracting them is now shape-dependent (see
+    `extract_log_lines`), and this function must never be reachable with a JSON blob that nobody
+    decoded. When raw retention is on (UAT internal test only) the originals are handed to
     `incident_raw_store` and the evidence carries an opaque `ref` for the browser to fetch. The raw
     text still does not travel in this dict, so the model's view is unchanged either way.
     """
-    lines = [line for line in (raw or "").splitlines() if line.strip()]
+    lines = [line for line in (lines or []) if str(line).strip()]
     classes = {}
     for line in lines:
         for match in _EXCEPTION_CLASS.finditer(line):
@@ -416,6 +650,15 @@ def _evidence_from_text(raw, keyword, source, app, log_file, counts, owner="", w
         "matched_keyword": keyword,
         "lines_seen": len(lines),
         "lines_returned": len(excerpts),
+        # Their own count when the response states one. Kept beside ours instead of replacing it:
+        # a disagreement means either the response was truncated or we are reading the wrong field,
+        # and both are things to say out loud rather than resolve by picking a number.
+        **({"lines_reported_by_server": reported_count,
+            "line_count_note": (
+                "the server reported %d matching line(s) and this packet aggregates %d — the "
+                "response was truncated, or the declared line field is wrong. Say the smaller "
+                "number is what was actually read." % (reported_count, len(lines)))}
+           if isinstance(reported_count, int) and reported_count != len(lines) else {}),
         "exception_classes": [name for name, _ in
                               sorted(classes.items(), key=lambda kv: (-kv[1], kv[0]))][:6],
         "excerpts": excerpts,
@@ -478,39 +721,36 @@ def _payload(operation, wanted):
             if value not in (None, "") and name in usable and arg_map.get(name) not in pinned}
 
 
-def select_log_files(text, alert_date="", limit=None):
+def select_log_files(text, alert_date="", limit=None, structured=None):
     """Parse a `log.search_files` response into a bounded, ranked list of real file names.
 
     Returns [] when nothing parses. That is the whole point: an empty candidate list must end in
     "we could not identify a log file", never in a guessed name. Hard-coding `otx_trace.log` was
     exactly that guess, and it also mislabelled evidence when the real read was something else.
+
+    Same rule as the other two parsers: a JSON body is read structurally and the regex fallback is
+    NOT reached from it, so an unrecognised shape yields nothing instead of arbitrary tokens.
     """
     limit = _MAX_FILES_PER_SOURCE if limit is None else limit
+    shape = response_shape("log.search_files")
+    body = _decode(text, structured)
     names = []
-    try:
-        import json as _json
-        parsed = _json.loads(text)
-    except (ValueError, TypeError):
-        parsed = None
-
-    def _harvest(node):
-        if isinstance(node, str):
-            names.append(node)
-        elif isinstance(node, dict):
-            for key in ("file", "file_name", "filename", "name", "path"):
-                if isinstance(node.get(key), str):
-                    names.append(node[key])
-                    return
-            for value in node.values():
-                _harvest(value)
-        elif isinstance(node, list):
-            for item in node:
-                _harvest(item)
-
-    if parsed is not None:
-        _harvest(parsed)
-    if not names:
+    if body is None:
         names = _FILE_TOKEN.findall(text or "")
+    else:
+        exclude = {str(v).lower() for v in shape.get("kind_exclude") or ()}
+        for row in _rows(body, shape.get("entries") or ()) or ():
+            if isinstance(row, str):
+                names.append(row)
+            elif isinstance(row, dict):
+                kind = next((str(row[k]).lower() for k in shape.get("kind") or ()
+                             if isinstance(row.get(k), str)), "")
+                if kind and kind in exclude:
+                    continue                    # a directory is not a file to read
+                value = next((row[k] for k in shape.get("name") or ()
+                              if isinstance(row.get(k), str)), "")
+                if value:
+                    names.append(value)
 
     cleaned, seen = [], set()
     for name in names:
@@ -618,9 +858,15 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         "caveats": [],
     }
     if not query_plan.get("ok"):
+        # Not runnable. Zero MCP calls from here — the refusals ARE the answer, and every one of
+        # them is a question for the user rather than something to work around.
         packet["not_investigated"] = list(query_plan.get("refusals") or [])
         packet["caveats"].append("nothing was queried; see not_investigated")
-        yield _step("refused", "拒绝调查：告警里读不出服务或用例，不猜", reasons=packet["not_investigated"])
+        yield _step("refused",
+                    "拒绝调查：缺时区，无法确定时间窗，一条日志都没查（请告知告警时间是哪个时区）"
+                    if query_plan.get("targets") and not query_plan.get("window")
+                    else "拒绝调查：告警里读不出服务或用例，不猜",
+                    reasons=packet["not_investigated"])
         yield {"type": "result", "packet": _finish(packet, counts)}
         return
 
@@ -666,11 +912,25 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         server="logdream", operation="log.list_apps", source=source,
                         rejected=True, elapsed_ms=listing.get("elapsed_ms"))
             continue
-        found = {token for token in re.split(r"[\s,\[\]\"'{}:]+", text) if token}
-        apps_by_source[source] = found
-        yield _step("apps_done", "%s 上有 %d 个应用" % (source, len(found)),
+        names, note, error = extract_app_names(text, listing.get("structured"))
+        if names is None:
+            # The listing succeeded but we cannot read its shape. Treated exactly like a source that
+            # refused: no app on this source is verified, so nothing on it is queried. The old code
+            # split the body on punctuation here and turned `entries`/`entry_type`/`README.txt` into
+            # app names — a fabricated app verifies a candidate that does not exist, the read comes
+            # back empty, and empty reads as "no problem".
+            packet["not_investigated"].append(f"source {source!r}: {error} Nothing was searched there.")
+            yield _step("apps_failed", "%s 的应用清单格式看不懂，该 source 不查（不猜应用名）" % source,
+                        server="logdream", operation="log.list_apps", source=source,
+                        shape_error=True, elapsed_ms=listing.get("elapsed_ms"))
+            continue
+        apps_by_source[source] = set(names)
+        if note:
+            packet["not_investigated"].append(f"source {source!r} app listing: {note}.")
+        yield _step("apps_done", "%s 上有 %d 个应用" % (source, len(names)),
                     server="logdream", operation="log.list_apps", source=source,
-                    app_count=len(found), elapsed_ms=listing.get("elapsed_ms"))
+                    app_count=len(names), note=note or None,
+                    elapsed_ms=listing.get("elapsed_ms"))
 
     if not apps_by_source:
         packet["caveats"].append(
@@ -757,7 +1017,8 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, rejected=True,
                             elapsed_ms=found.get("elapsed_ms"))
                 continue
-            picked = select_log_files(text, alert_date=alert_date)
+            picked = select_log_files(text, alert_date=alert_date,
+                                      structured=found.get("structured"))
             if not picked:
                 packet["not_investigated"].append(
                     f"{match}/{source}: the file search returned no recognisable log file, so "
@@ -882,10 +1143,34 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, keyword=term, file=log_file,
                             elapsed_ms=out.get("elapsed_ms"))
                 continue
+            # Structured body -> the actual log-line fields. Splitting the JSON source counted 11
+            # "lines" for a 2-line response (intranet, 2026-07-31), and every number downstream —
+            # lines_seen, exception classes, excerpts, the retained raw — was computed off that.
+            lines, reported, shape_error = extract_log_lines(text, out.get("structured"))
+            if lines is None:
+                packet["not_investigated"].append(
+                    f"{match}/{source}:{log_file} keyword {term!r}: {shape_error} The query "
+                    f"SUCCEEDED — this is our parser, not an empty log, so do not report it as "
+                    f"'nothing found'.")
+                yield _step("query_unreadable",
+                            "%s / %s / %s：返回体格式看不懂，不作为证据（查询本身是成功的）" % (
+                                match, source, log_file),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term, file=log_file,
+                            shape_error=True, elapsed_ms=out.get("elapsed_ms"))
+                continue
+            if not lines:
+                yield _step("query_empty", "%s / %s / %s：%s 无匹配" % (
+                    match, source, log_file, term),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term, file=log_file,
+                            elapsed_ms=out.get("elapsed_ms"))
+                continue
             # The file ACTUALLY read, not a hard-coded name: mislabelling `exception.log` as
             # `otx_trace.log` would misdirect whoever goes to check it.
-            item = _evidence_from_text(text, term, source, match, log_file, counts,
-                                       owner=owner, window=query_plan.get("window"))
+            item = _evidence_from_lines(lines, term, source, match, log_file, counts,
+                                        owner=owner, window=query_plan.get("window"),
+                                        reported_count=reported)
             packet["evidence"].append(item)
             packet["contains_production_data"] = True
             # Counts and exception classes only — never a line, not even a redacted one. Excerpts

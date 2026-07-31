@@ -2064,14 +2064,18 @@ function showLiveTools(container, trace, completed = false) {
 const SUBAGENT_WARN = new Set(['budget_spent', 'query_failed', 'app_unresolved', 'query_empty',
                                'no_files']);
 // `query_rejected` / `apps_failed` mean the tool RAN and refused — a different escalation from a
-// server that did not answer, and emphatically not a finding.
-const SUBAGENT_STOP = new Set(['refused', 'disabled', 'apps_failed', 'unwired', 'query_rejected']);
+// server that did not answer, and emphatically not a finding. `query_unreadable` is a third thing
+// again: the call SUCCEEDED and our own parser could not read the response shape. It escalates to
+// us (a config/mcp_tools.json `response` mapping), never to the log team, and it must never look
+// like an empty result.
+const SUBAGENT_STOP = new Set(['refused', 'disabled', 'apps_failed', 'unwired', 'query_rejected',
+                               'query_unreadable']);
 const SUBAGENT_MARKS = {
   plan: '◇', plan_done: '◆', apps: '◇', apps_done: '◆', app_resolved: '→',
   app_unresolved: '⚠', search_files: '◇', files_found: '→', no_files: '⚠',
   query: '·', query_empty: '○', query_failed: '⚠', evidence: '●',
   query_rejected: '✖', budget_spent: '⚠', refused: '■', disabled: '■', apps_failed: '■',
-  unwired: '■', summary: '✓'
+  unwired: '■', query_unreadable: '✖', summary: '✓'
 };
 
 function showSubagent(container, steps, completed = false) {

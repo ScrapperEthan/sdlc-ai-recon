@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (agent, config, session_store, session_title, llm_routes, llm_credentials, llm,
-                mcp_client, incident_raw_store)
+                mcp_client, mcp_console, incident_raw_store)
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -365,6 +365,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, mcp_client.status(probe_servers=want_probe))
             except Exception as e:  # noqa: BLE001 -- a status page must not 500 on a wiring problem
                 self._send_json(200, {"error": str(e), "calling_enabled": bool(config.MCP_ENABLED)})
+        elif path == "/api/mcp/catalog":
+            # What the MCP panel renders: servers, operations, purposes, argument wiring. Reads the
+            # config only -- no probe, no socket -- so it answers identically with calling disabled,
+            # which is the point of a panel you can open before anything is turned on.
+            try:
+                self._send_json(200, mcp_console.catalog())
+            except Exception as e:  # noqa: BLE001 -- same reason as /api/mcp/status
+                self._send_json(200, {"error": str(e), "servers": {}, "operations": {},
+                                      "calling_enabled": bool(config.MCP_ENABLED)})
         elif path == "/health":
             # One unified health check for the single entry: this app + the retrieval upstream.
             self._send_json(200, self._unified_health())
@@ -389,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
         self._resolve_uid()
         path = urlparse(self.path).path
         allowed = ["/api/chat", "/api/chat/stream", "/api/sessions", "/api/feedback",
-                   "/api/incident/raw/purge",
+                   "/api/incident/raw/purge", "/api/mcp/call",
                    "/api/llm/register", "/api/llm/select-model", "/api/llm/tunnel-models"]
         if config.LLM_TOKEN_MODE_ENABLED:
             # Internal beta only (see docs/specs/copilot-token-direct-mode.md) -- these two routes
@@ -409,6 +418,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"purged": removed,
                                       "scope": "all" if req.get("all") else "this session",
                                       "retention": incident_raw_store.status()})
+            elif path == "/api/mcp/call":
+                # Hand invocation of ONE allow-listed abstract operation. The body carries an
+                # operation name, never a tool name -- mcp_console has no parameter that could
+                # express one -- so the deny baseline and the allow-list apply unchanged.
+                #
+                # Owner-scoped for the same reason /api/incident/raw is: any retained raw text lands
+                # under this browser's id, and another tester's browser must not be able to read it.
+                try:
+                    self._send_json(200, mcp_console.run(
+                        req.get("operation"),
+                        req.get("args") if isinstance(req.get("args"), dict) else {},
+                        owner=self._uid))
+                except mcp_console.ConsoleDisabled as e:
+                    self._send_json(403, {"ok": False, "called": False, "error": str(e)})
+                except Exception as e:  # noqa: BLE001 -- a console reports failures, it doesn't 500
+                    self._send_json(200, {"ok": False, "called": False, "error": str(e)})
+                return
             elif path == "/api/sessions":
                 session = session_store.create_session(req.get("title") or "New session", self._uid)
                 self._send_json(201, session)

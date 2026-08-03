@@ -190,6 +190,21 @@ MCP_PROTOCOL_SSE = os.environ.get("SDLC_MCP_PROTOCOL_SSE", "2024-11-05")
 # allow-listed MCP operation is a read.
 MCP_RETRY_ATTEMPTS = int(os.environ.get("SDLC_MCP_RETRY_ATTEMPTS", "2"))
 MCP_RETRY_DELAY = float(os.environ.get("SDLC_MCP_RETRY_DELAY", "3"))
+# The browser-side MCP console: listing every declared operation is always allowed (it reads config,
+# opens nothing), but INVOKING one by hand is a second way to reach production and gets its own
+# switch. On by default *given* SDLC_MCP_ENABLED, because it grants no capability the chat path does
+# not already have — the investigator calls the very same allow-listed reads — and because a console
+# nobody can turn on is a console nobody verifies. Set to "0" to leave the panel read-only.
+#
+# What it deliberately does NOT relax: the operation allow-list, the deny baseline, and the exit
+# gate. A console response is redacted and exit-scanned exactly like an evidence packet, so the
+# difference between this and the chat path is directness, not permission.
+MCP_CONSOLE = os.environ.get("SDLC_MCP_CONSOLE", "1") not in ("", "0", "false", "False")
+# Ceiling on what one console call hands back to the browser. Their side already has
+# SDLC_MCP_MAX_BYTES at the socket; this is the render budget — a 4 MB log read must not become a
+# 4 MB DOM. Truncation is reported, and the untruncated text is what goes to the raw store (subject
+# to its own line cap) when retention is on, so nothing is lost that retention would have kept.
+MCP_CONSOLE_MAX_CHARS = int(os.environ.get("SDLC_MCP_CONSOLE_MAX_CHARS", "20000"))
 
 # ---- incident investigator: raw log retention (UAT internal test ONLY) ----
 # OFF by default. ON retains the raw log text an investigation read, so a devops tester can click an

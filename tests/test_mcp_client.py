@@ -85,6 +85,9 @@ class _Handler(BaseHTTPRequestHandler):
         if REPLIES.get("oversize") and method == "tools/call":
             blob = json.dumps({"jsonrpc": "2.0", "id": message["id"],
                                "result": {"content": [{"type": "text", "text": "x" * 5000}]}})
+        if REPLIES.get("not_json") and method == "tools/call":
+            # A proxy error page or an HTML 200 — the reply arrives, it just isn't JSON-RPC.
+            blob = "<html><body>gateway says no</body></html>"
         if as_sse:
             body = (f"event: message\ndata: {blob}\n\n").encode("utf-8")
             kind = "text/event-stream"
@@ -252,6 +255,40 @@ class StreamableHttpTests(_ServerCase):
         out = mcp_client.call("log.read", {"app": "otx", "keyword": "TIMEOUT"})
         self.assertEqual(out["params_sent"], ["app", "keyword", "source"])
         self.assertNotIn("otx", json.dumps(out["params_sent"]))
+
+    def test_no_transport_error_message_carries_the_endpoint(self):
+        """TransportError's contract, and it applies to every raise site, not just the socket ones.
+
+        The three below are raised AFTER a successful connection, and each used to interpolate the
+        endpoint into its message. That text is what lands in `not_investigated`, which is persisted
+        to chat_sessions.json and rendered in the browser — so an address kept out of git was going
+        into a screenshot instead. The server NAME is what an operator needs and is what travels.
+        """
+        host = "127.0.0.1:%d" % self.server.server_address[1]
+        cases = []
+
+        REPLIES["rpc_error"] = True
+        with self.assertRaises(mcp_client.TransportError) as caught:
+            mcp_client.call("aws.get_alarm", {"alarm_name": "a"})
+        cases.append(str(caught.exception))
+        REPLIES.clear()
+
+        REPLIES["oversize"] = True
+        with mock.patch.object(config, "MCP_MAX_RESPONSE_BYTES", 500):
+            with self.assertRaises(mcp_client.TransportError) as caught:
+                mcp_client.call("aws.get_alarm", {"alarm_name": "a"})
+        cases.append(str(caught.exception))
+        REPLIES.clear()
+
+        REPLIES["not_json"] = True
+        with self.assertRaises(mcp_client.TransportError) as caught:
+            mcp_client.call("aws.get_alarm", {"alarm_name": "a"})
+        cases.append(str(caught.exception))
+
+        for message in cases:
+            self.assertNotIn(host, message)
+            self.assertNotIn("http://", message)
+            self.assertIn("cloudwatch", message)
 
 
 class StreamableHttpOverSseTests(_ServerCase):

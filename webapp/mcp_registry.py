@@ -28,6 +28,8 @@ import os
 
 from retriever import config as retriever_config
 
+from . import config as webapp_config
+
 UNSET = "?"
 
 # The deny baseline, kept in code so that swapping the config file cannot weaken it. Mirrors
@@ -162,6 +164,140 @@ def summary(cfg=None):
         "note": ("`unwired` means config/mcp_tools.json still has \"?\" placeholders — the intranet "
                  "side fills those from a live tools/list. Nothing is guessed."),
     }
+
+
+# ---- the human-readable catalog -------------------------------------------------------------
+# What each abstract operation is FOR, in our words. This describes why THIS side calls it, which is
+# ours to state; it is not a description of their tool, which is theirs. Their own `description`
+# comes off a live `tools/list` and is carried separately and labelled as remote-supplied, because a
+# remote server's prose is data we render, never documentation we vouch for and never text that
+# reaches a model prompt.
+#
+# `config/mcp_tools.json` may override any of these per operation via `purpose` — the same seam the
+# names, shapes and formats already go through, so the box can write a better sentence without a push.
+_PURPOSE = {
+    "log.list_apps": "列出某个 source 上有哪些 app（日志目录）。用来把 repo 名对到真实的 app 名 —— "
+                     "两者 0% 相同，约 36% 能按规则推出来，其余必须在这里查。",
+    "log.browse": "浏览一个 app 的日志目录，看有哪些文件、多大、多新。",
+    "log.search_files": "按关键字/文件名/日期找日志文件。log.read 必须先拿到 file_name，"
+                        "所以这一步是读日志的前置，不是可选项。",
+    "log.read": "读一个日志文件的一段。整条调查链里唯一真正取到生产日志正文的一步。",
+    "log.investigate": "他们自己的综合排障接口：给症状和时间，由他们那边决定读什么。",
+    "aws.parse_alert": "把一段告警原文交给他们解析。注意：解析结果里的名字我们只做本地严格提取，"
+                       "不直接当 alarm name 用（它会把整段话当成名字）。",
+    "aws.get_alarm": "读一个告警的定义 —— 指标名、命名空间、维度、阈值、比较方式。"
+                     "指标身份只从这里读，绝不从告警名里猜。",
+    "aws.alarm_history": "一个告警的状态变迁历史：什么时候进的 ALARM，什么时候恢复。",
+    "aws.metric_window": "取告警时间窗内的指标数据点。数据点在进程内算完即弃，"
+                         "出去的只有方向/波动/与阈值的关系这类分类结果。",
+    "aws.recent_changes": "CloudTrail 最近的变更事件 —— 证据等级最高的一类（谁在事故前动了什么）。",
+    "aws.log_groups_for_resource": "一个资源对应哪些 CloudWatch 日志组。query_logs 的前置。",
+    "aws.query_logs": "在 CloudWatch 日志组里跑一条查询。返回的是生产日志正文。",
+    "aws.resource_tags": "资源上的 tag —— owner 之类的归属信息从这里来。",
+    "portal.sms_by_tracking_id": "按 tracking id 查一条短信的投递记录。最大的那个告警家族"
+                                 "（General SHP API Error）没有 alarm name 也定位不到 app，"
+                                 "这条是唯一的入口。只读。",
+    "portal.email_by_tracking_id": "按 tracking id 查一条邮件的投递记录。只读。",
+}
+
+# Whether a response is EXPECTED to carry customer-linkable payload. A DEFAULT, not a determination:
+# config may override per operation via `data_class`, and — this is the part that matters — nothing
+# about redaction depends on it. Every console response is redacted and exit-scanned regardless of
+# what this says. It only decides how loudly the panel warns, so a wrong guess here costs a warning
+# and never an exposure. Four rounds of intranet review all found the same class of defect: this side
+# asserting something about their environment. This is an assertion, so it is built to be harmless.
+PAYLOAD_OPERATIONS = frozenset({
+    "log.read", "log.investigate", "aws.query_logs",
+    "portal.sms_by_tracking_id", "portal.email_by_tracking_id",
+})
+
+_SERVER_PURPOSE = {
+    "logdream": "同事的应用日志服务：按 app / source 浏览、搜索、读取生产日志文件。",
+    "cloudwatch": "AWS 侧：告警定义与历史、指标窗口、CloudTrail 变更、日志组查询、资源 tag。",
+    "portal": "投递记录门户：按 tracking id 查单条短信/邮件的投递结果。我们只接只读查询 —— "
+              "登录和任何重发类工具永不接入。",
+}
+
+
+def _prose(value):
+    """Config `_note` fields are a string or a list of lines; render either as one string."""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value)
+    return str(value or "")
+
+
+def catalog(cfg=None):
+    """Everything the browser needs to SHOW the MCP surface — and nothing it needs to reach it.
+
+    Deliberately excludes endpoints. The addresses live in env vars precisely so they stay out of
+    git, and a panel that helpfully printed them would put them in a screenshot instead. What an
+    operator actually needs is whether an address is configured, which is a boolean.
+    """
+    cfg = cfg or load()
+    states = readiness(cfg)
+    server_specs = servers(cfg)
+
+    ops = {}
+    for name, spec in operations(cfg).items():
+        if not isinstance(spec, dict):
+            continue
+        state = states.get(name, {})
+        arg_map = _clean(spec.get("args"))
+        declared_class = spec.get("data_class")
+        ops[name] = {
+            "operation": name,
+            "server": spec.get("server") or "",
+            # Their tool name. Shown because "which of their tools is this" is the first question an
+            # operator asks, and because a stale name here is a real failure mode probe() exists for.
+            "tool": "" if spec.get("tool", UNSET) == UNSET else (spec.get("tool") or ""),
+            "state": state.get("state") or "unwired",
+            "missing": list(state.get("missing") or []),
+            "purpose": str(spec.get("purpose") or _PURPOSE.get(name) or ""),
+            "data_class": (declared_class if declared_class in ("payload", "metadata")
+                           else ("payload" if name in PAYLOAD_OPERATIONS else "metadata")),
+            # Per argument: our name, their name, and whether it can be passed yet. The console
+            # builds its form from this, so an unwired argument is a disabled field with a reason
+            # rather than a box that silently sends the wrong parameter name.
+            "args": [{"name": ours, "their_name": "" if theirs == UNSET else str(theirs),
+                      "wired": theirs != UNSET}
+                     for ours, theirs in sorted(arg_map.items())],
+            # Names only — a const is a pinned value on their side, and printing values invites
+            # someone to edit one in the panel, which is exactly what pinning them prevents.
+            "const_keys": sorted(_clean(spec.get("const"))),
+            "note": _prose(spec.get("_note")),
+            "callable": state.get("state") == "ready" or state.get("state") == "partial",
+        }
+
+    out = {
+        "servers": {},
+        "operations": ops,
+        "calling_enabled": bool(webapp_config.MCP_ENABLED),
+        "config_error": cfg.get("_load_error", ""),
+        "config_path": _config_path(),
+    }
+    for name, spec in server_specs.items():
+        members = sorted(op for op, entry in ops.items() if entry["server"] == name)
+        out["servers"][name] = {
+            "name": name,
+            "enabled": bool(spec.get("enabled")),
+            "transport": "" if spec.get("transport", UNSET) == UNSET else (spec.get("transport") or ""),
+            "endpoint_configured": bool(server_url(name, cfg)),
+            "url_env": spec.get("url_env") or "",
+            "purpose": str(spec.get("purpose") or _SERVER_PURPOSE.get(name) or ""),
+            "note": _prose(spec.get("_note")),
+            "operations": members,
+            "ready": sum(1 for op in members if ops[op]["state"] == "ready"),
+        }
+    # Operations naming a server the config never declared would otherwise vanish from the panel
+    # while still being callable-looking in the config. Surface them rather than hide them.
+    for name, entry in ops.items():
+        if entry["server"] and entry["server"] not in out["servers"]:
+            out["servers"][entry["server"]] = {
+                "name": entry["server"], "enabled": False, "transport": "",
+                "endpoint_configured": False, "url_env": "", "purpose": "",
+                "note": "declared by an operation but missing from `servers` in the config",
+                "operations": [name], "ready": 0}
+    return out
 
 
 def build_call(operation, args=None, cfg=None):

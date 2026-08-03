@@ -281,21 +281,21 @@ class _StreamableHttp:
                         continue
                     # Notifications and progress updates share the stream; only our reply has our id.
                     if isinstance(message, dict) and message.get("id") == message_id:
-                        return _rpc_result(message, f"{method} via {self.url}")
+                        return _rpc_result(message, f"{self.server} {method}")
                 raise TransportError(
-                    f"{method} via {self.url}: SSE stream ended with no reply to id {message_id}")
+                    f"{self.server} {method}: SSE stream ended with no reply to id {message_id}")
             body, truncated = _read_capped(resp)
             self.truncated = self.truncated or truncated
             if truncated:
                 raise TransportError(
-                    f"{method} via {self.url}: response exceeded SDLC_MCP_MAX_BYTES "
+                    f"{self.server} {method}: response exceeded SDLC_MCP_MAX_BYTES "
                     f"({config.MCP_MAX_RESPONSE_BYTES}) and cannot be parsed as JSON. Narrow the "
                     f"query (shorter window, fewer lines) rather than raising the cap.")
             try:
                 return _rpc_result(json.loads(body.decode("utf-8", "replace")),
-                                   f"{method} via {self.url}")
+                                   f"{self.server} {method}")
             except json.JSONDecodeError as exc:
-                raise TransportError(f"{method} via {self.url}: reply was not JSON ({exc})")
+                raise TransportError(f"{self.server} {method}: reply was not JSON ({exc})")
         finally:
             resp.close()
 
@@ -421,9 +421,9 @@ class _LegacySse:
             except json.JSONDecodeError:
                 continue
             if isinstance(message, dict) and message.get("id") == message_id:
-                return _rpc_result(message, f"{method} via {self.url}")
+                return _rpc_result(message, f"{self.server} {method}")
         raise TransportError(
-            f"{method} via {self.url}: the SSE stream closed before replying to id {message_id}")
+            f"{self.server} {method}: the SSE stream closed before replying to id {message_id}")
 
 
 def _session(server, timeout=None):
@@ -533,6 +533,29 @@ def call(operation, args=None, timeout=None):
     }
 
 
+# A remote tool description is REMOTE TEXT. It is worth showing — nobody documents their tool better
+# than they do, and the panel exists so an operator can read what a tool is — but it arrives from a
+# system we do not control, so it is bounded here and never goes anywhere near a model prompt. The
+# caller renders it escaped and labelled as theirs.
+_MAX_REMOTE_DESCRIPTION = 600
+
+
+def _tool_detail(entry):
+    """One `tools/list` entry -> what is safe and useful to show. Their text, bounded; their schema,
+    reduced to argument NAMES (a full JSON Schema is neither readable nor ours to interpret)."""
+    schema = entry.get("inputSchema") if isinstance(entry.get("inputSchema"), dict) else {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    return {
+        "name": entry.get("name") or "",
+        "description": " ".join(str(entry.get("description") or "").split())[:_MAX_REMOTE_DESCRIPTION],
+        "arg_names": sorted(str(key) for key in props),
+        "required_args": sorted(str(key) for key in required if isinstance(key, str)),
+        # Says out loud where this text came from, so the panel cannot present it as ours.
+        "source": "remote tools/list",
+    }
+
+
 def list_tools(server, timeout=None):
     """Their `tools/list` for one server, for CROSS-CHECKING only. Confers no call rights."""
     _require_enabled()
@@ -540,10 +563,14 @@ def list_tools(server, timeout=None):
         result = session.request("tools/list", {})
         info = getattr(session, "server_info", {}) or {}
         protocol = session.protocol
-    tools = [entry.get("name") or "" for entry in (result.get("tools") or [])
-             if isinstance(entry, dict)]
+    entries = [entry for entry in (result.get("tools") or []) if isinstance(entry, dict)]
+    tools = [entry.get("name") or "" for entry in entries]
     return {"server": server, "tools": sorted(name for name in tools if name),
             "count": len(tools), "protocol": protocol,
+            # Kept alongside the plain name list rather than replacing it: `probe` compares names and
+            # must keep doing exactly that. Descriptions are for humans reading the panel.
+            "details": sorted((_tool_detail(entry) for entry in entries if entry.get("name")),
+                              key=lambda detail: detail["name"]),
             "server_info": {"name": info.get("name") or "", "version": info.get("version") or ""}}
 
 
@@ -564,7 +591,8 @@ def probe(server, timeout=None):
         listing = list_tools(server, timeout)
     except (Disabled, TransportError) as exc:
         return {"server": server, "ok": False, "reason": str(exc),
-                "declared": sorted(declared), "live": [], "missing": [], "unused": []}
+                "declared": sorted(declared), "live": [], "missing": [], "unused": [],
+                "details": []}
     live = set(listing["tools"])
     missing = sorted(name for name in declared if name not in live)
     return {
@@ -580,6 +608,8 @@ def probe(server, timeout=None):
         # Informational only: what they expose that we have not wired. Listing a tool here grants it
         # nothing — several of these are deliberately never going to be wired.
         "unused": sorted(live - set(declared)),
+        # Their own words for each live tool. Informational, bounded, and rendered as theirs.
+        "details": listing.get("details") or [],
         "protocol": listing["protocol"],
         "server_info": listing["server_info"],
     }

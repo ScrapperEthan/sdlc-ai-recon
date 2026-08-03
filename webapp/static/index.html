@@ -1225,7 +1225,7 @@
     .rawlog-line { grid-template-columns: 44px minmax(0, 1fr); gap: 8px; padding: 0 10px; }
   }
 
-  #usage-panel, #llm-panel {
+  #usage-panel, #llm-panel, #mcp-panel {
     position: fixed;
     right: 24px;
     top: 76px;
@@ -1369,7 +1369,8 @@
           <span class="status-pill">No repo writes</span>
           <span class="status-pill">Cited answers</span>
           <span class="status-pill" id="index-status">Index status unknown</span>
-          <span class="status-pill" id="mcp-status" title="Whether production log/metric lookups can run">MCP …</span>
+          <button class="status-pill usage-button" id="mcp-status" type="button"
+                  title="Which MCP servers and operations exist, and what each one is for">MCP …</button>
           <button class="status-pill usage-button" id="llm-button" type="button" title="Which LLM your requests use">LLM: shared</button>
           <button class="status-pill usage-button" id="usage-button" type="button">Usage</button>
         </div>
@@ -1472,6 +1473,23 @@
         onclick="document.getElementById('usage-panel').hidden = true">&times;</button>
     </div>
     <div class="usage-body">Loading...</div>
+  </aside>
+
+  <!-- The MCP surface, opened from the status pill. Two halves with different rules: everything
+       above the "调用" buttons is config rendered for a human and works with calling switched off;
+       the buttons themselves reach production, through the same allow-list and the same redaction
+       exit gate as the investigator. Nothing here can name one of their tools directly. -->
+  <aside id="mcp-panel" hidden aria-label="MCP 工具目录">
+    <div class="usage-head">
+      <h2>MCP 工具</h2>
+      <div class="mcp-head-actions">
+        <button class="mcp-probe" id="mcp-probe" type="button"
+                title="连到每台服务器读它自己的 tools/list，核对我们声明的工具名。会打开到生产系统的连接。">实时核对</button>
+        <button class="usage-close" type="button" aria-label="Close"
+          onclick="document.getElementById('mcp-panel').hidden = true">&times;</button>
+      </div>
+    </div>
+    <div class="mcp-body">Loading...</div>
   </aside>
 
   <aside id="llm-panel" hidden aria-label="Your LLM connection">
@@ -2113,8 +2131,9 @@ async function refreshMcpStatus() {
     if (!status.calling_enabled) {
       mcpStatus.textContent = 'MCP off';
       mcpStatus.classList.add('is-off');
-      mcpStatus.title = status.calling_note
-        || 'SDLC_MCP_ENABLED is unset — production log lookups will not run.';
+      mcpStatus.title = (status.calling_note
+        || 'SDLC_MCP_ENABLED is unset — production log lookups will not run.')
+        + '\n点开可以看有哪些 MCP 服务器和操作（看目录不需要开关打开）。';
       // Say it on the card too. The starter still works — the investigator will report that it did
       // NOT look — but during a demo you want to know that before you click it, not after.
       if (card) card.classList.remove('is-live');
@@ -2126,13 +2145,344 @@ async function refreshMcpStatus() {
     if (tag) tag.textContent = 'MCP · LogDream';
     mcpStatus.textContent = `MCP ${ready}/${total}`;
     mcpStatus.title = `${ready} of ${total} declared operations are wired and callable`
-      + (status.config_error ? ` · config error: ${status.config_error}` : '');
+      + (status.config_error ? ` · config error: ${status.config_error}` : '')
+      + '\n点开看每个 MCP 是做什么的、可以手动调用一次，或者交给 AI 去查。';
   } catch (error) {
     mcpStatus.textContent = 'MCP unknown';
     mcpStatus.classList.add('is-off');
     mcpStatus.title = 'Could not read /api/mcp/status';
   }
 }
+
+// ---- the MCP catalog panel -------------------------------------------------------------------
+// Opened from the status pill. The listing half reads /api/mcp/catalog, which touches only config,
+// so this panel opens and is fully readable with calling switched off — seeing what the integration
+// IS should never require the ability to fire it.
+//
+// Everything rendered from the server here is escaped and inserted as text. That matters more than
+// usual for one field: `remote_description` comes off THEIR tools/list. It is worth showing (nobody
+// documents a tool better than its owner) but it is text from a system we do not control, so it is
+// escaped, labelled as theirs, and never composed into anything sent to the model.
+const mcpPanel = document.getElementById('mcp-panel');
+let mcpCatalog = null;
+let mcpLastResult = null;
+
+const MCP_STATE_LABEL = {
+  ready: ['ok', '已接通'],
+  partial: ['warn', '部分参数未填'],
+  unwired: ['warn', '未接通'],
+  disabled: ['', '服务器未启用'],
+  blocked: ['bad', '硬性禁止'],
+};
+
+function mcpBadge(kind, text, title) {
+  return `<span class="mcp-badge${kind ? ' ' + kind : ''}"${title ? ` title="${escapeAttribute(title)}"` : ''}>${escapeHtml(text)}</span>`;
+}
+
+function mcpStateBadge(state) {
+  const [kind, label] = MCP_STATE_LABEL[state] || ['', state || 'unknown'];
+  return mcpBadge(kind, label);
+}
+
+function renderMcpOperation(op) {
+  const canCall = op.callable && mcpCatalog.calling_enabled && mcpCatalog.console_enabled;
+  // Why the button is off, said once and specifically. "Disabled with no reason" is the single most
+  // common way an internal tool wastes somebody's afternoon.
+  let blockedReason = '';
+  if (!mcpCatalog.calling_enabled) blockedReason = 'SDLC_MCP_ENABLED 未开启，这里不会发出任何请求。';
+  else if (!mcpCatalog.console_enabled) blockedReason = 'SDLC_MCP_CONSOLE=0，只能查看不能手动调用（聊天里的调查员仍可用）。';
+  else if (op.state === 'blocked') blockedReason = '这个工具在 never_expose 硬名单上，任何路径都不可调用。';
+  else if (op.state === 'disabled') blockedReason = `服务器 ${op.server} 在配置里 enabled=false。`;
+  else if (op.state === 'unwired') blockedReason = '配置里还没填工具名（tool 仍是 "?"）。';
+
+  const args = (op.args || []).map((arg) => {
+    const hint = arg.wired ? arg.their_name : '参数名未填（"?"）';
+    return `<label for="mcparg-${escapeAttribute(op.operation)}-${escapeAttribute(arg.name)}">`
+      + `${escapeHtml(arg.name)}<span>${escapeHtml(hint)}</span></label>`
+      + `<input class="mcp-arg-input" type="text" data-arg="${escapeAttribute(arg.name)}"`
+      + ` id="mcparg-${escapeAttribute(op.operation)}-${escapeAttribute(arg.name)}"`
+      + ` placeholder="${escapeAttribute(arg.wired ? '留空则不发送这个参数' : '未接通')}"`
+      + `${arg.wired ? '' : ' disabled'}>`;
+  }).join('');
+
+  return `<details class="mcp-op" data-operation="${escapeAttribute(op.operation)}">
+    <summary>
+      <span class="mcp-op-name">${escapeHtml(op.operation)}</span>
+      ${mcpStateBadge(op.state)}
+      ${op.data_class === 'payload'
+        ? mcpBadge('payload', '可能含正文', '这类返回预期会带生产正文/客户可关联数据。注意：脱敏对所有操作一律执行，这个标记只决定提示力度。')
+        : mcpBadge('', '元数据')}
+      ${op.tool ? `<span class="mcp-op-tool">→ ${escapeHtml(op.tool)}</span>` : ''}
+    </summary>
+    <div class="mcp-op-body">
+      ${op.purpose ? `<p>${escapeHtml(op.purpose)}</p>` : ''}
+      ${op.remote_description
+        ? `<p class="mcp-note">对方 tools/list 的说明（他们写的，原样转载）：${escapeHtml(op.remote_description)}</p>`
+        : ''}
+      ${op.note ? `<p class="mcp-note">${escapeHtml(op.note)}</p>` : ''}
+      ${op.const_keys && op.const_keys.length
+        ? `<p class="mcp-note">固定参数（每次调用自动带上，不可改）：${escapeHtml(op.const_keys.join(', '))}</p>`
+        : ''}
+      ${args ? `<div class="mcp-args">${args}</div>` : '<p class="mcp-note">这个操作不带参数。</p>'}
+      <div class="mcp-op-actions">
+        <button class="mcp-run" type="button"${canCall ? '' : ' disabled'}>调用</button>
+        <button class="mcp-ask" type="button">让 AI 用这条去查</button>
+      </div>
+      ${blockedReason ? `<p class="mcp-result-note">${escapeHtml(blockedReason)}</p>` : ''}
+      <div class="mcp-op-result"></div>
+    </div>
+  </details>`;
+}
+
+function renderMcpCatalog(data) {
+  mcpCatalog = data;
+  const body = mcpPanel.querySelector('.mcp-body');
+  if (data.error) {
+    body.innerHTML = `<div class="mcp-state is-off">读不到 MCP 目录：${escapeHtml(data.error)}</div>`;
+    return;
+  }
+  const ops = data.operations || {};
+  const total = Object.keys(ops).length;
+  const ready = Object.values(ops).filter((op) => op.state === 'ready').length;
+  const off = !data.calling_enabled || !data.console_enabled;
+  const retention = data.raw_retention || {};
+
+  const state = `<div class="mcp-state${off ? ' is-off' : ''}">`
+    + `<b>${ready}/${total}</b> 个操作已接通 · 调用开关 <b>${data.calling_enabled ? '开' : '关'}</b>`
+    + ` · 手动调用 <b>${data.console_enabled ? '开' : '关'}</b>`
+    + (data.calling_note ? `<br>${escapeHtml(data.calling_note)}` : '')
+    + (data.config_error ? `<br>配置读取失败：${escapeHtml(data.config_error)}` : '')
+    + `<br>配置文件：<code>${escapeHtml(data.config_path || '')}</code>（工具名/参数名/返回结构都由内网在这里维护，改配置不用改代码）`
+    + (retention.enabled
+      ? '<br>⚠ 原文留存已开启（UAT 内测）：手动调用的未脱敏返回会存进按会话隔离的侧存储，可点「查看原文」核对。'
+      : '<br>原文留存已关闭：手动调用的返回脱敏后即丢弃，没有任何接口能取回原文。')
+    + '</div>';
+
+  const servers = Object.values(data.servers || {}).map((server) => {
+    const members = (server.operations || []).map((name) => ops[name]).filter(Boolean);
+    return `<section class="mcp-server">
+      <div class="mcp-server-head">
+        <h3>${escapeHtml(server.name)}
+          ${server.enabled ? mcpBadge('ok', 'enabled') : mcpBadge('warn', 'disabled')}
+          ${server.transport ? mcpBadge('', server.transport) : mcpBadge('warn', 'transport 未定')}
+          ${server.endpoint_configured
+            ? mcpBadge('ok', '地址已配置')
+            : mcpBadge('warn', `缺 ${server.url_env || 'url_env'}`, '地址只走环境变量，永不进 git')}
+          ${mcpBadge('', `${server.ready}/${members.length} 就绪`)}
+        </h3>
+        ${server.purpose ? `<p class="mcp-server-purpose">${escapeHtml(server.purpose)}</p>` : ''}
+      </div>
+      ${members.map(renderMcpOperation).join('')}
+    </section>`;
+  }).join('');
+
+  // The natural-language half. Deliberately routes into the EXISTING chat rather than driving MCP
+  // itself: the agent reaches these servers only through the isolated investigator, which is what
+  // keeps raw production text out of chat history. A second, panel-local agent loop would reopen
+  // exactly that.
+  const askBox = `<div class="mcp-ask-box">
+    <h3>用自然语言问</h3>
+    <p>写你想查什么，交给聊天里的 AI 去规划和调用（它通过隔离的调查员访问这几台服务器，
+       返回的是脱敏后的证据包）。手动调用适合验证单个参数，自然语言适合查一件事。</p>
+    <textarea class="mcp-ask-input" id="mcp-ask-input" placeholder="例如：mc-hk-hase-batch-letter-postman-job 在 2026-07-30 03:15 HKT 前后的日志说明了什么？"></textarea>
+    <div class="mcp-op-actions" style="margin-top:8px"><button class="mcp-ask" id="mcp-ask-send" type="button">发送到聊天</button></div>
+  </div>`;
+
+  body.innerHTML = state + servers + askBox;
+}
+
+async function openMcpPanel() {
+  usagePanel.hidden = true;
+  llmPanel.hidden = true;
+  mcpPanel.hidden = !mcpPanel.hidden;
+  if (mcpPanel.hidden) return;
+  mcpPanel.querySelector('.mcp-body').textContent = 'Loading...';
+  try {
+    renderMcpCatalog(await fetchJson('/api/mcp/catalog'));
+  } catch (error) {
+    mcpPanel.querySelector('.mcp-body').innerHTML =
+      `<div class="mcp-state is-off">读不到 MCP 目录：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function mcpResultBadges(result) {
+  const parts = [];
+  if (result.server) parts.push(mcpBadge('', result.server));
+  if (result.tool) parts.push(mcpBadge('', result.tool));
+  if (result.elapsed_ms) parts.push(mcpBadge('', `${result.elapsed_ms} ms`));
+  if (result.retried) parts.push(mcpBadge('warn', `重试 ${result.attempts} 次`));
+  if (result.truncated) parts.push(mcpBadge('warn', '已截断'));
+  const redacted = Object.entries(result.redacted || {});
+  if (redacted.length) {
+    parts.push(mcpBadge('', '已脱敏 ' + redacted.map(([k, v]) => `${k}×${v}`).join(' ')));
+  }
+  const leaked = (result.exit_scan || {}).sanitized_at_exit || 0;
+  if (leaked) parts.push(mcpBadge('bad', `出口再脱敏 ${leaked} 处`, '到出口还匹配 PII 说明上游脱敏有漏，请报告'));
+  return parts.join('');
+}
+
+function renderMcpResult(host, result) {
+  mcpLastResult = result;
+  if (!result.called) {
+    host.innerHTML = `<div class="mcp-result is-bad"><p class="mcp-result-note">`
+      + `没有发出请求。${escapeHtml(result.error || '')}</p></div>`;
+    return;
+  }
+  if (result.transport_failure) {
+    host.innerHTML = `<div class="mcp-result is-bad">${mcpResultBadges(result)}`
+      + `<p class="mcp-result-note">请求发不出去（${escapeHtml(result.kind || 'unreachable')}）：`
+      + `${escapeHtml(result.error || '')}<br>`
+      + '注意区分：这是「我们没问到」，不是「那边没有数据」。</p></div>';
+    return;
+  }
+  // Their tool answering with an error is a different fact from a transport failure and from an
+  // empty result; collapsing the three is how "the query was rejected" becomes "the log was clean".
+  const bad = !result.ok;
+  const shape = result.shape || {};
+  // describe_shape returns a NESTED object for a JSON body (field names -> types, never values) and
+  // a plain sentence for a text one. Rendering it with String() turned the useful case into
+  // "[object Object]" — which is the one case the operator opened this panel for.
+  const shapeText = typeof shape.shape === 'string'
+    ? shape.shape : JSON.stringify(shape.shape || {}, null, 1);
+  const parsed = shape.parsed
+    ? '解析结果：' + escapeHtml(JSON.stringify(shape.parsed)) + '<br>' : '';
+  const bodyText = result.text
+    || (result.structured != null ? JSON.stringify(result.structured, null, 2) : '');
+  host.innerHTML = `<div class="mcp-result${bad ? ' is-bad' : ''}">
+    <div class="mcp-result-meta">${mcpResultBadges(result)}
+      ${bad ? mcpBadge('bad', '对方工具报错') : mcpBadge('ok', 'ok')}</div>
+    ${bodyText ? `<pre>${escapeHtml(bodyText)}</pre>` : '<p class="mcp-result-note">返回是空的。</p>'}
+    <p class="mcp-result-note">
+      发出的参数：${escapeHtml((result.params_sent || []).join(', ') || '（无）')}<br>
+      返回结构${shape.body_is_json === false ? '（不是 JSON，走文本路径）' : ''}：<code>${escapeHtml(shapeText)}</code><br>
+      ${parsed}${escapeHtml(result.storage_rule || '')}
+    </p>
+    <div class="mcp-op-actions" style="margin-top:8px">
+      <button class="mcp-analyze" type="button">让 AI 分析这次结果</button>
+      ${result.raw_ref ? `<button class="mcp-ask" type="button" data-raw-ref="${escapeAttribute(result.raw_ref)}">查看原文</button>` : ''}
+    </div>
+  </div>`;
+}
+
+async function runMcpOperation(details) {
+  const operation = details.dataset.operation;
+  const button = details.querySelector('.mcp-run');
+  const host = details.querySelector('.mcp-op-result');
+  const args = {};
+  details.querySelectorAll('.mcp-arg-input').forEach((input) => {
+    const value = input.value.trim();
+    // An empty box means "do not send this argument", never "send an empty string". The whole
+    // no-defaulting rule depends on an unsupplied argument staying unsupplied.
+    if (value && !input.disabled) args[input.dataset.arg] = value;
+  });
+  button.disabled = true;
+  host.innerHTML = '<p class="mcp-result-note">调用中…（一次读取通常 3–10 秒，日志类可能更久）</p>';
+  try {
+    const result = await fetchJson('/api/mcp/call', {
+      method: 'POST', body: JSON.stringify({operation, args}),
+    });
+    renderMcpResult(host, result);
+  } catch (error) {
+    host.innerHTML = `<div class="mcp-result is-bad"><p class="mcp-result-note">${escapeHtml(error.message)}</p></div>`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function sendToChat(text) {
+  if (!text.trim()) return;
+  mcpPanel.hidden = true;
+  q.value = text;
+  f.requestSubmit();
+}
+
+// "Let the AI use this one" composes the question from OUR purpose text and the argument values the
+// operator typed — never from the remote description. It is phrased as a question, not a tool call,
+// because the agent reaches these servers through the investigator and picks the operations itself.
+function askAboutOperation(details) {
+  const op = (mcpCatalog.operations || {})[details.dataset.operation] || {};
+  const typed = [];
+  details.querySelectorAll('.mcp-arg-input').forEach((input) => {
+    if (input.value.trim() && !input.disabled) typed.push(`${input.dataset.arg}=${input.value.trim()}`);
+  });
+  sendToChat(`我想用 MCP 查一件事：${op.purpose || op.operation}`
+    + (typed.length ? `\n已知条件：${typed.join('，')}` : '')
+    + '\n请你规划要读什么、实际去查，并说明每条结论的出处；查不到就说查不到，不要推测。');
+}
+
+// The redacted summary — the same class of text an evidence packet carries — is what goes into chat.
+// Raw response text never does: chat history is replayed to the model every turn, so anything put
+// there is re-read for the life of the conversation.
+function analyzeMcpResult() {
+  if (!mcpLastResult) return;
+  const body = (mcpLastResult.text
+    || (mcpLastResult.structured != null ? JSON.stringify(mcpLastResult.structured) : ''))
+    .split('\n').slice(0, 40).join('\n').slice(0, 4000);
+  sendToChat(`我手动调了 MCP 的 ${mcpLastResult.operation}（${mcpLastResult.server}/${mcpLastResult.tool}），`
+    + `返回如下（已脱敏，<kind:xxxx> 是被替换掉的敏感值）：\n\n\`\`\`\n${body}\n\`\`\`\n\n`
+    + '请解读这个结果：它说明了什么、没说明什么，以及下一步该查什么。'
+    + '不要把脱敏标记当成真实值，也不要补充这段内容里没有的事实。');
+}
+
+async function probeMcpServers() {
+  const button = document.getElementById('mcp-probe');
+  const body = mcpPanel.querySelector('.mcp-body');
+  button.disabled = true;
+  const banner = document.createElement('div');
+  banner.className = 'mcp-state';
+  banner.textContent = '正在连接每台服务器读 tools/list…';
+  body.prepend(banner);
+  try {
+    const status = await fetchJson('/api/mcp/status?probe=1');
+    const probes = Object.values(status.probes || {});
+    if (!probes.length) {
+      banner.className = 'mcp-state is-off';
+      banner.textContent = '没有已启用的服务器可以核对。';
+      return;
+    }
+    banner.className = 'mcp-state';
+    banner.innerHTML = probes.map((probe) => {
+      const head = `<b>${escapeHtml(probe.server)}</b> — `
+        + (probe.ok
+          ? `声明的 ${probe.declared.length} 个工具名全部存在`
+          : `<span style="color:#b91c1c">对不上：${escapeHtml((probe.missing || []).join(', ') || probe.reason || '')}</span>`);
+      const unused = (probe.unused || []).length
+        ? `<br>　他们还有我们没接的：${escapeHtml(probe.unused.join(', '))}` : '';
+      return head + unused;
+    }).join('<br>');
+    // Their own descriptions, merged into the operation rows now that we actually have them.
+    const byTool = {};
+    probes.forEach((probe) => (probe.details || []).forEach((detail) => {
+      byTool[detail.name] = detail.description;
+    }));
+    Object.values(mcpCatalog.operations || {}).forEach((op) => {
+      if (op.tool && byTool[op.tool]) op.remote_description = byTool[op.tool];
+    });
+    const previous = banner.innerHTML;
+    renderMcpCatalog(mcpCatalog);
+    const refreshed = document.createElement('div');
+    refreshed.className = 'mcp-state';
+    refreshed.innerHTML = previous;
+    mcpPanel.querySelector('.mcp-body').prepend(refreshed);
+  } catch (error) {
+    banner.className = 'mcp-state is-off';
+    banner.textContent = '核对失败：' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+mcpStatus.addEventListener('click', openMcpPanel);
+document.getElementById('mcp-probe').addEventListener('click', probeMcpServers);
+mcpPanel.addEventListener('click', (event) => {
+  const target = event.target;
+  if (target.classList.contains('mcp-run')) runMcpOperation(target.closest('.mcp-op'));
+  else if (target.classList.contains('mcp-ask') && target.closest('.mcp-op')) {
+    if (target.dataset.rawRef) openRawLog(target.dataset.rawRef, 'MCP 手动调用原文');
+    else askAboutOperation(target.closest('.mcp-op'));
+  } else if (target.classList.contains('mcp-analyze')) analyzeMcpResult();
+  else if (target.id === 'mcp-ask-send') sendToChat(document.getElementById('mcp-ask-input').value);
+});
 
 function usageMetric(label, value) {
   return `<div class="usage-metric"><span>${escapeHtml(label)}</span><strong>${formatCount(value)}</strong></div>`;
@@ -2158,6 +2508,7 @@ function renderUsageDashboard(data) {
 }
 
 async function openUsageDashboard() {
+  mcpPanel.hidden = true;                    // one drawer at a time; they share the same corner
   usagePanel.hidden = false;
   usagePanel.querySelector('.usage-body').textContent = 'Loading...';
   try {
@@ -3116,6 +3467,7 @@ llmTunnelModelSelect.addEventListener('change', () => {
 
 llmButton.addEventListener('click', () => {
   usagePanel.hidden = true;
+  mcpPanel.hidden = true;
   llmPanel.hidden = !llmPanel.hidden;
   if (!llmPanel.hidden) {
     const base = document.getElementById('llm-base');
@@ -3211,6 +3563,58 @@ refreshLlmStatus();
   .llm-model-head label { margin:0; }
   .llm-load-models { min-height:28px; padding:0 10px; font-size:12px; font-weight:700; color:var(--accent-strong,#1d4ed8); background:#f8fbff; border:1px solid #cddcf8; border-radius:7px; cursor:pointer; }
   .llm-load-models:hover { background:#eef4ff; border-color:#9bb7ea; }
+
+  /* MCP catalog panel. Wider than the usage/LLM drawers because it carries argument forms and
+     response bodies, not a handful of numbers. */
+  #mcp-panel { width:min(680px, calc(100vw - 32px)); }
+  .mcp-head-actions { display:flex; align-items:center; gap:8px; }
+  .mcp-probe { min-height:30px; padding:0 11px; font-size:12px; font-weight:700; color:var(--accent-strong,#1d4ed8); background:#f8fbff; border:1px solid #cddcf8; border-radius:8px; cursor:pointer; }
+  .mcp-probe:hover { background:#eef4ff; border-color:#9bb7ea; }
+  .mcp-probe[disabled] { opacity:.5; cursor:not-allowed; }
+  .mcp-state { padding:9px 11px; margin-bottom:12px; border-radius:9px; font-size:12.5px; line-height:1.6; background:var(--surface-soft,#f8fafc); border:1px solid var(--line,#d9e1ee); color:var(--muted,#65748b); }
+  .mcp-state.is-off { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
+  .mcp-state b { color:var(--ink,#172033); }
+  .mcp-server { margin-bottom:14px; border:1px solid var(--line,#d9e1ee); border-radius:10px; overflow:hidden; }
+  .mcp-server-head { padding:9px 11px; background:var(--surface-soft,#f8fafc); border-bottom:1px solid var(--line,#d9e1ee); }
+  .mcp-server-head h3 { margin:0 0 3px; font-size:13.5px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .mcp-server-purpose { margin:0; font-size:12px; line-height:1.6; color:var(--muted,#65748b); }
+  .mcp-badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.02em; background:#eef3f9; color:#41506a; }
+  .mcp-badge.ok { background:var(--success-soft,#e7f7f3); color:#0f766e; }
+  .mcp-badge.warn { background:#fff7ed; color:#9a3412; }
+  .mcp-badge.bad { background:#fef2f2; color:#b91c1c; }
+  .mcp-badge.payload { background:#fdf2f8; color:#9d174d; }
+  .mcp-op { border-top:1px solid #eef3f9; }
+  .mcp-op:first-child { border-top:0; }
+  .mcp-op > summary { padding:8px 11px; cursor:pointer; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:12.5px; }
+  .mcp-op > summary:hover { background:#f8fbff; }
+  .mcp-op-name { font-family:ui-monospace,Menlo,Consolas,monospace; font-weight:700; color:var(--ink,#172033); }
+  .mcp-op-tool { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; color:var(--muted,#65748b); }
+  .mcp-op-body { padding:2px 11px 12px; font-size:12.5px; line-height:1.65; color:#41506a; }
+  .mcp-op-body p { margin:0 0 8px; }
+  .mcp-note { white-space:pre-wrap; font-size:11.5px; color:var(--muted,#65748b); margin:0 0 8px; }
+  .mcp-args { display:grid; grid-template-columns:minmax(0,150px) minmax(0,1fr); gap:6px 8px; align-items:center; margin:0 0 10px; }
+  .mcp-args label { margin:0; font-size:12px; font-weight:600; text-transform:none; letter-spacing:normal; color:var(--ink,#172033); word-break:break-all; }
+  .mcp-args label span { display:block; font-weight:500; font-size:11px; color:var(--muted,#65748b); font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .mcp-arg-input { width:100%; height:32px; border:1px solid var(--line-strong,#c4cfdd); border-radius:8px; padding:0 9px; outline:0; font:inherit; font-size:12.5px; }
+  .mcp-arg-input:focus { border-color:var(--accent,#2563eb); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+  .mcp-arg-input[disabled] { background:#f1f5f9; color:#94a3b8; }
+  .mcp-op-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .mcp-run, .mcp-ask, .mcp-analyze { min-height:30px; padding:0 12px; font-size:12px; font-weight:700; border-radius:8px; cursor:pointer; }
+  .mcp-run { color:#fff; background:var(--accent,#2563eb); border:1px solid var(--accent,#2563eb); }
+  .mcp-run:hover { background:var(--accent-strong,#1d4ed8); }
+  .mcp-run[disabled] { background:#cbd5e1; border-color:#cbd5e1; cursor:not-allowed; }
+  .mcp-ask, .mcp-analyze { color:var(--accent-strong,#1d4ed8); background:#f8fbff; border:1px solid #cddcf8; }
+  .mcp-ask:hover, .mcp-analyze:hover { background:#eef4ff; border-color:#9bb7ea; }
+  .mcp-result { margin-top:10px; padding:9px 10px; border:1px solid var(--line,#d9e1ee); border-radius:9px; background:var(--surface-soft,#f8fafc); }
+  .mcp-result.is-bad { background:#fef2f2; border-color:#fecaca; }
+  .mcp-result-meta { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:7px; font-size:11px; }
+  .mcp-result pre { margin:0; padding:8px 9px; max-height:280px; overflow:auto; background:#0f172a; color:#e2e8f0; border-radius:7px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+  .mcp-result-note { margin:7px 0 0; font-size:11.5px; color:var(--muted,#65748b); line-height:1.6; }
+  .mcp-ask-box { margin-top:6px; padding:10px 11px; border:1px solid var(--line,#d9e1ee); border-radius:10px; background:var(--surface-soft,#f8fafc); }
+  .mcp-ask-box h3 { margin:0 0 5px; font-size:13px; }
+  .mcp-ask-box p { margin:0 0 8px; font-size:11.5px; line-height:1.6; color:var(--muted,#65748b); }
+  .mcp-ask-input { width:100%; min-height:54px; resize:vertical; border:1px solid var(--line-strong,#c4cfdd); border-radius:9px; padding:8px 10px; outline:0; font:inherit; font-size:12.5px; }
+  .mcp-ask-input:focus { border-color:var(--accent,#2563eb); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
 </style>
 <!-- Vendored locally (no CDN, air-gapped). Absent file -> window.mermaid undefined -> mermaid
      blocks fall back to readable source text. Drop mermaid.min.js in static/vendor/ to enable. -->

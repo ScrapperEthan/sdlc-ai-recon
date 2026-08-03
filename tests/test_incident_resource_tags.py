@@ -15,7 +15,8 @@ import json
 import unittest
 from unittest import mock
 
-from webapp import incident_investigator as inv, mcp_client
+from retriever import code as rcode, incident
+from webapp import incident_investigator as inv, incident_parse, mcp_client
 
 SERVICE_ARN = "arn:aws:ecs:ap-east-1:111122223333:service/prod/csl-sms-deli"
 ALARM_ARN = "arn:aws:cloudwatch:ap-east-1:111122223333:alarm:prod-csl-sms-cpu"
@@ -44,12 +45,12 @@ class ResourceTagsTests(unittest.TestCase):
     def setUp(self):
         for patcher in (
             mock.patch.object(inv.config, "MCP_ENABLED", True),
-            mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            mock.patch.object(incident, "parse_alert", lambda *a, **k: {
                 "identified": True, "repos": [{"repo": "mc-hk-hase-x", "confidence": "confirmed"}],
                 "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
                 "times": [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
                            "ambiguous": False, "normalized": "2026-07-30 03:15:00"}]}),
-            mock.patch.object(inv.rcode, "search_code", lambda *a, **k: []),
+            mock.patch.object(rcode, "search_code", lambda *a, **k: []),
             mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "aws.get_alarm": {"args": {"alarm_name": "alarmName"}},
                 "aws.metric_window": {"args": {"namespace": "namespace", "metric": "metricName",
@@ -179,15 +180,15 @@ class ResourceTagsTests(unittest.TestCase):
     def test_rawtags_is_the_fallback_when_the_tags_object_is_absent(self):
         body = {"resourceArn": SERVICE_ARN,
                 "rawTags": [{"Key": "owner", "Value": "someone"}, {"Key": "team", "Value": "x"}]}
-        self.assertEqual(sorted(inv._tag_keys(body)), ["owner", "team"])
+        self.assertEqual(sorted(incident_parse._tag_keys(body)), ["owner", "team"])
 
     def test_the_tags_object_is_preferred_over_rawtags(self):
         body = {"tags": {"a": "1"}, "rawTags": [{"Key": "b", "Value": "2"}]}
-        self.assertEqual(inv._tag_keys(body), ["a"])
+        self.assertEqual(incident_parse._tag_keys(body), ["a"])
 
     def test_an_unknown_shape_is_none_not_an_empty_tag_list(self):
-        self.assertIsNone(inv._tag_keys({"nothing": "useful"}))
-        self.assertIsNone(inv._tag_keys(["not", "an", "object"]))
+        self.assertIsNone(incident_parse._tag_keys({"nothing": "useful"}))
+        self.assertIsNone(incident_parse._tag_keys(["not", "an", "object"]))
 
     def test_mcp_off_makes_zero_tag_calls(self):
         with mock.patch.object(inv.config, "MCP_ENABLED", False):

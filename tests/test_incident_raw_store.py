@@ -16,7 +16,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from webapp import config, incident_raw_store as store
+from retriever import code as rcode, incident
+from webapp import config, incident_plan, incident_raw_store as store, redaction
 
 
 LINES = ["2026-07-30 03:15:01 ERROR SmsDeliveryException alice.wong@example.com failed",
@@ -132,7 +133,7 @@ class ModelStillNeverSeesRawTextTests(_Store):
         dirty = "\n".join(LINES)
         self._extra = [
             mock.patch.object(config, "MCP_ENABLED", True),
-            mock.patch.object(inv, "log_sources", lambda: inv.DEFAULT_LOG_SOURCES),
+            mock.patch.object(incident_plan, "log_sources", lambda: incident_plan.DEFAULT_LOG_SOURCES),
             mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.list_apps": {"args": {"source": "source"}},
                 "log.search_files": {"args": {"app": "app", "source": "source"}},
@@ -143,8 +144,8 @@ class ModelStillNeverSeesRawTextTests(_Store):
                 {"ok": True, "text": '["cslSmsDeli"]'} if op == "log.list_apps"
                 else {"ok": True, "text": '["otx_trace.log"]'} if op == "log.search_files"
                 else {"ok": True, "text": dirty, "elapsed_ms": 12})),
-            mock.patch.object(inv.rcode, "search_code", lambda *a, **k: []),
-            mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+            mock.patch.object(rcode, "search_code", lambda *a, **k: []),
+            mock.patch.object(incident, "parse_alert", lambda *a, **k: {
                 "identified": True,
                 "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
                 "use_cases": [], "metric": "CPUUtilization", "notes": [],
@@ -210,9 +211,9 @@ class ModelStillNeverSeesRawTextTests(_Store):
     def test_the_exemption_does_not_extend_to_content_fields(self):
         """Only our OWN identifiers are exempt (ref, app, source, file); anything log-derived is
         still scanned. `excerpts` is the log itself and must never be on that list."""
-        self.assertNotIn("excerpts", self.inv._IDENTIFIER_KEYS)
-        self.assertNotIn("text", self.inv._IDENTIFIER_KEYS)
-        cleaned, report = self.inv.sanitize_packet(
+        self.assertNotIn("excerpts", redaction._IDENTIFIER_KEYS)
+        self.assertNotIn("text", redaction._IDENTIFIER_KEYS)
+        cleaned, report = redaction.sanitize_packet(
             {"raw_ref": "3047878912345678abcd", "excerpts": ["leaked bob@example.com"]})
         self.assertEqual(cleaned["raw_ref"], "3047878912345678abcd")
         self.assertEqual(report["sanitized_at_exit"], 1)

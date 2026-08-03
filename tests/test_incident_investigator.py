@@ -8,7 +8,9 @@ import json
 import unittest
 from unittest import mock
 
-from webapp import config, incident_investigator as inv, mcp_client, mcp_registry
+from retriever import code as rcode, incident
+from webapp import (config, incident_investigator as inv, incident_parse, incident_plan,
+                    mcp_client, mcp_registry, redaction)
 
 
 # A full stamp, not a bare `03:15 HKT`: the real read tool backtracks from an `alert_time` and
@@ -33,7 +35,7 @@ SECRETS = ("alice.wong@example.com", "9123 4567", "4123456789012345", "A1234567"
 class RedactionTests(unittest.TestCase):
     def test_every_pii_shape_is_replaced_by_a_marker(self):
         counts = {}
-        out = inv.redact(DIRTY_LOG, counts)
+        out = redaction.redact(DIRTY_LOG, counts)
         for secret in SECRETS:
             self.assertNotIn(secret, out, secret)
         self.assertTrue(counts)
@@ -41,18 +43,18 @@ class RedactionTests(unittest.TestCase):
     def test_the_same_value_gets_the_same_marker_so_correlation_survives(self):
         """A plain *** would destroy the one thing that makes an excerpt worth reading: that these
         forty lines concern ONE message."""
-        one = inv.redact("ref MDCTRACK-9F2K-88H1 failed")
-        two = inv.redact("ref MDCTRACK-9F2K-88H1 retried")
+        one = redaction.redact("ref MDCTRACK-9F2K-88H1 failed")
+        two = redaction.redact("ref MDCTRACK-9F2K-88H1 retried")
         marker = one.split("ref ")[1].split(" ")[0]
         self.assertIn(marker, two)
         self.assertRegex(marker, r"^<tracking:[0-9a-f]{6}>$")
 
     def test_redaction_is_idempotent(self):
-        once = inv.redact(DIRTY_LOG)
-        self.assertEqual(inv.redact(once), once)
+        once = redaction.redact(DIRTY_LOG)
+        self.assertEqual(redaction.redact(once), once)
 
     def test_what_makes_a_log_useful_survives_redaction(self):
-        out = inv.redact(DIRTY_LOG)
+        out = redaction.redact(DIRTY_LOG)
         self.assertIn("SmsDeliveryException", out)
         self.assertIn("TimeoutException", out)
         self.assertIn("2026-07-30 03:15:01", out)
@@ -63,7 +65,7 @@ class RedactionTests(unittest.TestCase):
         It MASKS the matching span rather than discarding the whole string: most strings that reach
         it are prose we composed, where blanking the sentence costs an operator the reason and
         protects nothing extra."""
-        packet, report = inv.sanitize_packet(
+        packet, report = redaction.sanitize_packet(
             {"evidence": [{"excerpts": ["leaked bob@example.com here"], "lines_seen": 1}]})
         self.assertEqual(report["sanitized_at_exit"], 1)
         self.assertEqual(report["kinds"], ["email"])
@@ -75,13 +77,13 @@ class RedactionTests(unittest.TestCase):
         """`otx_trace.log.20260701` is eight consecutive digits. Before the identifier exemption the
         gate blanked whole operator messages containing one — and inflated `sanitized_at_exit`, the
         counter whose only job is to flag a REAL leak."""
-        packet, report = inv.sanitize_packet(
+        packet, report = redaction.sanitize_packet(
             {"file": "otx_trace.log.20260701", "app": "cslSmsDeli", "source": "hkl"})
         self.assertEqual(packet["file"], "otx_trace.log.20260701")
         self.assertEqual(report["sanitized_at_exit"], 0)
 
     def test_the_exit_gate_leaves_clean_text_alone(self):
-        packet, report = inv.sanitize_packet({"note": "SmsDeliveryException x12 on hk1"})
+        packet, report = redaction.sanitize_packet({"note": "SmsDeliveryException x12 on hk1"})
         self.assertEqual(report["sanitized_at_exit"], 0)
         self.assertEqual(packet["note"], "SmsDeliveryException x12 on hk1")
 
@@ -89,20 +91,20 @@ class RedactionTests(unittest.TestCase):
 class AppNameTests(unittest.TestCase):
     def test_a_rule_derived_name_is_a_candidate_never_an_answer(self):
         """RUNBOOK-55 measured repo->app at 0% identical and ~36% by rule."""
-        got = inv.app_candidates("mc-hk-hase-csl-sms-deli-job")
+        got = incident_plan.app_candidates("mc-hk-hase-csl-sms-deli-job")
         self.assertTrue(got)
         self.assertEqual({c["confidence"] for c in got}, {"candidate"})
         self.assertEqual(got[0]["app"], "cslSmsDeli")
 
     def test_an_intranet_mapping_wins_and_is_confirmed(self):
-        with mock.patch.object(inv, "_app_map", lambda: {"mc-hk-hase-x-job": "theRealApp"}):
-            got = inv.app_candidates("mc-hk-hase-x-job")
+        with mock.patch.object(incident_plan, "_app_map", lambda: {"mc-hk-hase-x-job": "theRealApp"}):
+            got = incident_plan.app_candidates("mc-hk-hase-x-job")
         self.assertEqual(got, [{"app": "theRealApp",
                                  "how": "config/logdream_apps.json (intranet-owned mapping)",
                                  "confidence": "confirmed"}])
 
     def test_a_missing_mapping_file_is_normal_not_an_error(self):
-        self.assertEqual(inv._app_map(), {})
+        self.assertEqual(incident_plan._app_map(), {})
 
     def test_either_filename_and_either_shape_is_accepted(self):
         """config/ is intranet-owned on a box that cannot push, and their gap analysis names this
@@ -110,7 +112,7 @@ class AppNameTests(unittest.TestCase):
         silently doing nothing — the worst failure mode for a knob."""
         import os as _os
         import tempfile
-        for name in inv._APP_MAP_FILES:
+        for name in incident_plan._APP_MAP_FILES:
             for payload in ({"repo_to_app": {"repo-a": "appA"}},   # documented shape
                             {"repo-a": "appA", "_note": "flat"}):  # hand-written flat shape
                 with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +120,7 @@ class AppNameTests(unittest.TestCase):
                     with open(_os.path.join(tmp, "config", name), "w", encoding="utf-8") as handle:
                         json.dump(payload, handle)
                     with mock.patch.object(_os, "getcwd", lambda tmp=tmp: tmp):
-                        self.assertEqual(inv._app_map(), {"repo-a": "appA"},
+                        self.assertEqual(incident_plan._app_map(), {"repo-a": "appA"},
                                          f"{name} / {sorted(payload)}")
 
 
@@ -126,8 +128,8 @@ class PlanTests(unittest.TestCase):
     """The plan opens no sockets, so it is fully testable offline."""
 
     def _plan(self, text, **kw):
-        with mock.patch.object(inv.incident, "parse_alert", self._parsed(text)):
-            return inv.plan(text, **kw)
+        with mock.patch.object(incident, "parse_alert", self._parsed(text)):
+            return incident_plan.plan(text, **kw)
 
     @staticmethod
     def _parsed(_text, identified=True, times=None, repos=None):
@@ -140,9 +142,9 @@ class PlanTests(unittest.TestCase):
         return _fake
 
     def test_an_unidentifiable_alert_plans_nothing_and_says_why(self):
-        with mock.patch.object(inv.incident, "parse_alert",
+        with mock.patch.object(incident, "parse_alert",
                                self._parsed("", identified=False, repos=[])):
-            out = inv.plan("something broke")
+            out = incident_plan.plan("something broke")
         self.assertFalse(out["ok"])
         self.assertTrue(out["refusals"])
         self.assertIn("do not guess an app", out["refusals"][0])
@@ -154,24 +156,24 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(any("a TIMEZONE" in r for r in out["refusals"]))
 
     def test_an_explicit_zone_in_the_alert_is_used(self):
-        with mock.patch.object(inv.incident, "parse_alert", self._parsed(ALERT, times=ALERT_TIMES)):
-            out = inv.plan(ALERT)
+        with mock.patch.object(incident, "parse_alert", self._parsed(ALERT, times=ALERT_TIMES)):
+            out = incident_plan.plan(ALERT)
         self.assertEqual(out["window"]["timezone"], "Asia/Hong_Kong")
         self.assertEqual(out["window"]["source"], "explicit in the alert text")
         self.assertEqual(out["window"]["alert_time"], "2026-07-30 03:15:00")
 
     def test_the_alerts_own_zone_beats_a_caller_supplied_one(self):
-        with mock.patch.object(inv.incident, "parse_alert", self._parsed(
+        with mock.patch.object(incident, "parse_alert", self._parsed(
                 ALERT, times=[{"text": "2026-07-30 03:15 Z", "timezone": "UTC",
                                "normalized": "2026-07-30 03:15:00"}])):
-            out = inv.plan(ALERT, timezone="Asia/Hong_Kong")
+            out = incident_plan.plan(ALERT, timezone="Asia/Hong_Kong")
         self.assertEqual(out["window"]["timezone"], "UTC")
 
     def test_a_caller_supplied_zone_rescues_an_ambiguous_time(self):
-        with mock.patch.object(inv.incident, "parse_alert", self._parsed(
+        with mock.patch.object(incident, "parse_alert", self._parsed(
                 ALERT, times=[{"text": "2026-07-30 03:15", "timezone": "", "ambiguous": True,
                                "normalized": "2026-07-30 03:15:00"}])):
-            out = inv.plan(ALERT, timezone="Asia/Hong_Kong")
+            out = incident_plan.plan(ALERT, timezone="Asia/Hong_Kong")
         self.assertEqual(out["window"]["timezone"], "Asia/Hong_Kong")
         self.assertIn("caller-supplied", out["window"]["source"])
 
@@ -187,15 +189,15 @@ class PlanTests(unittest.TestCase):
         hits = ["a/B.java:10:    throw new SmsDeliveryException(msg);",
                 "a/C.java:20:    throw new SmsDeliveryException(other);",
                 "a/D.java:30:    throw new VendorTimeoutError(x);"]
-        with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits):
-            got = inv.exception_classes("mc-hk-hase-csl-sms-deli-job")
+        with mock.patch.object(rcode, "search_code", lambda *a, **k: hits):
+            got = incident_plan.exception_classes("mc-hk-hase-csl-sms-deli-job")
         self.assertEqual(got, ["SmsDeliveryException", "VendorTimeoutError"])
 
     def test_an_unavailable_mirror_offers_no_keywords_rather_than_invented_ones(self):
         def _boom(*_a, **_k):
             raise OSError("mirror not present")
-        with mock.patch.object(inv.rcode, "search_code", _boom):
-            self.assertEqual(inv.exception_classes("any-repo"), [])
+        with mock.patch.object(rcode, "search_code", _boom):
+            self.assertEqual(incident_plan.exception_classes("any-repo"), [])
 
 
 class InvestigateTests(unittest.TestCase):
@@ -214,7 +216,7 @@ class InvestigateTests(unittest.TestCase):
         # Source names and the log.list_apps arg map are read from config, which differs between the
         # committed template and the box's local file. Pinned here for the same reason retention is:
         # these tests describe the CODE, and must not be graded against whatever config is on disk.
-        self._sources = mock.patch.object(inv, "log_sources", lambda: inv.DEFAULT_LOG_SOURCES)
+        self._sources = mock.patch.object(incident_plan, "log_sources", lambda: incident_plan.DEFAULT_LOG_SOURCES)
         self._sources.start()
         # Mirrors what the intranet will fill in: every abstract arg mapped to a real parameter name.
         self._ops = mock.patch.object(
@@ -244,13 +246,13 @@ class InvestigateTests(unittest.TestCase):
 
         self._mcp = mock.patch.object(mcp_client, "call", _fake_call)
         self._mcp.start()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
             "times": [dict(t) for t in ALERT_TIMES]})
         self._parse.start()
-        self._search = mock.patch.object(inv.rcode, "search_code", lambda *a, **k: [])
+        self._search = mock.patch.object(rcode, "search_code", lambda *a, **k: [])
         self._search.start()
 
     def tearDown(self):
@@ -288,7 +290,7 @@ class InvestigateTests(unittest.TestCase):
         `hkl`), so a test that repeats it just agrees with the bug."""
         inv.investigate(ALERT)
         sources = {args.get("source") for op, args in self.calls if op == "log.read"}
-        self.assertEqual(sources, set(inv.log_sources()))
+        self.assertEqual(sources, set(incident_plan.log_sources()))
 
     def test_the_stamp_is_reformatted_but_the_moment_is_never_converted(self):
         """The real tool REJECTED `2026-07-30 03:15 HKT` and wants the zone as its own parameter
@@ -355,7 +357,7 @@ class InvestigateTests(unittest.TestCase):
         read as 'those keywords found nothing', so what was skipped has to be named."""
         hits = ["a/B.java:1: throw new SmsDeliveryException(m);",
                 "a/C.java:1: throw new VendorTimeoutException(m);"]
-        with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits), \
+        with mock.patch.object(rcode, "search_code", lambda *a, **k: hits), \
              mock.patch.object(inv, "_MAX_LOG_QUERIES", 3):
             packet = inv.investigate(ALERT)
         self.assertEqual(len(packet["queries_executed"]), 3)      # 3 keywords x 2 sources, capped at 3
@@ -369,7 +371,7 @@ class InvestigateTests(unittest.TestCase):
         self.assertTrue(packet["queries_executed"])
         for entry in packet["queries_executed"]:
             self.assertEqual(entry["app"], "cslSmsDeli")
-            self.assertIn(entry["source"], inv.log_sources())
+            self.assertIn(entry["source"], incident_plan.log_sources())
             self.assertTrue(entry["keyword"])
 
     def test_a_nil_result_is_scoped_to_the_keywords_actually_used(self):
@@ -418,7 +420,7 @@ class StreamingTests(InvestigateTests):
         """An opaque spinner is what makes people distrust an agent that is working correctly."""
         query = next(e for e in self._events() if e.get("step") == "query")
         self.assertEqual(query["detail"]["app"], "cslSmsDeli")
-        self.assertIn(query["detail"]["source"], inv.log_sources())
+        self.assertIn(query["detail"]["source"], incident_plan.log_sources())
         self.assertTrue(query["detail"]["keyword"])
         self.assertIn(query["detail"]["keyword"], query["label"])
 
@@ -470,7 +472,7 @@ class StreamingTests(InvestigateTests):
         self.assertEqual(streamed, inv.investigate(ALERT))
 
     def test_a_refusal_is_streamed_as_a_stop_not_as_silence(self):
-        with mock.patch.object(inv.incident, "parse_alert",
+        with mock.patch.object(incident, "parse_alert",
                                lambda *a, **k: {"identified": False, "repos": [], "use_cases": [],
                                                 "times": [], "metric": "", "notes": []}):
             steps = [e["step"] for e in inv.investigate_events("something broke")
@@ -506,12 +508,12 @@ class DrillDownTests(InvestigateTests):
         # Built from `log_sources()`, never a literal: the hand-written copy of these names is
         # exactly where `hk1` crept in for `hkl`.
         self.assertIn("ALL production", packet["plan"]["sources_note"])
-        self.assertIn(inv.log_sources()[0], packet["plan"]["sources_note"])
+        self.assertIn(incident_plan.log_sources()[0], packet["plan"]["sources_note"])
 
     def test_raising_the_query_budget_lets_a_wider_sweep_run(self):
         hits = ["a/B.java:1: throw new SmsDeliveryException(m);",
                 "a/C.java:1: throw new VendorTimeoutException(m);"]
-        with mock.patch.object(inv.rcode, "search_code", lambda *a, **k: hits):
+        with mock.patch.object(rcode, "search_code", lambda *a, **k: hits):
             narrow = inv.investigate(ALERT, max_queries=2)
             wide = inv.investigate(ALERT, max_queries=6)
         self.assertEqual(len(narrow["queries_executed"]), 2)
@@ -534,7 +536,7 @@ class DrillDownTests(InvestigateTests):
 
     def test_blank_sources_fall_back_to_both_production_sources(self):
         packet = inv.investigate(ALERT, sources=[" "])
-        self.assertEqual({q["source"] for q in packet["queries_executed"]}, set(inv.log_sources()))
+        self.assertEqual({q["source"] for q in packet["queries_executed"]}, set(incident_plan.log_sources()))
         self.assertNotIn("sources_note", packet["plan"])
 
 
@@ -638,7 +640,7 @@ class ToolErrorIsNeverEvidenceTests(InvestigateTests):
         def _fake_call(operation, args=None, **_kw):
             source = (args or {}).get("source")
             if operation == "log.list_apps":
-                if source == inv.log_sources()[0]:
+                if source == incident_plan.log_sources()[0]:
                     return {"ok": False, "tool_reported_error": True, "text": "unknown source"}
                 return {"ok": True, "text": '["cslSmsDeli"]'}
             if operation == "log.search_files":
@@ -647,18 +649,18 @@ class ToolErrorIsNeverEvidenceTests(InvestigateTests):
         with mock.patch.object(mcp_client, "call", _fake_call):
             packet = inv.investigate(ALERT)
         searched = {q["source"] for q in packet["queries_executed"]}
-        self.assertEqual(searched, {inv.log_sources()[1]})
+        self.assertEqual(searched, {incident_plan.log_sources()[1]})
         self.assertTrue(packet["evidence"])
         self.assertIn("REJECTED", " ".join(packet["not_investigated"]))
 
     def test_the_outcome_helper_separates_all_four_cases(self):
-        self.assertEqual(inv._tool_outcome({"ok": True, "text": "lines"}), ("hit", "lines"))
-        self.assertEqual(inv._tool_outcome({"ok": True, "text": "  "}), ("empty", ""))
-        self.assertEqual(inv._tool_outcome({"ok": False, "text": "boom"}), ("error", "boom"))
+        self.assertEqual(incident_parse._tool_outcome({"ok": True, "text": "lines"}), ("hit", "lines"))
+        self.assertEqual(incident_parse._tool_outcome({"ok": True, "text": "  "}), ("empty", ""))
+        self.assertEqual(incident_parse._tool_outcome({"ok": False, "text": "boom"}), ("error", "boom"))
         self.assertEqual(
-            inv._tool_outcome({"ok": True, "tool_reported_error": True, "text": "boom"}),
+            incident_parse._tool_outcome({"ok": True, "tool_reported_error": True, "text": "boom"}),
             ("error", "boom"))
-        self.assertEqual(inv._tool_outcome(None)[0], "error")
+        self.assertEqual(incident_parse._tool_outcome(None)[0], "error")
 
 
 class LogSourceResolutionTests(unittest.TestCase):
@@ -666,8 +668,8 @@ class LogSourceResolutionTests(unittest.TestCase):
     ENVIRONMENT vocabulary, so the config owns them and Python only holds the fallback."""
 
     def test_the_default_source_is_the_letter_l_not_a_digit_one(self):
-        self.assertEqual(inv.DEFAULT_LOG_SOURCES, ("hkl", "hkp3"))
-        self.assertNotIn("hk1", inv.DEFAULT_LOG_SOURCES)
+        self.assertEqual(incident_plan.DEFAULT_LOG_SOURCES, ("hkl", "hkp3"))
+        self.assertNotIn("hk1", incident_plan.DEFAULT_LOG_SOURCES)
 
     def test_sources_come_from_the_intranet_config_when_declared(self):
         """Hard-coding them was the RUNBOOK-49/50/51 mistake again: environment vocabulary in Python
@@ -676,12 +678,12 @@ class LogSourceResolutionTests(unittest.TestCase):
                 "logdream": {"sources": {"alpha": {"query_by_default": True},
                                           "beta": {"query_by_default": False},
                                           "_note": "doc key"}}}):
-            self.assertEqual(inv.log_sources(), ("alpha",))
+            self.assertEqual(incident_plan.log_sources(), ("alpha",))
 
     def test_a_config_without_sources_falls_back_to_the_default(self):
         for servers in ({"logdream": {}}, {}, {"logdream": {"sources": {}}}):
             with mock.patch.object(inv.mcp_registry, "servers", lambda cfg=None, s=servers: s):
-                self.assertEqual(inv.log_sources(), inv.DEFAULT_LOG_SOURCES)
+                self.assertEqual(incident_plan.log_sources(), incident_plan.DEFAULT_LOG_SOURCES)
 
 
 class SourceHandlingTests(InvestigateTests):
@@ -691,13 +693,13 @@ class SourceHandlingTests(InvestigateTests):
         """The real `list_logdream_apps` requires it, and the two sources hold DIFFERENT apps."""
         inv.investigate(ALERT)
         listings = [args for op, args in self.calls if op == "log.list_apps"]
-        self.assertEqual(len(listings), len(inv.log_sources()))
-        self.assertEqual({a.get("source") for a in listings}, set(inv.log_sources()))
+        self.assertEqual(len(listings), len(incident_plan.log_sources()))
+        self.assertEqual({a.get("source") for a in listings}, set(incident_plan.log_sources()))
 
     def test_an_app_present_on_only_one_source_is_queried_only_there(self):
         """Querying a source that has never heard of the app returns empty — which reads as
         'no problem'."""
-        only = inv.log_sources()[1]
+        only = incident_plan.log_sources()[1]
         def _fake_call(operation, args=None, **_kw):
             source = (args or {}).get("source")
             if operation == "log.list_apps":
@@ -730,33 +732,33 @@ class FileSelectionTests(unittest.TestCase):
     """
 
     def test_a_json_list_of_paths_is_parsed_and_ranked(self):
-        got = inv.select_log_files(json.dumps(
+        got = incident_parse.select_log_files(json.dumps(
             ["/apps/x/log/otx_trace.log.20260701", "/apps/x/log/otx_trace.log"]), limit=2)
         self.assertEqual(got, ["/apps/x/log/otx_trace.log", "/apps/x/log/otx_trace.log.20260701"])
 
     def test_objects_with_a_name_field_are_parsed(self):
-        got = inv.select_log_files(json.dumps(
+        got = incident_parse.select_log_files(json.dumps(
             [{"file_name": "exception.log", "size": 12}, {"name": "otx_trace.log"}]), limit=2)
         self.assertEqual(sorted(got), ["exception.log", "otx_trace.log"])
 
     def test_plain_text_output_still_yields_file_names(self):
-        got = inv.select_log_files("found:\n  otx_trace.log  (2MB)\n  sftp.log  (1MB)\n", limit=5)
+        got = incident_parse.select_log_files("found:\n  otx_trace.log  (2MB)\n  sftp.log  (1MB)\n", limit=5)
         self.assertIn("otx_trace.log", got)
         self.assertIn("sftp.log", got)
 
     def test_the_alert_date_wins_over_the_preferred_type(self):
-        got = inv.select_log_files(
+        got = incident_parse.select_log_files(
             json.dumps(["otx_trace.log", "exception.log.20260730"]),
             alert_date="2026-07-30", limit=1)
         self.assertEqual(got, ["exception.log.20260730"])
 
     def test_nothing_recognisable_yields_nothing_rather_than_a_guess(self):
         for text in ("", "no files here", json.dumps({"error": "bad app"})):
-            self.assertEqual(inv.select_log_files(text), [], repr(text))
+            self.assertEqual(incident_parse.select_log_files(text), [], repr(text))
 
     def test_the_candidate_list_is_bounded(self):
         many = json.dumps([f"otx_trace.log.2026070{i}" for i in range(9)])
-        self.assertLessEqual(len(inv.select_log_files(many)), inv._MAX_FILES_PER_SOURCE)
+        self.assertLessEqual(len(incident_parse.select_log_files(many)), incident_parse._MAX_FILES_PER_SOURCE)
 
 
 class SearchFilesHopTests(InvestigateTests):
@@ -936,7 +938,7 @@ class StructuredResponseTests(unittest.TestCase):
 
     def test_a_structured_two_line_response_counts_two_lines_not_eleven(self):
         self.assertGreater(len(self.TWO_LINES.splitlines()), 2)      # the trap is really there
-        lines, reported, error = inv.extract_log_lines(self.TWO_LINES)
+        lines, reported, error = incident_parse.extract_log_lines(self.TWO_LINES)
         self.assertEqual(error, "")
         self.assertEqual(len(lines), 2)
         self.assertEqual(reported, 2)
@@ -944,12 +946,12 @@ class StructuredResponseTests(unittest.TestCase):
 
     def test_line_objects_are_read_by_their_text_field(self):
         body = json.dumps({"lines": [{"line": "ERROR one", "ts": 1}, {"line": "ERROR two", "ts": 2}]})
-        lines, _reported, error = inv.extract_log_lines(body)
+        lines, _reported, error = incident_parse.extract_log_lines(body)
         self.assertEqual(lines, ["ERROR one", "ERROR two"])
         self.assertEqual(error, "")
 
     def test_plain_log_text_still_takes_the_legacy_split(self):
-        lines, reported, error = inv.extract_log_lines(DIRTY_LOG)
+        lines, reported, error = incident_parse.extract_log_lines(DIRTY_LOG)
         self.assertEqual(len(lines), 6)
         self.assertIsNone(reported)
         self.assertEqual(error, "")
@@ -959,12 +961,12 @@ class StructuredResponseTests(unittest.TestCase):
         for body in (json.dumps({"result": {"payload": "x"}}),
                      json.dumps({"lines": {"not": "a list"}}),
                      json.dumps([{"no_text_field": 1}])):
-            lines, _reported, error = inv.extract_log_lines(body)
+            lines, _reported, error = incident_parse.extract_log_lines(body)
             self.assertIsNone(lines, body)
             self.assertIn("mcp_tools.json", error)
 
     def test_structured_list_apps_accepts_only_directory_names(self):
-        names, note, error = inv.extract_app_names(self.APP_LISTING)
+        names, note, error = incident_parse.extract_app_names(self.APP_LISTING)
         self.assertEqual(error, "")
         self.assertEqual(names, ["cslSmsDeli"])
         for token in ("README.txt", "dir", "entries", "entry_type", "file", "name"):
@@ -972,14 +974,14 @@ class StructuredResponseTests(unittest.TestCase):
         self.assertIn("files are not apps", note)
 
     def test_a_legacy_list_of_strings_is_still_accepted(self):
-        names, _note, error = inv.extract_app_names('["cslSmsDeli", "otherApp"]')
+        names, _note, error = incident_parse.extract_app_names('["cslSmsDeli", "otherApp"]')
         self.assertEqual(names, ["cslSmsDeli", "otherApp"])
         self.assertEqual(error, "")
 
     def test_entries_without_a_kind_field_are_accepted_but_said_so(self):
         """Requiring a field no server has been observed to send would refuse every real app —
         its own silent outage. Accepting them is fine; leaving it unsaid is not."""
-        names, note, error = inv.extract_app_names(json.dumps({"apps": [{"name": "cslSmsDeli"}]}))
+        names, note, error = incident_parse.extract_app_names(json.dumps({"apps": [{"name": "cslSmsDeli"}]}))
         self.assertEqual((names, error), (["cslSmsDeli"], ""))
         self.assertIn("no entry-type field", note)
 
@@ -987,27 +989,27 @@ class StructuredResponseTests(unittest.TestCase):
         for body in (json.dumps({"payload": {"deep": ["cslSmsDeli"]}}),
                      json.dumps({"entries": "cslSmsDeli"}),
                      json.dumps([{"nope": 1}])):
-            names, _note, error = inv.extract_app_names(body)
+            names, _note, error = incident_parse.extract_app_names(body)
             self.assertIsNone(names, body)
             self.assertIn("mcp_tools.json", error)
 
     def test_structured_content_wins_over_the_text_block(self):
         """`structuredContent` is the server's own typed answer; mcp_client already carries it."""
-        lines, _reported, _error = inv.extract_log_lines(
+        lines, _reported, _error = incident_parse.extract_log_lines(
             "ignored text", structured={"lines": ["only real line"]})
         self.assertEqual(lines, ["only real line"])
 
     def test_search_files_does_not_fall_back_to_regex_on_a_json_body(self):
         """A JSON body whose shape we do not recognise must not be mined for `.log` substrings."""
         self.assertEqual(
-            inv.select_log_files(json.dumps({"error": "otx_trace.log is not readable"})), [])
+            incident_parse.select_log_files(json.dumps({"error": "otx_trace.log is not readable"})), [])
 
     def test_the_response_shape_is_overridable_from_the_intranet_config(self):
         """The field names are THEIR environment, so fixing one must be a config edit on the box —
         not a push from outside. Dotted paths so a nested body needs no code change either."""
         with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.read": {"response": {"lines": "data.rows", "line_text": "msg"}}}):
-            lines, _reported, error = inv.extract_log_lines(
+            lines, _reported, error = incident_parse.extract_log_lines(
                 json.dumps({"data": {"rows": [{"msg": "ERROR one"}]}}))
         self.assertEqual((lines, error), (["ERROR one"], ""))
 
@@ -1023,7 +1025,7 @@ class ShapeProbeTests(unittest.TestCase):
     def test_no_value_ever_appears_in_a_shape(self):
         body = {"lines": [{"line": "customer alice.wong@example.com 9123 4567", "level": "ERROR"}],
                 "line_count": 1, "app": "cslSmsDeli"}
-        blob = json.dumps(inv.describe_shape(body), ensure_ascii=False)
+        blob = json.dumps(incident_parse.describe_shape(body), ensure_ascii=False)
         for secret in ("alice.wong@example.com", "9123 4567", "ERROR", "cslSmsDeli"):
             self.assertNotIn(secret, blob, secret)
         self.assertIn("lines", blob)          # names DO survive; that is the entire point
@@ -1032,11 +1034,11 @@ class ShapeProbeTests(unittest.TestCase):
     def test_a_field_name_that_is_itself_data_is_redacted(self):
         """A body keyed by account number would otherwise leak through the one field this has to
         print."""
-        blob = json.dumps(inv.describe_shape({"4123456789012345": {"hits": 3}}))
+        blob = json.dumps(incident_parse.describe_shape({"4123456789012345": {"hits": 3}}))
         self.assertNotIn("4123456789012345", blob)
 
     def test_the_shape_names_types_lengths_and_nesting(self):
-        shape = inv.describe_shape({"data": {"rows": ["a", "bb"]}, "total": 2, "ok": True})
+        shape = incident_parse.describe_shape({"data": {"rows": ["a", "bb"]}, "total": 2, "ok": True})
         self.assertEqual(shape["total"], "int")
         self.assertEqual(shape["ok"], "bool")
         self.assertEqual(shape["data"]["rows"], {"list[2] of str": "str(len=1)"})
@@ -1047,13 +1049,13 @@ class ShapeProbeTests(unittest.TestCase):
         for _ in range(30):
             node["next"] = {}
             node = node["next"]
-        self.assertIn("depth limit", json.dumps(inv.describe_shape(deep)))
-        wide = inv.describe_shape({f"k{i}": 1 for i in range(60)})
+        self.assertIn("depth limit", json.dumps(incident_parse.describe_shape(deep)))
+        wide = incident_parse.describe_shape({f"k{i}": 1 for i in range(60)})
         self.assertTrue(any("more keys" in key for key in wide))
 
     def test_describe_response_says_what_they_sent_and_what_we_read(self):
         out = {"ok": True, "text": StructuredResponseTests.TWO_LINES}
-        report = inv.describe_response(out, "log.read")
+        report = incident_parse.describe_response(out, "log.read")
         self.assertTrue(report["body_is_json"])
         self.assertEqual(report["parsed"]["lines"], 2)
         self.assertEqual(report["parsed"]["server_reported_count"], 2)
@@ -1061,14 +1063,14 @@ class ShapeProbeTests(unittest.TestCase):
         self.assertNotIn("SmsDeliveryException", json.dumps(report))   # no log text, even here
 
     def test_describe_response_on_an_unreadable_body_names_the_fields_it_looked_for(self):
-        report = inv.describe_response({"ok": True, "text": json.dumps({"payload": {"x": [1]}})},
+        report = incident_parse.describe_response({"ok": True, "text": json.dumps({"payload": {"x": [1]}})},
                                        "log.read")
         self.assertIsNone(report["parsed"]["lines"])
         self.assertIn("mcp_tools.json", report["parsed"]["error"])
         self.assertIn("payload", json.dumps(report["shape"]))          # so they can see the real one
 
     def test_describe_response_handles_a_tool_error_and_plain_text(self):
-        err = inv.describe_response({"ok": False, "text": "unknown source hkl"}, "log.list_apps")
+        err = incident_parse.describe_response({"ok": False, "text": "unknown source hkl"}, "log.list_apps")
         self.assertEqual(err["outcome"], "error")
         self.assertFalse(err["body_is_json"])
 
@@ -1151,7 +1153,7 @@ class UnrunnableWindowIsFailClosedTests(unittest.TestCase):
 
     def _repatch(self, times):
         self._parse.stop()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
@@ -1159,7 +1161,7 @@ class UnrunnableWindowIsFailClosedTests(unittest.TestCase):
         self._parse.start()
 
     def test_the_plan_is_not_runnable_without_a_timezone(self):
-        out = inv.plan(ALERT)
+        out = incident_plan.plan(ALERT)
         self.assertFalse(out["ok"])
         self.assertIsNone(out["window"])
         self.assertTrue(out["targets"])            # the service WAS identified; that is not enough
@@ -1246,13 +1248,13 @@ class AlertTimeFormatTests(unittest.TestCase):
         """Their tool rejected one format once already; the next rename must not need a push."""
         with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.read": {"request": {"alert_time_format": "%Y-%m-%dT%H:%M:%SZ"}}}):
-            self.assertEqual(inv._format_alert_time("2026-07-30 03:15:00"),
+            self.assertEqual(incident_plan._format_alert_time("2026-07-30 03:15:00"),
                              "2026-07-30T03:15:00Z")
 
     def test_a_broken_format_string_keeps_the_stamp_rather_than_losing_it(self):
         with mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.read": {"request": {"alert_time_format": 12345}}}):
-            self.assertEqual(inv._format_alert_time("2026-07-30 03:15:00"), "2026-07-30 03:15:00")
+            self.assertEqual(incident_plan._format_alert_time("2026-07-30 03:15:00"), "2026-07-30 03:15:00")
 
 
 ALARM_BODY = {
@@ -1278,37 +1280,37 @@ class AlarmNameExtractionTests(unittest.TestCase):
 
     def test_a_json_alert_yields_its_top_level_alarm_name(self):
         text = json.dumps({"AlarmName": "synthetic-alarm", "NewStateValue": "ALARM"})
-        self.assertEqual(inv.incident.extract_alarm_name(text), "synthetic-alarm")
+        self.assertEqual(incident.extract_alarm_name(text), "synthetic-alarm")
 
     def test_a_single_alarm_name_line_is_extracted(self):
         text = "AlarmName: synthetic-alarm\nNewStateValue: ALARM\nNamespace: AWS/ECS"
-        self.assertEqual(inv.incident.extract_alarm_name(text), "synthetic-alarm")
+        self.assertEqual(incident.extract_alarm_name(text), "synthetic-alarm")
 
     def test_a_greedy_multi_line_capture_is_impossible(self):
         """The exact failure the intranet saw: everything after `AlarmName:` swallowed as the name."""
         text = "AlarmName: synthetic-alarm\nStateChangeTime: 2026-07-30T03:15:00Z\n" + "x" * 400
-        got = inv.incident.extract_alarm_name(text)
+        got = incident.extract_alarm_name(text)
         self.assertEqual(got, "synthetic-alarm")
         self.assertNotIn("\n", got)
-        self.assertLess(len(got), inv.incident.MAX_ALARM_NAME)
+        self.assertLess(len(got), incident.MAX_ALARM_NAME)
 
     def test_two_different_names_yield_nothing_rather_than_a_coin_flip(self):
         text = "AlarmName: alarm-one\nAlarmName: alarm-two"
-        self.assertEqual(inv.incident.extract_alarm_name(text), "")
+        self.assertEqual(incident.extract_alarm_name(text), "")
 
     def test_the_same_name_twice_is_still_unique(self):
-        self.assertEqual(inv.incident.extract_alarm_name("AlarmName: a\nAlarmName: a"), "a")
+        self.assertEqual(incident.extract_alarm_name("AlarmName: a\nAlarmName: a"), "a")
 
     def test_an_alert_with_no_alarm_name_yields_nothing(self):
         for text in ("", "prodECS_repo_service_CPUUtilizationMINOR[80percent]",
                      json.dumps({"Namespace": "AWS/ECS"}), json.dumps(["AlarmName"])):
-            self.assertEqual(inv.incident.extract_alarm_name(text), "", repr(text))
+            self.assertEqual(incident.extract_alarm_name(text), "", repr(text))
 
     def test_validation_rejects_multi_line_and_over_long_values(self):
         """Applied to the server's parse output too, not just to our own extraction."""
-        self.assertEqual(inv.incident.valid_alarm_name("a\nb"), "")
-        self.assertEqual(inv.incident.valid_alarm_name("x" * 300), "")
-        self.assertEqual(inv.incident.valid_alarm_name('  "quoted-alarm"  '), "quoted-alarm")
+        self.assertEqual(incident.valid_alarm_name("a\nb"), "")
+        self.assertEqual(incident.valid_alarm_name("x" * 300), "")
+        self.assertEqual(incident.valid_alarm_name('  "quoted-alarm"  '), "quoted-alarm")
 
 
 class MetricTimeAndWindowTests(unittest.TestCase):
@@ -1316,16 +1318,16 @@ class MetricTimeAndWindowTests(unittest.TestCase):
     the two rules up puts the metric window eight hours from the incident."""
 
     def test_hong_kong_converts_to_utc(self):
-        got, how = inv.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
+        got, how = incident_plan.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
         self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-29T19:15:00Z")
         self.assertTrue(how)
 
     def test_utc_is_not_converted_twice(self):
-        got, _how = inv.to_utc("2026-07-30 03:15:00", "UTC")
+        got, _how = incident_plan.to_utc("2026-07-30 03:15:00", "UTC")
         self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-30T03:15:00Z")
 
     def test_a_zone_that_cannot_be_resolved_returns_nothing_rather_than_an_offset(self):
-        got, why = inv.to_utc("2026-07-30 03:15:00", "Mars/Olympus")
+        got, why = incident_plan.to_utc("2026-07-30 03:15:00", "Mars/Olympus")
         self.assertIsNone(got)
         self.assertIn("NOT built", why)
 
@@ -1341,33 +1343,33 @@ class MetricTimeAndWindowTests(unittest.TestCase):
             return real_import(name, *a, **k)
 
         with mock.patch.object(builtins, "__import__", _no_zoneinfo):
-            got, how = inv.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
+            got, how = incident_plan.to_utc("2026-07-30 03:15:00", "Asia/Hong_Kong")
         self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-07-29T19:15:00Z")
         self.assertIn("fixed offset", how)
 
     def test_the_window_is_built_around_the_alert_never_around_now(self):
         alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
-        window = inv.metric_window_bounds(alert, period_seconds=60, evaluation_periods=5)
+        window = incident_plan.metric_window_bounds(alert, period_seconds=60, evaluation_periods=5)
         self.assertEqual(window["end_utc"], "2026-07-29T19:30:00Z")
         self.assertEqual(window["start_utc"], "2026-07-29T19:00:00Z")
         self.assertIn("query strategy", window["policy"])
 
     def test_the_before_side_covers_what_the_alarm_evaluated(self):
         alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
-        window = inv.metric_window_bounds(alert, period_seconds=300, evaluation_periods=12)
+        window = incident_plan.metric_window_bounds(alert, period_seconds=300, evaluation_periods=12)
         self.assertEqual(window["start_utc"], "2026-07-29T18:15:00Z")     # 60 min, not the 15 default
 
     def test_a_pathological_alarm_config_cannot_ask_for_a_week(self):
         alert = inv.datetime(2026, 7, 29, 19, 15, tzinfo=inv._utc_tz.utc)
-        window = inv.metric_window_bounds(alert, period_seconds=86400, evaluation_periods=30)
+        window = incident_plan.metric_window_bounds(alert, period_seconds=86400, evaluation_periods=30)
         start = inv.datetime.strptime(window["start_utc"], "%Y-%m-%dT%H:%M:%SZ")
         self.assertLessEqual((alert.replace(tzinfo=None) - start).total_seconds() / 60,
-                             inv._METRIC_MAX_MINUTES)
+                             incident_plan._METRIC_MAX_MINUTES)
 
 
 class AlarmIdentityAndMetricParsingTests(unittest.TestCase):
     def test_the_metric_identity_comes_from_the_alarms_own_configuration(self):
-        identity, why = inv.alarm_metric_identity(ALARM_BODY)
+        identity, why = incident_parse.alarm_metric_identity(ALARM_BODY)
         self.assertEqual(why, "")
         self.assertEqual((identity["namespace"], identity["metric"]), ("AWS/ECS", "CPUUtilization"))
         self.assertEqual(identity["statistic"], "Maximum")       # the alarm's, not a default
@@ -1378,56 +1380,56 @@ class AlarmIdentityAndMetricParsingTests(unittest.TestCase):
         """`resource != namespace` and `resource != dimensions`; there is nothing to fall back to."""
         for key in ("Namespace", "MetricName"):
             body = {k: v for k, v in ALARM_BODY.items() if k != key}
-            identity, why = inv.alarm_metric_identity(body)
+            identity, why = incident_parse.alarm_metric_identity(body)
             self.assertIsNone(identity, key)
             self.assertIn("metric identity is unknown", why)
 
     def test_dimensions_must_be_a_list_of_name_value_pairs(self):
         for dims in ("ServiceName=x", [{"Name": "a"}], [["a", "b"]], 5):
-            identity, _why = inv.alarm_metric_identity(dict(ALARM_BODY, Dimensions=dims))
+            identity, _why = incident_parse.alarm_metric_identity(dict(ALARM_BODY, Dimensions=dims))
             self.assertIsNone(identity, repr(dims))
 
     def test_absent_dimensions_are_allowed_and_become_empty(self):
-        identity, why = inv.alarm_metric_identity(
+        identity, why = incident_parse.alarm_metric_identity(
             {k: v for k, v in ALARM_BODY.items() if k != "Dimensions"})
         self.assertEqual((identity["dimensions"], why), ([], ""))
 
     def test_timestamps_and_values_are_parsed_into_points(self):
-        points, status, error = inv.parse_metric_window(METRIC_BODY)
+        points, status, error = incident_parse.parse_metric_window(METRIC_BODY)
         self.assertEqual((len(points), status, error), (3, "Complete", ""))
 
     def test_mismatched_lengths_fail_closed_rather_than_zipping_short(self):
-        points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Values=[1.0]))
+        points, _status, error = incident_parse.parse_metric_window(dict(METRIC_BODY, Values=[1.0]))
         self.assertIsNone(points)
         self.assertIn("mismatched lengths", error)
 
     def test_a_non_numeric_or_infinite_value_fails_closed(self):
         for bad in ([1.0, True, 3.0], [1.0, "2", 3.0], [1.0, float("nan"), 3.0],
                     [1.0, float("inf"), 3.0]):
-            points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Values=bad))
+            points, _status, error = incident_parse.parse_metric_window(dict(METRIC_BODY, Values=bad))
             self.assertIsNone(points, repr(bad))
             self.assertTrue(error)
 
     def test_an_unparseable_timestamp_fails_closed(self):
-        points, _status, error = inv.parse_metric_window(
+        points, _status, error = incident_parse.parse_metric_window(
             dict(METRIC_BODY, Timestamps=["not-a-time", "x", "y"]))
         self.assertIsNone(points)
         self.assertIn("timestamp", error)
 
     def test_an_unknown_shape_is_a_parser_failure_not_a_quiet_metric(self):
-        points, _status, error = inv.parse_metric_window({"datapoints": []})
+        points, _status, error = incident_parse.parse_metric_window({"datapoints": []})
         self.assertIsNone(points)
         self.assertIn("no Timestamps/Values", error)
 
     def test_empty_lists_are_a_real_answer_not_a_failure(self):
-        points, _status, error = inv.parse_metric_window(dict(METRIC_BODY, Timestamps=[], Values=[]))
+        points, _status, error = incident_parse.parse_metric_window(dict(METRIC_BODY, Timestamps=[], Values=[]))
         self.assertEqual((points, error), ([], ""))
 
     def test_the_summary_is_categories_only(self):
         points = [(inv.datetime(2026, 7, 29, 19, 0), 12.0),
                   (inv.datetime(2026, 7, 29, 19, 5), 55.0),
                   (inv.datetime(2026, 7, 29, 19, 10), 91.0)]
-        got = inv.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
+        got = incident_parse.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
         self.assertEqual(got["direction"], "rising")
         self.assertEqual(got["threshold_relation"], "crossing")     # 12 and 55 below, 91 above
         self.assertIn(got["variability"], ("low", "medium", "high"))
@@ -1435,21 +1437,21 @@ class AlarmIdentityAndMetricParsingTests(unittest.TestCase):
 
     def test_all_points_on_the_breaching_side_read_as_above(self):
         points = [(inv.datetime(2026, 7, 29, 19, 0), 95.0), (inv.datetime(2026, 7, 29, 19, 5), 97.0)]
-        got = inv.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
+        got = incident_parse.summarize_points(points, threshold=80.0, comparison="GreaterThanThreshold")
         self.assertEqual(got["threshold_relation"], "above")
 
     def test_no_threshold_means_not_evaluated_rather_than_a_guess(self):
         points = [(inv.datetime(2026, 7, 29, 19, 0), 95.0)]
-        self.assertEqual(inv.summarize_points(points)["threshold_relation"], "not_evaluated")
+        self.assertEqual(incident_parse.summarize_points(points)["threshold_relation"], "not_evaluated")
 
     def test_too_few_points_say_insufficient_rather_than_flat(self):
-        got = inv.summarize_points([(inv.datetime(2026, 7, 29, 19, 0), 5.0)])
+        got = incident_parse.summarize_points([(inv.datetime(2026, 7, 29, 19, 0), 5.0)])
         self.assertEqual(got["direction"], "insufficient_data")
         self.assertEqual(got["variability"], "insufficient_data")
         self.assertEqual(got["data_presence"], "present")
 
     def test_no_points_is_absent_not_normal(self):
-        self.assertEqual(inv.summarize_points([])["data_presence"], "absent")
+        self.assertEqual(incident_parse.summarize_points([])["data_presence"], "absent")
 
 
 class CloudWatchBranchTests(InvestigateTests):
@@ -1674,7 +1676,7 @@ class CloudWatchBranchTests(InvestigateTests):
         """A known alarm name is not enough: a metric window is built around the alert, never
         around `now()`, so no time means no query on either side."""
         self._parse.stop()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
@@ -1700,7 +1702,7 @@ class CloudWatchBranchTests(InvestigateTests):
     def test_the_metric_branch_runs_even_when_no_repo_could_be_identified(self):
         """An alarm name is enough for the metric half; a repo is not required."""
         self._parse.stop()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": False, "repos": [], "use_cases": [], "metric": "", "notes": [],
             "environment": "prod", "times": [dict(t) for t in ALERT_TIMES]})
         self._parse.start()
@@ -1761,7 +1763,7 @@ class AlarmNameNeverPersistsTests(CloudWatchBranchTests):
     def test_a_refusal_path_scrubs_it_too(self):
         """Every return path goes through the same exit gate, including the ones that never call."""
         self._parse.stop()
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-csl-sms-deli-job", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",

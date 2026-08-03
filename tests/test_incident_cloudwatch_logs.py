@@ -12,7 +12,8 @@ import json
 import unittest
 from unittest import mock
 
-from webapp import incident_investigator as inv, mcp_client
+from retriever import code as rcode, incident
+from webapp import incident_investigator as inv, incident_parse, mcp_client
 
 ALARM_WITH_RESOURCE = {
     "AlarmName": "prod-csl-sms-cpu", "Namespace": "AWS/ECS", "MetricName": "CPUUtilization",
@@ -43,7 +44,7 @@ class CloudWatchLogsChainTests(unittest.TestCase):
         # `parse_alert` reads index/repo_tags.json, which is gitignored and absent here. Pinned so
         # these tests describe the CODE rather than whatever artefacts happen to be on disk — the
         # same reason the other investigator tests pin it.
-        self._parse = mock.patch.object(inv.incident, "parse_alert", lambda *a, **k: {
+        self._parse = mock.patch.object(incident, "parse_alert", lambda *a, **k: {
             "identified": True,
             "repos": [{"repo": "mc-hk-hase-x", "confidence": "confirmed"}],
             "use_cases": [], "metric": "CPUUtilization", "notes": [], "environment": "prod",
@@ -51,7 +52,7 @@ class CloudWatchLogsChainTests(unittest.TestCase):
                        "ambiguous": False, "normalized": "2026-07-30 03:15:00"}]})
         self._parse.start()
         self.addCleanup(self._parse.stop)
-        self._search = mock.patch.object(inv.rcode, "search_code", lambda *a, **k: [])
+        self._search = mock.patch.object(rcode, "search_code", lambda *a, **k: [])
         self._search.start()
         self.addCleanup(self._search.stop)
         # The arg maps the intranet has locked in. Pinned for the same reason: the committed
@@ -284,31 +285,31 @@ class CloudWatchLogsChainTests(unittest.TestCase):
 
 class LogGroupParsingTests(unittest.TestCase):
     def test_a_list_of_names_or_of_objects_both_parse(self):
-        self.assertEqual(inv._parse_log_groups(["/ecs/a", "/ecs/b"]), ["/ecs/a", "/ecs/b"])
-        self.assertEqual(inv._parse_log_groups({"logGroups": [{"logGroupName": "/ecs/a"}]}),
+        self.assertEqual(incident_parse._parse_log_groups(["/ecs/a", "/ecs/b"]), ["/ecs/a", "/ecs/b"])
+        self.assertEqual(incident_parse._parse_log_groups({"logGroups": [{"logGroupName": "/ecs/a"}]}),
                          ["/ecs/a"])
 
     def test_an_unknown_shape_is_none_not_empty(self):
         """None means parser gap; [] would mean 'this resource has no log groups'."""
-        self.assertIsNone(inv._parse_log_groups({"totallyUnexpected": {"a": 1}}))
-        self.assertIsNone(inv._parse_log_groups(None))
+        self.assertIsNone(incident_parse._parse_log_groups({"totallyUnexpected": {"a": 1}}))
+        self.assertIsNone(incident_parse._parse_log_groups(None))
 
 
 class LogLineParsingTests(unittest.TestCase):
     def test_only_explicit_message_fields_are_read(self):
         rows = {"results": [[{"field": "@timestamp", "value": "t"},
                              {"field": "@message", "value": "the line"}]]}
-        self.assertEqual(inv._parse_cloudwatch_log_lines(rows), ["the line"])
+        self.assertEqual(incident_parse._parse_cloudwatch_log_lines(rows), ["the line"])
 
     def test_a_plain_object_list_with_message_keys_parses(self):
-        self.assertEqual(inv._parse_cloudwatch_log_lines([{"message": "one"}, {"@message": "two"}]),
+        self.assertEqual(incident_parse._parse_cloudwatch_log_lines([{"message": "one"}, {"@message": "two"}]),
                          ["one", "two"])
 
     def test_an_unknown_shape_is_none_never_stringified(self):
         """The 2026-07-30 defect class: str(body).splitlines() turns an error envelope into
         'log lines'. There must be no path that does that."""
-        self.assertIsNone(inv._parse_cloudwatch_log_lines({"error": "denied", "code": 403}))
-        self.assertIsNone(inv._parse_cloudwatch_log_lines(None))
+        self.assertIsNone(incident_parse._parse_cloudwatch_log_lines({"error": "denied", "code": 403}))
+        self.assertIsNone(incident_parse._parse_cloudwatch_log_lines(None))
 
 
 if __name__ == "__main__":

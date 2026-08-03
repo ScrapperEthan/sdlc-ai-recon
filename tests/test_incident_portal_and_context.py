@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from retriever import incident
-from webapp import incident_investigator as inv, mcp_client, mcp_registry
+from webapp import (incident_investigator as inv, incident_plan, mcp_client, mcp_registry)
 
 TRACKING = "MDCTRACK-9F2K-88H1"
 ALERT_WITH_ID = "MDC Alert - General SHP API Error\ntrackingId: %s\nseverity: MINOR" % TRACKING
@@ -75,7 +75,7 @@ class TrackingIdExtractionTests(unittest.TestCase):
 
 class PortalPlanTests(unittest.TestCase):
     def _plan(self, alert=ALERT_WITH_ID, **kwargs):
-        return inv.plan(alert, **kwargs)
+        return incident_plan.plan(alert, **kwargs)
 
     def test_a_caller_supplied_id_beats_the_alert_text(self):
         out = self._plan(tracking_id="CALLER-SUPPLIED-99")
@@ -273,7 +273,7 @@ class BranchIndependenceTests(unittest.TestCase):
         alert = ("prodECS_mc-hk-hase-x_service_CPU at 2026-07-30 03:15 HKT\n"
                  "trackingId: %s" % TRACKING)
         with mock.patch.object(mcp_client, "call", _call), \
-             mock.patch.object(inv.incident, "parse_alert", lambda text, repos=None: {
+             mock.patch.object(incident, "parse_alert", lambda text, repos=None: {
                  "identified": True, "repos": [{"repo": "mc-hk-hase-x"}], "use_cases": [],
                  "times": [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
                             "normalized": "2026-07-30 03:15:00"}],
@@ -289,9 +289,9 @@ class CloudWatchContextTests(unittest.TestCase):
     """alarm_history / recent_changes: context about the alarm, never a stated cause."""
 
     def test_a_resource_is_only_taken_from_an_explicit_dimension(self):
-        self.assertEqual(inv._explicit_resource(
+        self.assertEqual(incident_plan._explicit_resource(
             {"dimensions": [{"Name": "ServiceName", "Value": "csl-sms-deli"}]}), "csl-sms-deli")
-        self.assertEqual(inv._explicit_resource(
+        self.assertEqual(incident_plan._explicit_resource(
             {"dimensions": [{"Name": "ClusterName", "Value": "prod-cluster"}]}), "prod-cluster")
 
     def test_a_dimension_that_does_not_name_a_resource_is_ignored(self):
@@ -299,13 +299,13 @@ class CloudWatchContextTests(unittest.TestCase):
         for name in ("AlarmName", "Region", "Environment", "Repo", "Namespace"):
             with self.subTest(name=name):
                 self.assertEqual(
-                    inv._explicit_resource({"dimensions": [{"Name": name, "Value": "something"}]}),
+                    incident_plan._explicit_resource({"dimensions": [{"Name": name, "Value": "something"}]}),
                     "")
 
     def test_no_dimensions_at_all_yields_no_resource(self):
         for identity in ({}, {"dimensions": []}, {"dimensions": None}, {"dimensions": "x"}):
             with self.subTest(identity=identity):
-                self.assertEqual(inv._explicit_resource(identity), "")
+                self.assertEqual(incident_plan._explicit_resource(identity), "")
 
     def test_relative_position_is_a_category_never_a_timestamp(self):
         window = {"start_utc": "2026-07-30 02:45:00", "end_utc": "2026-07-30 03:45:00",

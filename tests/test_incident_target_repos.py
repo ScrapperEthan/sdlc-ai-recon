@@ -12,7 +12,8 @@ Two gaps the sub-agent had:
 import unittest
 from unittest import mock
 
-from webapp import incident_investigator as inv, tools
+from retriever import incident
+from webapp import incident_investigator as inv, incident_plan, tools
 
 ALERT_NO_REPO = "MDC Alert - General SHP API Error at 2026-07-30 03:15 HKT"
 TIMES = [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
@@ -29,9 +30,9 @@ def _parsed(identified=False, repos=None, use_cases=None):
 
 class TargetRepoTests(unittest.TestCase):
     def _plan(self, parsed, **kwargs):
-        with mock.patch.object(inv.incident, "parse_alert", parsed), \
-             mock.patch.object(inv.incident, "known_repos", lambda repos=None: list(KNOWN)):
-            return inv.plan(ALERT_NO_REPO, **kwargs)
+        with mock.patch.object(incident, "parse_alert", parsed), \
+             mock.patch.object(incident, "known_repos", lambda repos=None: list(KNOWN)):
+            return incident_plan.plan(ALERT_NO_REPO, **kwargs)
 
     def test_an_alert_naming_no_repo_is_still_runnable_when_the_caller_names_one(self):
         """Before this, the only outcome here was a refusal."""
@@ -78,9 +79,9 @@ class TargetRepoTests(unittest.TestCase):
         """An absent index/repo_tags.json is OUR gap. Refusing the caller's id for it would be
         letting a missing file veto knowledge the caller actually has — accept it, mark it
         unvalidated, and say so."""
-        with mock.patch.object(inv.incident, "parse_alert", _parsed()), \
-             mock.patch.object(inv.incident, "known_repos", lambda repos=None: []):
-            out = inv.plan(ALERT_NO_REPO, target_repos=["mc-hk-hase-anything"])
+        with mock.patch.object(incident, "parse_alert", _parsed()), \
+             mock.patch.object(incident, "known_repos", lambda repos=None: []):
+            out = incident_plan.plan(ALERT_NO_REPO, target_repos=["mc-hk-hase-anything"])
         self.assertEqual([t["repo"] for t in out["targets"]], ["mc-hk-hase-anything"])
         self.assertFalse(out["targets"][0]["validated"])
         self.assertIn("could not be confirmed to exist", out["targets"][0]["app_note"])
@@ -100,10 +101,10 @@ class TargetRepoTests(unittest.TestCase):
 
     def test_derived_keywords_come_from_the_caller_supplied_repo_too(self):
         """The target is not just an app name — it is what the graph-derived keywords hang off."""
-        with mock.patch.object(inv.incident, "parse_alert", _parsed()), \
-             mock.patch.object(inv.incident, "known_repos", lambda repos=None: list(KNOWN)), \
-             mock.patch.object(inv, "exception_classes", lambda repo: ["SmsDeliveryException"]):
-            out = inv.plan(ALERT_NO_REPO, target_repos=["mc-hk-hase-csl-sms-deli-job"])
+        with mock.patch.object(incident, "parse_alert", _parsed()), \
+             mock.patch.object(incident, "known_repos", lambda repos=None: list(KNOWN)), \
+             mock.patch.object(incident_plan, "exception_classes", lambda repo: ["SmsDeliveryException"]):
+            out = incident_plan.plan(ALERT_NO_REPO, target_repos=["mc-hk-hase-csl-sms-deli-job"])
         terms = [k["term"] for k in out["keywords"]]
         self.assertIn("SmsDeliveryException", terms)
         why = [k["why"] for k in out["keywords"] if k["term"] == "SmsDeliveryException"][0]

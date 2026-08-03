@@ -1,45 +1,26 @@
-"""The incident investigator: the only thing in this system that touches raw production logs.
+"""The incident sub-agent: reads production over MCP, returns a redacted evidence packet.
 
-It exists to be a *wall*, not a feature. The main agent's conversation is persisted to
-`webapp_data/chat_sessions.json`; raw production log text must never land there, and "we were
-careful" is not a control. So the split is structural: this module reads logs into local variables,
-redacts and aggregates them, and returns a **structured evidence packet**. The raw text is never
-returned, never yielded, never logged, and is unreachable once `investigate()` returns.
+This module is the ORCHESTRATION and the EXIT GATE. The two layers under it were split out once it
+passed 2700 lines, because they fail in different ways and are testable at different costs:
 
-Three defences, deliberately redundant, because the expensive failure here is silent:
+* `incident_plan`   — alert text -> a query plan. Decides what to ask. Opens no sockets.
+* `incident_parse`  — reads the bodies that come back. Decides what an answer MEANS.
+* here              — runs the three branches, shapes evidence, and sanitizes what leaves.
 
-1. **Redact at extraction.** Every line is passed through `redact()` before it is put anywhere that
-   could end up in the packet.
-2. **Verify at the exit.** `sanitize_packet()` re-scans the finished packet and strips anything that
-   still matches a PII pattern, recording that it had to. If defence 1 is ever bypassed by a new
-   code path, this still holds, and the `sanitized_at_exit` counter makes the bypass visible instead
-   of silent.
-3. **Bound what leaves at all.** Excerpt count and length are capped, so even a redaction miss is
-   limited in blast radius rather than shipping a whole log file.
+Everything moved is reached module-qualified — `incident_plan.plan(...)`,
+`incident_parse._decode(...)` — never through a re-export. That is deliberate: `from X import f`
+creates a SECOND binding, so patching `incident_plan.log_sources` in a test would be invisible here
+and the test would quietly exercise the real function. One binding per name means patching and
+reading can never disagree. Only the exit-gate names are imported directly, because this module is
+the exit gate and they read as its own vocabulary.
 
-## production vs dev, and why every item carries a label
+## Three branches, ascending in what they need to know
 
-Two different data sources with opposite handling rules meet in one answer:
+PORTAL delivery records (a `tracking_id` alone), the CloudWatch metric around an alarm (an alarm
+name plus a window), and LogDream logs (a repo/app plus a window). They run independently and any
+one can succeed while the others refuse — one branch's silence never stands in for another's result.
 
-* **LogDream's sources and CloudWatch are PRODUCTION** (owner confirmed 2026-07-29: both LogDream
-  sources are production, holding different logs — and each has its OWN app list, so an app present
-  on one is not necessarily present on the other).
-* **The use-case route snapshot is dev/SCT**, not production — a use case absent there is not
-  evidence it is absent in production.
-
-Mixing those two silently is how "this is what production does" gets asserted from a dev export. So
-every evidence item states its `environment`, and the packet carries
-`contains_production_data`, which is what a caller keys the storage rules off.
-
-## The query plan is the part a generic AIOps cannot write
-
-Alert text -> which app, which files, which window, **which keywords**. The keywords come from our
-own graph: the topics that repo actually produces or consumes, the use cases on that delivery path,
-its channel and carrier, and the exception classes that genuinely exist in its source. Nobody
-without the code graph can produce that list, and it is the difference between "search the logs for
-ERROR" and "search for the four exceptions this service can actually throw".
-
-Everything in the plan fails closed:
+## Everything fails closed
 
 * An app name is only used if it appears in the server's OWN `log.list_apps` output. RUNBOOK-55
   measured repo->app naming at 0% identical and ~36% by rule, so a rule-derived name is a
@@ -47,1007 +28,49 @@ Everything in the plan fails closed:
 * A time window is never invented. Three timezones coexist (CloudWatch UTC / LogDream
   Asia/Hong_Kong / servers GMT); a helpfully-defaulted window returns nothing and reads as "no
   anomaly", which is the worst possible failure for this feature. Without one the plan is NOT
-  runnable and zero calls are made — see `plan()`.
+  runnable and zero calls are made.
 * A structured response is read structurally. Their bodies are JSON; reading JSON as text is how a
   2-line response was reported as 11 lines and how `entries`/`entry_type` became "app names"
-  (intranet, 2026-07-31). See the response-shape section below.
+  (intranet, 2026-07-31). See `incident_parse`.
+* Nothing leaves without crossing `redaction`. The model receives only the redacted packet; raw text
+  goes to the owner-scoped side store or nowhere at all.
 """
-import json
-import math
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from datetime import timezone as _utc_tz          # `timezone` is a parameter name all over this file
 
-from retriever import code as rcode, incident, messages as msg, repo_tags
 from . import config, incident_raw_store, mcp_client, mcp_registry
 
-# LogDream's sources are BOTH production, holding different logs, so both are queried and every piece
-# of evidence says which one it came from (owner, 2026-07-29).
-#
-# These are ENVIRONMENT VOCABULARY, so the intranet's config is authoritative and this is only the
-# fallback. Hard-coding them here was a mistake of exactly the kind RUNBOOK-49/50/51 were three
-# separate fixes for: the literal was `hk1` (digit one) where the server accepts `hkl` (letter L),
-# which the box reported in RUNBOOK-60 and which silently loses half the log coverage — every query
-# against the bad name comes back rejected, and a rejection that is read as "no lines" reads as
-# "no problem".
-DEFAULT_LOG_SOURCES = ("hkl", "hkp3")
+# ---- the two layers under this one ------------------------------------------------------------
+# Imported as MODULES and always called qualified. There is exactly one binding for each moved name,
+# living in the module that owns it, so a test that patches `incident_plan.log_sources` is seen by
+# every caller including this one. `log_sources` is called from both modules, and a `from ... import`
+# here would have left this side bound to the original — a patched test silently exercising the real
+# function is the worst kind of green.
+from . import incident_parse, incident_plan
+# The exception, and only because this module IS the exit gate: these read as its own vocabulary
+# rather than as a call into another layer.
+from .redaction import _digest, redact, sanitize_packet
+# Constants used unqualified in the body below. Values, not behaviour — nothing patches them, so a
+# second binding costs nothing.
+from .incident_plan import _EXCEPTION_CLASS, _METRIC_TIME_FORMAT, _RESOURCE_DIMENSIONS
+from .incident_parse import (
+    _PORTAL_REASON_KEYS, _PORTAL_STATUS_KEYS, _TAG_KEYS_OF_INTEREST)
 
 
-def log_sources():
-    """Sources to query, from `servers.logdream.sources` in the intranet config; else the default.
-
-    A source with `query_by_default: false` is skipped. Whatever this returns is still validated
-    against the live server before anything is searched (each source's app listing must succeed), so
-    a wrong name produces a loud, specific refusal naming that source rather than half the queries
-    quietly finding nothing.
-    """
-    declared = (mcp_registry.servers().get("logdream") or {}).get("sources")
-    if isinstance(declared, dict):
-        names = [str(name).strip() for name, spec in declared.items()
-                 if not str(name).startswith("_") and str(name).strip()
-                 and (not isinstance(spec, dict) or spec.get("query_by_default", True))]
-        if names:
-            return tuple(names)
-    return DEFAULT_LOG_SOURCES
-
-
-# ---- reading THEIR response bodies -----------------------------------------------------------
-# Three parsers were wrong in the same way (intranet, 2026-07-31): each treated a structured JSON
-# body as if it were text. `log.read` split the JSON source and reported 11 lines for a 2-line
-# response; `log.list_apps` split the whole body on punctuation, so `entries`, `entry_type`, `name`
-# and a `README.txt` sitting beside the app all became "app names".
-#
-# The rule now, the same seam the argument names already follow:
-#
-#   * a body that parses as JSON is read STRUCTURALLY and never with a regex;
-#   * which fields hold the data is declared by the intranet in `config/mcp_tools.json` under the
-#     operation's `response` key — the shapes below are only the fallback, so a field rename is a
-#     config edit on the box, not an external push;
-#   * a JSON body no declared field fits FAILS CLOSED — no lines, no app names, and a stated reason
-#     naming what was looked for. The alternative is the bug that was found: JSON metadata reported
-#     as production evidence, which is worse than no answer;
-#   * only a body that is not JSON at all takes the legacy text path.
-#
-# A value may be a dotted path (`data.entries`) so a nested body needs no code change either.
-RESPONSE_SHAPES = {
-    "log.read": {
-        "lines": ("lines", "log_lines", "records", "entries", "results", "items", "matches", "data"),
-        "line_text": ("line", "text", "message", "content", "log", "raw"),
-        # Their own count, reported next to ours so a disagreement is visible rather than assumed.
-        "count": ("line_count", "total_lines", "matched_lines", "total", "count"),
-    },
-    "log.list_apps": {
-        "entries": ("entries", "apps", "applications", "items", "results", "data"),
-        "name": ("name", "app", "app_name"),
-        # An app is a DIRECTORY on the log host; a file beside it is not an app. Enforced whenever
-        # the batch actually carries a kind field — see `extract_app_names` for why not always.
-        "kind": ("entry_type", "type", "kind"),
-        "kind_value": "dir",
-    },
-    "log.search_files": {
-        "entries": ("files", "entries", "items", "results", "matches", "data"),
-        "name": ("file", "file_name", "filename", "name", "path"),
-        "kind": ("entry_type", "type", "kind"),
-        # Inverted here: exclude what declares itself a directory, rather than require "file". The
-        # shapes already verified on the box carry no kind field at all, and a `.log` name is
-        # required regardless, so demanding a field nobody has observed would refuse real answers.
-        "kind_exclude": ("dir", "directory", "folder"),
-    },
-}
-
-
-def response_shape(operation):
-    """Field names for one operation's response body: intranet config first, built-in as fallback."""
-    shape = dict(RESPONSE_SHAPES.get(operation) or {})
-    declared = (mcp_registry.operations().get(operation) or {}).get("response")
-    if not isinstance(declared, dict):
-        return shape
-    for key, value in declared.items():
-        if str(key).startswith("_"):
-            continue
-        if key == "kind_value":
-            shape[key] = value if isinstance(value, str) else None
-        elif value is None:
-            shape[key] = ()             # "this server has no such field" — an explicit answer
-        elif isinstance(value, str):
-            shape[key] = (value,)
-        elif isinstance(value, (list, tuple)):
-            shape[key] = tuple(str(v) for v in value)
-    return shape
-
-
-def _decode(text, structured=None):
-    """The response body as data, or None when it is not JSON at all.
-
-    `structuredContent` is the server's own typed answer and wins when present. A bare JSON scalar
-    counts as text, not structure: a log body of `null` or `42` must not be mistaken for a shape.
-    """
-    if isinstance(structured, (dict, list)):
-        return structured
-    try:
-        body = json.loads(text)
-    except (ValueError, TypeError):
-        return None
-    return body if isinstance(body, (dict, list)) else None
-
-
-def _dig(body, path):
-    """`data.entries` -> body["data"]["entries"], or None. Never walks looking for a match."""
-    node = body
-    for part in str(path).split("."):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    return node
-
-
-def _rows(body, keys):
-    """The declared list inside a JSON body, or None when no declared field holds one.
-
-    None is not "empty". It means the body had a shape we do not know how to read, which must fail
-    closed — scraping tokens out of it is exactly the defect this replaces.
-    """
-    if isinstance(body, list):
-        return body
-    if isinstance(body, dict):
-        for key in keys:
-            value = _dig(body, key)
-            if isinstance(value, list):
-                return value
-    return None
-
-
-def _shape_error(operation, field, keys, extra=""):
-    return (f"{operation} returned a JSON body with no recognised {field} field (looked for: "
-            f"{', '.join(keys) or 'nothing declared'}). {extra}Nothing was taken from it — reading "
-            f"a structured body as text reports JSON metadata as evidence. Declare the real field "
-            f"under operations['{operation}'].response.{field} in the intranet's mcp_tools.json.")
-
-
-def extract_log_lines(text, structured=None, operation="log.read"):
-    """A log response -> (lines, reported_count, error). `lines is None` means fail closed.
-
-    `reported_count` is the server's own count when it states one, kept so "they said 200, we can
-    read 50" is visible instead of silently becoming 50.
-    """
-    shape = response_shape(operation)
-    body = _decode(text, structured)
-    if body is None:
-        # Plain log text: the legacy shape, and the only case where splitting is correct.
-        return [line for line in (text or "").splitlines() if line.strip()], None, ""
-    rows = _rows(body, shape.get("lines") or ())
-    if rows is None:
-        return None, None, _shape_error(operation, "lines", shape.get("lines") or ())
-    reported = None
-    if isinstance(body, dict):
-        for key in shape.get("count") or ():
-            value = _dig(body, key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                reported = value
-                break
-    text_keys = shape.get("line_text") or ()
-    lines = []
-    for row in rows:
-        if isinstance(row, str):
-            if row.strip():
-                lines.append(row)
-            continue
-        if isinstance(row, dict):
-            value = next((row[k] for k in text_keys if isinstance(row.get(k), str)), None)
-            if value is None:
-                return None, None, _shape_error(
-                    operation, "line_text", text_keys,
-                    extra="The line container was found but its entries carry no known text field. ")
-            if value.strip():
-                lines.append(value)
-            continue
-        return None, None, _shape_error(
-            operation, "lines", shape.get("lines") or (),
-            extra=f"An entry was a {type(row).__name__}, not a line. ")
-    return lines, reported, ""
-
-
-def extract_app_names(text, structured=None, operation="log.list_apps"):
-    """A `log.list_apps` response -> (names, note, error). `names is None` means fail closed.
-
-    This list is a VERIFICATION set: a candidate app name is queried only if it appears here. So
-    over-inclusion is the dangerous direction — a fabricated entry lets an unverified name through,
-    the query comes back empty, and empty reads as "no problem". Hence directories only, and hence
-    failing closed rather than harvesting whatever tokens the body happens to contain.
-
-    The kind filter is enforced whenever the batch carries a kind field at all. Requiring it
-    unconditionally would refuse a server that simply does not send one — that is a shape we have
-    never observed, and refusing every app over it is its own silent outage.
-    """
-    shape = response_shape(operation)
-    body = _decode(text, structured)
-    if body is None:
-        names = {token.strip(" \t\"',[]{}:") for token in re.split(r"[\s,]+", text or "")}
-        return sorted(n for n in names if n), "plain-text listing (legacy shape)", ""
-    rows = _rows(body, shape.get("entries") or ())
-    if rows is None:
-        return None, "", _shape_error(operation, "entries", shape.get("entries") or ())
-    kind_keys = shape.get("kind") or ()
-    want = shape.get("kind_value")
-    name_keys = shape.get("name") or ()
-    kinds = [next((str(row[k]) for k in kind_keys if isinstance(row.get(k), str)), None)
-             for row in rows if isinstance(row, dict)]
-    enforce = bool(want) and any(kind is not None for kind in kinds)
-    names, filtered, unnamed = [], 0, 0
-    for row in rows:
-        if isinstance(row, str):
-            if row.strip():
-                names.append(row.strip())        # legacy list-of-strings, still accepted
-            continue
-        if not isinstance(row, dict):
-            return None, "", _shape_error(
-                operation, "entries", shape.get("entries") or (),
-                extra=f"An entry was a {type(row).__name__}. ")
-        if enforce:
-            kind = next((str(row[k]) for k in kind_keys if isinstance(row.get(k), str)), None)
-            if kind != want:
-                filtered += 1                    # a file, or something that is not an app
-                continue
-        name = next((row[k] for k in name_keys if isinstance(row.get(k), str)), "")
-        if name.strip():
-            names.append(name.strip())
-        else:
-            unnamed += 1
-    if unnamed and not names:
-        # Entries were present and NONE carried a name we recognise. Returning [] here would say
-        # "this source has no apps", which is a claim about their environment we have no basis for.
-        return None, "", _shape_error(
-            operation, "name", name_keys,
-            extra=f"{unnamed} entry/entries were found but none carried a known name field. ")
-    note = ""
-    if filtered:
-        note = f"{filtered} non-{want} entry/entries ignored (files are not apps)"
-    elif not enforce and any(isinstance(row, dict) for row in rows):
-        note = ("no entry-type field was present, so files could not be told apart from apps; "
-                "every named entry was accepted")
-    if unnamed:
-        note = (note + "; " if note else "") + f"{unnamed} entry/entries had no readable name"
-    return sorted(set(names)), note, ""
-
-
-# ---- CloudWatch: the metric half of an incident ------------------------------------------------
-# The log branch answers "what did the service say". This one answers "what was the shape of the
-# thing that fired the alarm". They are kept apart on purpose: separate accounting, separate
-# refusals, and either can run when the other cannot (intranet handoff, 2026-07-31 §7).
-#
-# The rules that differ from the log branch, and why:
-#
-# * **Metric identity is read from the ALARM, never derived.** `resource` is not a namespace and a
-#   repo name is not a dimension. `get_alarm` returns Namespace/MetricName/Dimensions/Statistic/
-#   Period; anything missing means we stop, because a guessed identity silently returns a DIFFERENT
-#   service's numbers.
-# * **This is the one place a moment IS converted.** CloudWatch wants UTC. The log branch never
-#   converts (it sends the stamp and the zone separately); mixing the two rules up puts the metric
-#   window eight hours from the incident.
-# * **Only categories leave.** The datapoints are used in local variables to decide rising/flat/
-#   high-variability and are then dropped. No value, no average, no min/max, no delta reaches the
-#   packet — the session is persisted, and a metric series is production data.
-
-# The window is a QUERY STRATEGY, not a fact about the alarm, so it is bounded, configurable, and
-# stated in the evidence.
-_METRIC_MINUTES_BEFORE = int(os.environ.get("SDLC_INCIDENT_METRIC_MINUTES_BEFORE", "15"))
-_METRIC_MINUTES_AFTER = int(os.environ.get("SDLC_INCIDENT_METRIC_MINUTES_AFTER", "15"))
-# Hard ceiling on either side. `Period x EvaluationPeriods` widens the "before" side so the window
-# covers what the alarm actually evaluated, but a pathological alarm config must not be able to ask
-# for a week of datapoints.
-_METRIC_MAX_MINUTES = int(os.environ.get("SDLC_INCIDENT_METRIC_MAX_MINUTES", "180"))
-_METRIC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_MAX_DIMENSIONS = 10
 # How many history / change rows are read. Context, not a timeline — a bigger number would only add
 # material we deliberately throw away.
 _MAX_CONTEXT_ITEMS = int(os.environ.get("SDLC_INCIDENT_MAX_CONTEXT_ITEMS", "25"))
-# The ONLY dimension names that identify a resource well enough to scope a change lookup. Anything
-# else (and emphatically the alarm name or a repo id) is not a resource — see the intranet handoff
-# §3.4: a guessed resource returns another service's change history under this incident's heading.
-_RESOURCE_DIMENSIONS = ("ServiceName", "DBClusterIdentifier", "DBInstanceIdentifier", "QueueName",
-                        "FunctionName", "LoadBalancer", "TargetGroup", "ClusterName",
-                        "Cluster Name", "TableName", "StreamName")
-
-
-def _explicit_resource(identity):
-    """A resource name taken VERBATIM from an explicit alarm dimension, or "" — never assembled."""
-    dimensions = (identity or {}).get("dimensions") or []
-    if not isinstance(dimensions, list):
-        return ""
-    # `alarm_metric_identity` keeps dimensions as [{"Name": ..., "Value": ...}] in the alarm's own
-    # order. Preference follows _RESOURCE_DIMENSIONS, not that order, so the same alarm always
-    # scopes to the same resource.
-    by_name = {str(item.get("Name") or ""): str(item.get("Value") or "")
-               for item in dimensions if isinstance(item, dict)}
-    for name in _RESOURCE_DIMENSIONS:
-        value = by_name.get(name, "").strip()
-        if value:
-            return value
-    return ""
-
-# Zones with no DST, where a fixed offset is exact rather than an approximation. Hong Kong has not
-# observed DST since 1979, which covers every incident anyone will investigate here. This exists
-# because a bare Windows box has no tz database — `zoneinfo` needs the `tzdata` package, which an
-# air-gapped install does not have — and "convert with whatever offset" is not an option.
-_FIXED_OFFSET_ZONES = {
-    "ASIA/HONG_KONG": 8 * 3600, "HONGKONG": 8 * 3600,
-    "UTC": 0, "GMT": 0, "ETC/UTC": 0, "ETC/GMT": 0, "Z": 0,
-}
-
-
-def to_utc(stamp, zone):
-    """`2026-07-30 03:15:00` + `Asia/Hong_Kong` -> (aware UTC datetime, how), or (None, why).
-
-    `zoneinfo` first, so any zone with DST is handled correctly where the tz database exists; the
-    fixed-offset table backs it up for the no-DST zones when it does not. An unknown zone returns
-    None and the metric call is skipped: a window converted with the wrong offset comes back full
-    of datapoints from the wrong hour, which is worse than no window at all.
-    """
-    try:
-        naive = datetime.strptime(stamp, ALERT_TIME_FORMAT)
-    except (TypeError, ValueError):
-        return None, f"the alert time {stamp!r} is not in {ALERT_TIME_FORMAT}"
-    key = (zone or "").strip()
-    if not key:
-        return None, "no timezone, so the alert time cannot be placed on the UTC timeline"
-    try:
-        from zoneinfo import ZoneInfo
-        return naive.replace(tzinfo=ZoneInfo(key)).astimezone(_utc_tz.utc), "zoneinfo"
-    except Exception:                     # noqa: BLE001 -- absent tzdata, unknown key: same handling
-        pass
-    offset = _FIXED_OFFSET_ZONES.get(key.upper())
-    if offset is None:
-        return None, (f"timezone {key!r} could not be resolved (no tz database on this host and it "
-                      f"is not one of the fixed-offset zones). The metric window was NOT built — a "
-                      f"wrongly converted window returns the wrong hour's datapoints.")
-    shifted = naive.replace(tzinfo=_utc_tz(timedelta(seconds=offset))).astimezone(_utc_tz.utc)
-    return shifted, f"fixed offset table ({key}, no DST)"
-
-
-def metric_window_bounds(alert_utc, period_seconds=300, evaluation_periods=1):
-    """The UTC window to query around an alert. Bounded and stated, never derived from `now()`."""
-    evaluated = max(1, int(period_seconds or 300)) * max(1, int(evaluation_periods or 1))
-    before = min(_METRIC_MAX_MINUTES,
-                 max(_METRIC_MINUTES_BEFORE, math.ceil(evaluated / 60)))
-    after = min(_METRIC_MAX_MINUTES, max(0, _METRIC_MINUTES_AFTER))
-    start = alert_utc - timedelta(minutes=before)
-    end = alert_utc + timedelta(minutes=after)
-    fmt = ((mcp_registry.operations().get("aws.metric_window") or {}).get("request") or {}).get(
-        "time_format")
-    fmt = fmt if isinstance(fmt, str) and fmt.strip() else _METRIC_TIME_FORMAT
-    return {
-        "start_utc": start.strftime(fmt),
-        "end_utc": end.strftime(fmt),
-        "basis": "the alert time plus its explicit timezone, converted to UTC",
-        "policy": (f"{before} minute(s) before and {after} after the alert. This is OUR query "
-                   f"strategy, not a window CloudWatch defines; the 'before' side is widened to "
-                   f"cover Period x EvaluationPeriods ({evaluated}s) and capped at "
-                   f"{_METRIC_MAX_MINUTES} minutes."),
-    }
-
-
-def alarm_metric_identity(body):
-    """A `get_alarm` body -> the metric to query, or (None, why).
-
-    Read strictly from the alarm's own configuration. Nothing here may be inferred from the alarm
-    NAME, the repo, or an ECS resource string: `resource != namespace` and `resource != dimensions`.
-    """
-    if not isinstance(body, dict):
-        return None, "the get_alarm response was not a JSON object"
-    namespace = body.get("Namespace")
-    metric = body.get("MetricName")
-    if not isinstance(namespace, str) or not namespace.strip():
-        return None, "the alarm carries no Namespace, so the metric identity is unknown"
-    if not isinstance(metric, str) or not metric.strip():
-        return None, "the alarm carries no MetricName, so the metric identity is unknown"
-    raw_dims = body.get("Dimensions")
-    if raw_dims is None:
-        raw_dims = []
-    if not isinstance(raw_dims, list):
-        return None, "the alarm's Dimensions field was not a list"
-    dimensions = []
-    for item in raw_dims[:_MAX_DIMENSIONS]:
-        if not isinstance(item, dict):
-            return None, "a Dimensions entry was not an object"
-        name, value = item.get("Name"), item.get("Value")
-        if not isinstance(name, str) or not isinstance(value, str):
-            return None, "a Dimensions entry had no string Name/Value pair"
-        dimensions.append({"Name": name, "Value": value})
-
-    def _int(key, default):
-        value = body.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else default
-
-    statistic = body.get("Statistic")
-    return {
-        "namespace": namespace,
-        "metric": metric,
-        "dimensions": dimensions,
-        # The alarm's OWN statistic/period. Letting the model pick a default would mean querying a
-        # different aggregation from the one that fired.
-        "statistic": statistic if isinstance(statistic, str) and statistic.strip() else "Average",
-        "period_seconds": _int("Period", 300),
-        "evaluation_periods": _int("EvaluationPeriods", 1),
-        "threshold": body.get("Threshold") if isinstance(body.get("Threshold"), (int, float))
-                     and not isinstance(body.get("Threshold"), bool) else None,
-        "comparison": body.get("ComparisonOperator")
-                      if isinstance(body.get("ComparisonOperator"), str) else "",
-    }, ""
-
-
-def parse_metric_window(body):
-    """A `get_metric_window` body -> (points, status_code, error). `points is None` = fail closed.
-
-    `points` is a list of (datetime, float) that stays in the caller's local variables. An EMPTY
-    list is a real answer — "no datapoint in exactly this window" — and must never be reported as
-    "the system was fine". An unreadable shape is OUR wiring problem and must never be reported as
-    either.
-    """
-    if not isinstance(body, dict):
-        return None, "", "the metric response was not a JSON object"
-    stamps, values = body.get("Timestamps"), body.get("Values")
-    if not isinstance(stamps, list) or not isinstance(values, list):
-        return None, "", "the metric response has no Timestamps/Values lists"
-    if len(stamps) != len(values):
-        return None, "", (f"the metric response returned {len(stamps)} timestamps and "
-                          f"{len(values)} values — mismatched lengths, so the series cannot be "
-                          f"read. This is a wiring/parser failure, not a quiet metric.")
-    status = body.get("StatusCode") if isinstance(body.get("StatusCode"), str) else ""
-    points = []
-    for raw_stamp, raw_value in zip(stamps, values):
-        if not isinstance(raw_stamp, str):
-            return None, status, "a metric timestamp was not a string"
-        try:
-            when = datetime.fromisoformat(raw_stamp.replace("Z", "+00:00"))
-        except ValueError:
-            return None, status, f"a metric timestamp could not be parsed ({len(raw_stamp)} chars)"
-        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-            return None, status, "a metric value was not a number"
-        if not math.isfinite(raw_value):
-            return None, status, "a metric value was NaN or infinite"
-        points.append((when, float(raw_value)))
-    points.sort(key=lambda pair: pair[0])
-    return points, status, ""
-
-
-def summarize_points(points, threshold=None, comparison=""):
-    """Datapoints -> CATEGORIES. The numbers are used here and go no further.
-
-    Deliberately coarse. `direction` and `variability` describe the window that was queried and
-    nothing else; a rising line is not a root cause, and this summary must not be phrased as one.
-    """
-    values = [value for _when, value in points or []]
-    out = {"data_presence": "present" if values else "absent",
-           "direction": "insufficient_data",
-           "variability": "insufficient_data",
-           "threshold_relation": "not_evaluated"}
-    if len(values) >= 2:
-        third = max(1, len(values) // 3)
-        head = sum(values[:third]) / third
-        tail = sum(values[-third:]) / third
-        scale = max(abs(head), abs(tail), 1e-9)
-        change = (tail - head) / scale
-        out["direction"] = "rising" if change > 0.1 else "falling" if change < -0.1 else "flat"
-
-        mean = sum(values) / len(values)
-        spread = math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
-        if abs(mean) < 1e-9:
-            out["variability"] = "high" if spread > 1e-9 else "low"
-        else:
-            ratio = spread / abs(mean)
-            out["variability"] = "low" if ratio < 0.1 else "medium" if ratio < 0.3 else "high"
-
-    if values and isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
-        op = (comparison or "").lower()
-        if "greater" in op:
-            breaching, side, other = [v > threshold for v in values], "above", "below"
-        elif "less" in op:
-            breaching, side, other = [v < threshold for v in values], "below", "above"
-        else:
-            breaching = side = other = None
-        if breaching is not None:
-            out["threshold_relation"] = (side if all(breaching)
-                                         else other if not any(breaching) else "crossing")
-    return out
-
-
-_SHAPE_MAX_DEPTH = 6
-_SHAPE_MAX_KEYS = 24
-
-
-def describe_shape(node, _depth=0):
-    """A response body -> its STRUCTURE only: field names, types, lengths. Never a value.
-
-    This exists so "what does your tool actually return?" can be answered from inside the intranet
-    without anyone reading a production response or pasting one out. Three rounds of defects came
-    from me guessing at their shapes; this is how the guessing stops without a log line travelling.
-
-    Values never appear — a string becomes `str(len=42)`. Field NAMES do appear, because they are
-    the whole point, but they are redacted too: a body keyed by account number would otherwise leak
-    through the one field this function has to print.
-    """
-    if _depth >= _SHAPE_MAX_DEPTH:
-        return "...(depth limit)"
-    if isinstance(node, dict):
-        keys = list(node)[:_SHAPE_MAX_KEYS]
-        out = {redact(str(key)): describe_shape(node[key], _depth + 1) for key in keys}
-        if len(node) > len(keys):
-            out["...(%d more keys)" % (len(node) - len(keys))] = ""
-        return out
-    if isinstance(node, list):
-        if not node:
-            return "list[0]"
-        kinds = sorted({type(item).__name__ for item in node})
-        # Only the FIRST element is described. A heterogeneous list is worth knowing about, so the
-        # types are all named even though only one is expanded.
-        return {"list[%d] of %s" % (len(node), "|".join(kinds)): describe_shape(node[0], _depth + 1)}
-    if isinstance(node, str):
-        return "str(len=%d)" % len(node)
-    if isinstance(node, bool):
-        return "bool"
-    return type(node).__name__
-
-
-def describe_response(out, operation):
-    """One MCP result -> a values-free report of its shape AND what our parsers made of it.
-
-    The single thing to paste back from the box when a parse fails: it says what they sent, what we
-    looked for, and where the two disagree, without any production text in it.
-    """
-    text = (out or {}).get("text") or ""
-    structured = (out or {}).get("structured")
-    body = _decode(text, structured)
-    report = {
-        "operation": operation,
-        "outcome": _tool_outcome(out)[0],
-        "carried_structured_content": isinstance(structured, (dict, list)),
-        "body_is_json": body is not None,
-        "shape": describe_shape(body) if body is not None else "not JSON (plain text)",
-        "text_chars": len(text),
-        "declared_shape": {k: list(v) if isinstance(v, tuple) else v
-                           for k, v in response_shape(operation).items()},
-    }
-    if operation == "log.read":
-        lines, reported, error = extract_log_lines(text, structured, operation)
-        report["parsed"] = {"lines": None if lines is None else len(lines),
-                            "server_reported_count": reported, "error": error}
-    elif operation == "log.list_apps":
-        names, note, error = extract_app_names(text, structured, operation)
-        report["parsed"] = {"apps": None if names is None else len(names),
-                            # Names are app/service identifiers, not customer data, and seeing a few
-                            # is how you tell a real listing from JSON keys. Still exit-gated below.
-                            "sample": (names or [])[:5], "note": note, "error": error}
-    elif operation == "log.search_files":
-        picked = select_log_files(text, structured=structured)
-        report["parsed"] = {"files": len(picked), "sample": picked[:5]}
-    cleaned, _check = sanitize_packet(report)
-    return cleaned
 
 
 _MAX_EXCERPTS = 5
 _MAX_EXCERPT_CHARS = 300
-_MAX_KEYWORDS = 8
 # Hard ceiling on log reads per investigation. Keywords x sources multiplies fast — 8 keywords over
 # two production sources is 16 calls, and RUNBOOK-55 clocked a single MCP call at 26.4s, so an
 # unbounded sweep is a seven-minute answer. Which keywords were actually spent is always reported,
 # because a nil result is only meaningful for the queries that ran.
 _MAX_LOG_QUERIES = int(os.environ.get("SDLC_INCIDENT_MAX_LOG_QUERIES", "6"))
-
-
-# ---- redaction ------------------------------------------------------------------------------
-# Moved to webapp/redaction.py once the MCP console became a second caller: the exit gate is the
-# boundary every production-to-browser path crosses, and a boundary living inside one of the things
-# it bounds is one somebody eventually routes around. Re-exported under the old names because these
-# are referenced all through this module and by its tests, and a rename adds risk to a move that has
-# none. `_PII` and `_IDENTIFIER_KEYS` come along because the tests assert on them directly.
-from .redaction import (             # noqa: E402 -- kept here, at the seam it used to occupy
-    _IDENTIFIER_KEYS, _PII, _digest, _residual_pii, redact, sanitize_packet)
-
-
-# ---- the query plan -------------------------------------------------------------------------
-
-def app_candidates(repo):
-    """Repo id -> candidate LogDream app names, with how each was derived.
-
-    RUNBOOK-55: 0% are identical, ~36% resolve by rule. So these are candidates to be checked
-    against the server's own app list, never answers. An intranet-owned mapping wins when present;
-    absent, the built-in rule applies — the box owns that file and cannot push it here.
-    """
-    repo = (repo or "").strip()
-    if not repo:
-        return []
-    mapped = _app_map().get(repo.lower())
-    if mapped:
-        return [{"app": mapped, "how": "config/logdream_apps.json (intranet-owned mapping)",
-                 "confidence": "confirmed"}]
-    stem = repo
-    for prefix in ("mc-hk-hase-", "amet-mdc-", "mc-hk-"):
-        if stem.startswith(prefix):
-            stem = stem[len(prefix):]
-            break
-    for suffix in ("-job", "-api", "-service", "-svc"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    parts = [part for part in stem.split("-") if part]
-    if not parts:
-        return []
-    camel = parts[0] + "".join(word.capitalize() for word in parts[1:])
-    out = [{"app": camel, "how": "rule: drop org prefix + role suffix, kebab->camel",
-            "confidence": "candidate"}]
-    if stem != camel:
-        out.append({"app": stem, "how": "rule: drop org prefix + role suffix only",
-                    "confidence": "candidate"})
-    return out
-
-
-# Both spellings are accepted. The intranet's own gap analysis calls this file
-# `config/logdream_app_map.json` while this module first shipped reading `logdream_apps.json`, and
-# config/ is intranet-owned on a box that cannot push — so a name disagreement would surface as the
-# mapping silently having no effect, which is the worst possible failure mode for a knob. Accepting
-# either costs one line; coordinating a rename across an air gap does not.
-_APP_MAP_FILES = ("logdream_app_map.json", "logdream_apps.json")
-# Likewise for the key: `repo_to_app` is what this module documented, but a hand-written file may
-# reasonably be a flat {repo: app} object.
-_APP_MAP_KEYS = ("repo_to_app", "repo_to_logdream_app", "mapping")
-
-
-def _app_map():
-    """{repo -> app}. Intranet knob, read if present. Absent is normal, not an error."""
-    import json
-    for name in _APP_MAP_FILES:
-        try:
-            with open(os.path.join(os.getcwd(), "config", name), encoding="utf-8-sig") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        mapping = next((data[key] for key in _APP_MAP_KEYS
-                        if isinstance(data.get(key), dict)), None)
-        if mapping is None:
-            # A flat {repo: app} file, minus any documentation keys.
-            mapping = {k: v for k, v in data.items()
-                       if not str(k).startswith("_") and isinstance(v, str)}
-        cleaned = {str(k).strip().lower(): str(v).strip() for k, v in mapping.items()
-                   if not str(k).startswith("_") and str(v).strip()}
-        if cleaned:
-            return cleaned
-    return {}
-
-
-_EXCEPTION_CLASS = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Throwable))\b")
-
-
-def exception_classes(repo, limit=6):
-    """Exception types that genuinely appear in this repo's source.
-
-    This is the half of the keyword list a generic AIOps cannot produce: not "search for ERROR", but
-    the specific types this service is actually able to throw. Empty when the mirror is unavailable —
-    a keyword we cannot substantiate is simply not offered.
-    """
-    try:
-        # Returns a list of 'path:line:text' strings, one per match.
-        hits = rcode.search_code(r"throw new \w+(Exception|Error)", glob="*.java",
-                                 max_results=60, repos=[repo])
-    except Exception:                                    # noqa: BLE001 — mirror absent is normal
-        return []
-    found = {}
-    for line in hits if isinstance(hits, list) else []:
-        for match in _EXCEPTION_CLASS.finditer(str(line)):
-            name = match.group(1)
-            found[name] = found.get(name, 0) + 1
-    return [name for name, _count in sorted(found.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
-
-
-# The wire format for `alert_time`. The real tool REJECTED `2026-07-30 03:15 HKT` and wants
-# `alert_time=2026-07-30 03:15:00` with `timezone=Asia/Hong_Kong` alongside it (intranet,
-# 2026-07-31). Passing the alert's own words through was meant to avoid converting the moment —
-# and it still does; this is a reformat, not a conversion. Configurable for the same reason
-# everything else about their side is: `operations['log.read'].request.alert_time_format`.
-ALERT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-def alert_time_format(operation="log.read"):
-    declared = ((mcp_registry.operations().get(operation) or {}).get("request") or {})
-    fmt = declared.get("alert_time_format")
-    return fmt if isinstance(fmt, str) and fmt.strip() else ALERT_TIME_FORMAT
-
-
-def _format_alert_time(normalized, operation="log.read"):
-    fmt = alert_time_format(operation)
-    if fmt == ALERT_TIME_FORMAT:
-        return normalized                     # already that shape; no parse, no drift
-    try:
-        return datetime.strptime(normalized, ALERT_TIME_FORMAT).strftime(fmt)
-    except ValueError:
-        return normalized                     # a bad format string must not lose the stamp
-
-
-def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None,
-         alarm_name=None, target_repos=None, tracking_id=None, portal_channel="auto"):
-    """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
-
-    `keywords` and `sources` are the drill-down path: a follow-up question ("search for
-    ConnectException instead", "only hkp3") re-runs with them instead of the derived list, so
-    narrowing does not mean starting over. Caller-supplied keywords are marked as such, because the
-    provenance of a keyword is what separates our query plan from "grep for ERROR".
-
-    `target_repos` is WHERE to look, and it exists because the alert text is not the only place that
-    knowledge lives. The caller has usually already run `incident_impact`, or the user simply named
-    the service — and the largest alert family here ("MDC Alert - General SHP API Error") names no
-    repo at all, so without this the investigator refuses and asks a question the caller could
-    already answer. Supplied ids are validated against the same repo universe the text scan uses and
-    carry `source: "supplied by the caller"` into the packet: a nil result on a repo somebody named
-    means less than a nil result on one the alert itself identified.
-
-    `repos` is a different thing entirely — the repo UNIVERSE to scan the text against (injectable
-    because index/repo_tags.json is gitignored). Do not confuse the two.
-    """
-    parsed = incident.parse_alert(alert_text, repos=repos)
-    out = {
-        "ok": False,
-        "parsed": parsed,
-        "targets": [],
-        "keywords": [],
-        "window": None,
-        "sources": [str(s).strip() for s in (sources or ()) if str(s).strip()]
-                   or list(log_sources()),
-        "log_files": ["otx_trace.log", "exception.log"],
-        "refusals": [],
-        # The CloudWatch half. Kept separate so either branch can run when the other cannot: an
-        # unresolvable alarm name must not block a log investigation that is ready to go, and an
-        # unidentifiable repo must not block a metric lookup that only needs the alarm name.
-        "cloudwatch": {"runnable": False, "alarm_name": "", "alarm_name_source": "",
-                       "refusals": []},
-        # The Portal half. `MDC Alert - General SHP API Error` is one of the largest alert families
-        # here and it is NEITHER a CloudWatch alarm NOR resolvable to a LogDream app — its only
-        # investigation path is a tracking id against Portal's delivery record. Kept as a THIRD
-        # independent branch on purpose: it needs no repo and no time window, so the log branch's
-        # window gate must not be able to block it.
-        "portal": {"runnable": False, "tracking_id": "", "tracking_id_source": "",
-                   "channel": "auto", "refusals": []},
-    }
-    if out["sources"] != list(log_sources()):
-        # Built from the configured source names, never a literal: the last time these were spelled
-        # out by hand the text said `hk1` where the server accepts `hkl`.
-        out["sources_note"] = (
-            "sources narrowed by the caller. %s are ALL production with different content, so a "
-            "single-source result covers less than the default — say which one was searched."
-            % " and ".join(log_sources()))
-    identified = bool(parsed["identified"])
-
-    # Repos the CALLER already knows are involved. Checked against the universe the text scan uses:
-    # only reject when there IS a universe to check against — when index/repo_tags.json is missing
-    # the caller is a better source than our absent index, so the id is accepted and marked
-    # unvalidated rather than refused for a gap on our side.
-    universe = set(incident.known_repos(repos))
-    supplied_repos, unknown_repos = [], []
-    for name in target_repos or []:
-        name = str(name).strip()
-        if not name:
-            continue
-        if universe and name not in universe:
-            unknown_repos.append(name)
-        elif name not in supplied_repos:
-            supplied_repos.append(name)
-
-    text_repos = [entry["repo"] for entry in parsed["repos"]] if identified else []
-    target_ids = text_repos + [name for name in supplied_repos if name not in text_repos]
-
-    if unknown_repos:
-        out["refusals"].append(
-            "these repo ids were supplied by the caller but are not in the repo universe, so they "
-            "were NOT queried: %s. Check the id (they look like `mc-hk-hase-...`) — this is a "
-            "wrong name, not an empty log." % ", ".join(sorted(unknown_repos)))
-    if not target_ids and not parsed["use_cases"]:
-        out["refusals"].append(
-            "no repo and no known use-case id could be read from this alert, and none was supplied, "
-            "so there is nothing to query. Ask for the service name or the use-case id, or pass "
-            "`repos` if you already know which service it is; do not guess an app.")
-    if supplied_repos:
-        out["targets_note"] = (
-            "%d of these targets were supplied by the caller rather than read from the alert text. "
-            "A nil result on a caller-named repo only says that repo's logs were clean for these "
-            "terms — it does not confirm the caller named the right service." % len(supplied_repos))
-
-    seen_keywords = {}
-
-    def _add_keyword(term, why):
-        term = (term or "").strip()
-        if term and term.lower() not in seen_keywords:
-            seen_keywords[term.lower()] = {"term": term, "why": why}
-
-    for repo in target_ids:
-        target = {"repo": repo,
-                  "source": ("named in the alert text" if repo in text_repos
-                             else "supplied by the caller"),
-                  "app_candidates": app_candidates(repo),
-                  "app_resolved": "", "app_note": ""}
-        if universe and repo in supplied_repos:
-            target["validated"] = True
-        elif repo in supplied_repos:
-            target["validated"] = False
-            target["app_note"] = ("repo universe unavailable (index/repo_tags.json missing), so "
-                                  "this caller-supplied id could not be confirmed to exist")
-        if not target["app_candidates"]:
-            target["app_note"] = ("no LogDream app name could be derived from this repo id; "
-                                  "an intranet mapping is needed (config/logdream_apps.json)")
-        out["targets"].append(target)
-
-        for topic in (msg.routes_for_repo(repo) or [])[:4]:
-            name = topic.get("destination") if isinstance(topic, dict) else topic
-            _add_keyword(name, f"topic on {repo}'s delivery path")
-        for channel in repo_tags.channels_for_repo(repo) or []:
-            _add_keyword(channel, f"channel served by {repo}")
-        for name in exception_classes(repo):
-            _add_keyword(name, f"exception class present in {repo}'s source")
-
-    for item in parsed["use_cases"] if identified else []:
-        _add_keyword(item.get("use_case"), "use-case id named in the alert text")
-
-    if identified and parsed.get("metric"):
-        _add_keyword(parsed["metric"], "metric named in the alert")
-
-    # Filtered BEFORE the branch: an all-whitespace override would otherwise leave zero keywords,
-    # and zero keywords means zero queries — an investigation that searched nothing while looking
-    # like it ran. Blank in, derived list out.
-    supplied = [str(term).strip() for term in (keywords or []) if str(term).strip()]
-    if supplied:
-        # A drill-down replaces the derived list rather than adding to it: the point of "search for
-        # X instead" is to spend the query budget on X, not to bury it behind six derived terms.
-        out["keywords"] = [{"term": term,
-                            "why": "supplied by the user for this follow-up (not derived from the "
-                                   "code graph — say so when reporting)"}
-                           for term in supplied][:_MAX_KEYWORDS]
-        out["keywords_note"] = ("derived keywords were REPLACED by the caller's. The graph-derived "
-                                "list is what makes a nil result meaningful, so a nil result here "
-                                "only speaks to the terms the user asked for.")
-    else:
-        out["keywords"] = list(seen_keywords.values())[:_MAX_KEYWORDS]
-
-    # The window. Never defaulted and never CONVERTED — see the module docstring on the three
-    # coexisting timezones. TWO independent halves are required, not one: a full date+time stamp
-    # and a zone, because the real tool takes them as separate parameters. They are resolved
-    # separately so a refusal can name exactly which half is missing — "which timezone?" and
-    # "which day?" are different questions, and asking the wrong one wastes a round trip mid-incident.
-    times = [t for t in parsed.get("times") or [] if isinstance(t, dict)]
-    dated = [t for t in times if t.get("normalized")]
-    caller_stamp = incident.normalize_stamp(alert_time) if alert_time else ""
-
-    stamp, shown, stamp_source = "", "", ""
-    if dated:
-        stamp, shown, stamp_source = dated[0]["normalized"], dated[0].get("text") or "", \
-            "explicit in the alert text"
-    elif caller_stamp:
-        stamp, shown, stamp_source = caller_stamp, alert_time, "caller-supplied"
-
-    zone, zone_source = "", ""
-    from_alert = next((t["timezone"] for t in times if t.get("timezone")), "")
-    if from_alert:
-        # An explicit zone in the alert beats a caller-supplied one: the alert is the evidence.
-        zone, zone_source = from_alert, "explicit in the alert text"
-    elif timezone:
-        zone, zone_source = timezone, "caller-supplied (the alert's own time was ambiguous)"
-
-    if stamp and zone:
-        out["window"] = {
-            "at": shown,
-            # What actually goes on the wire. The zone travels as its own parameter beside it.
-            "alert_time": _format_alert_time(stamp),
-            "timezone": zone,
-            "source": ("explicit in the alert text"
-                       if stamp_source == zone_source == "explicit in the alert text"
-                       else f"time {stamp_source or 'missing'}; timezone {zone_source or 'missing'}"),
-            "note": ("the stamp and the zone travel as SEPARATE parameters; the stamp was only "
-                     "REFORMATTED, never converted — 03:15 in the alert is still 03:15 here."),
-        }
-    else:
-        missing = []
-        if not stamp:
-            missing.append(
-                "a DATE — the alert carries %s, and the read tool needs a full `alert_time`, which "
-                "cannot be built without knowing which day" % (
-                    "only a clock time like 03:15" if times else "no timestamp at all"))
-        if not zone:
-            missing.append(
-                "a TIMEZONE — CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong and the "
-                "servers are GMT, so the same clock time is three moments 8 hours apart")
-        out["refusals"].append(
-            "BLOCKING: no time window could be built, so NOTHING was queried. Missing: "
-            + "; and ".join(missing) + ". Ask the user, then pass `alert_time` (e.g. "
-            "'2026-07-30 03:15:00') and/or `timezone` explicitly. Do not guess either half: a "
-            "wrong window returns nothing, and nothing reads as 'no anomaly'.")
-
-    # ---- the CloudWatch half: an alarm name, and the same window converted to UTC ---------------
-    # Priority is fixed and narrowing: what the user said, then what the alert literally contains.
-    # There is no third guess — a wrong alarm name does not error, it returns a DIFFERENT service's
-    # metrics under this incident's heading.
-    cw = out["cloudwatch"]
-    supplied_alarm = incident.valid_alarm_name(alarm_name) if alarm_name else ""
-    if alarm_name and not supplied_alarm:
-        cw["refusals"].append(
-            "the supplied alarm_name is not usable (empty, multi-line, or over "
-            f"{incident.MAX_ALARM_NAME} chars), so no CloudWatch call was made.")
-    if supplied_alarm:
-        cw["alarm_name"], cw["alarm_name_source"] = supplied_alarm, "supplied by the caller"
-    else:
-        extracted = incident.extract_alarm_name(alert_text)
-        if extracted:
-            cw["alarm_name"] = extracted
-            cw["alarm_name_source"] = "extracted from the alert text (single `AlarmName:` line)"
-        else:
-            cw["refusals"].append(
-                "no single CloudWatch alarm name could be read from this alert, so the metric "
-                "branch was skipped. Pass `alarm_name` if you know it. The name is NOT guessed and "
-                "the alarm list is NOT scanned: a wrong alarm returns another service's metrics "
-                "under this incident's heading, and scanning every alarm takes ~26s.")
-
-    if cw["alarm_name"] and out["window"]:
-        alert_utc, how = to_utc(out["window"]["alert_time"], out["window"]["timezone"])
-        if alert_utc is None:
-            cw["refusals"].append(f"BLOCKING for the metric branch: {how}")
-        else:
-            cw["runnable"] = True
-            # Filled in once `get_alarm` gives us the Period/EvaluationPeriods it evaluated over.
-            cw["alert_utc"] = alert_utc.strftime(_METRIC_TIME_FORMAT)
-            cw["conversion"] = (
-                f"converted to UTC via {how}. This branch DOES convert the moment, unlike the log "
-                f"branch, because CloudWatch takes UTC start/end times.")
-    elif cw["alarm_name"] and not out["window"]:
-        cw["refusals"].append(
-            "the alarm name is known but no time window could be built, so no metric was queried. "
-            "A metric window is never built from `now()` — it is built around the alert.")
-
-    # ---- the Portal half: a tracking id, and nothing else -------------------------------------
-    # Priority is the same shape as the alarm name: what the caller said, then what the alert text
-    # uniquely contains, then nothing. Never a guess — a wrong tracking id returns ANOTHER
-    # customer's delivery record, which is worse than returning none.
-    portal = out["portal"]
-    channel = (portal_channel or "auto").strip().lower()
-    if channel not in ("sms", "email", "auto"):
-        portal["refusals"].append(
-            f"portal_channel {channel!r} is not one of sms/email/auto, so the Portal branch was "
-            f"skipped rather than defaulting to something you did not ask for.")
-        channel = ""
-    portal["channel"] = channel or "auto"
-
-    supplied_tracking = incident.valid_tracking_id(tracking_id) if tracking_id else ""
-    if tracking_id and not supplied_tracking:
-        portal["refusals"].append(
-            "the supplied tracking_id is not usable (empty, multi-line, out of length bounds, or "
-            "contains characters a tracking id cannot have), so no Portal call was made.")
-    if supplied_tracking:
-        portal["tracking_id"] = supplied_tracking
-        portal["tracking_id_source"] = "supplied by the caller"
-    else:
-        extracted = incident.extract_tracking_id(alert_text)
-        if extracted:
-            portal["tracking_id"] = extracted
-            portal["tracking_id_source"] = (
-                "extracted from a labelled line in the alert text (trackId/trackingId/tracking_id)")
-        elif not tracking_id:
-            portal["refusals"].append(
-                "no single labelled tracking id could be read from this alert, so the Portal "
-                "delivery-record branch was skipped. Pass `tracking_id` if you have one. It is NOT "
-                "guessed from phone numbers, message references or payload UUIDs — a wrong id "
-                "returns a different customer's record.")
-    portal["runnable"] = bool(portal["tracking_id"] and channel)
-
-    # Runnable, not merely "we understood the alert". Identifying the service is necessary and not
-    # sufficient: this tool's real parameter is an ALERT TIME it backtracks from, so without a
-    # window there is no honest query to send. The plan used to stay ok=True here and the
-    # investigation went ahead untimed (intranet, 2026-07-31) — the refusal was reported while the
-    # calls were made anyway, which is the worst of both: production reads, and an answer nobody
-    # can scope.
-    out["ok"] = bool(out["targets"] or parsed["use_cases"]) and bool(out["window"])
-    # ANY branch alone is enough to be worth running. A CloudWatch failure must not break a log
-    # investigation that works, the reverse holds too, and Portal must run on a tracking id ALONE —
-    # no repo, no alarm, no time window. That last case is the whole point of the branch: the alert
-    # family it serves carries none of the other three.
-    out["any_runnable"] = bool(out["ok"] or cw["runnable"] or portal["runnable"])
-    return out
 
 
 # ---- the investigation ----------------------------------------------------------------------
@@ -1057,7 +80,7 @@ def _evidence_from_lines(lines, keyword, source, app, log_file, counts, owner=""
     """The log LINES -> an aggregate. They are local and stay local.
 
     Takes lines rather than a response body on purpose: extracting them is now shape-dependent (see
-    `extract_log_lines`), and this function must never be reachable with a JSON blob that nobody
+    `incident_parse.extract_log_lines`), and this function must never be reachable with a JSON blob that nobody
     decoded. When raw retention is on (UAT internal test only) the originals are handed to
     `incident_raw_store` and the evidence carries an opaque `ref` for the browser to fetch. The raw
     text still does not travel in this dict, so the model's view is unchanged either way.
@@ -1088,7 +111,7 @@ def _evidence_from_lines(lines, keyword, source, app, log_file, counts, owner=""
         "file": log_file,
         # Both LogDream sources are production (owner, 2026-07-29). Labelled on every item so a
         # caller never has to infer it from the source name.
-        "environment": "production" if source in log_sources() else "unknown",
+        "environment": "production" if source in incident_plan.log_sources() else "unknown",
         "matched_keyword": keyword,
         "lines_seen": len(lines),
         "lines_returned": len(excerpts),
@@ -1134,7 +157,7 @@ def _cloudwatch_evidence(identity, window, points, status_code, counts):
                        for d in identity["dimensions"]],
         "status_code": status_code,
         "points_seen": len(points),
-        "summary": summarize_points(points, identity.get("threshold"),
+        "summary": incident_parse.summarize_points(points, identity.get("threshold"),
                                     identity.get("comparison") or ""),
         "reading_rule": (
             "These are CATEGORIES computed in memory from the datapoints; the values themselves are "
@@ -1159,11 +182,6 @@ READ_REQUIRED = ("app", "source", "file")
 # `const` does not already pin that parameter, so the box can override without a code change.
 READ_MODE_BACKTRACK = os.environ.get("SDLC_INCIDENT_READ_MODE", "alert_time_backtrack")
 BACKTRACK_LINES = int(os.environ.get("SDLC_INCIDENT_BACKTRACK_LINES", "200"))
-_MAX_FILES_PER_SOURCE = int(os.environ.get("SDLC_INCIDENT_MAX_FILES", "2"))
-# Real names confirmed in RUNBOOK-55. Used only to RANK candidates that the server returned — never
-# to invent a file name, which is what hard-coding `otx_trace.log` amounted to.
-_PREFERRED_LOG_FILES = ("otx_trace.log", "exception.log", "sftp.log")
-_FILE_TOKEN = re.compile(r"[\w./\\-]*\.log(?:[._-]?\d{6,8})?")
 
 
 def _usable_args(operation):
@@ -1195,73 +213,6 @@ def _payload(operation, wanted):
     pinned = _pinned_params(operation)
     return {name: value for name, value in wanted.items()
             if value not in (None, "") and name in usable and arg_map.get(name) not in pinned}
-
-
-def select_log_files(text, alert_date="", limit=None, structured=None):
-    """Parse a `log.search_files` response into a bounded, ranked list of real file names.
-
-    Returns [] when nothing parses. That is the whole point: an empty candidate list must end in
-    "we could not identify a log file", never in a guessed name. Hard-coding `otx_trace.log` was
-    exactly that guess, and it also mislabelled evidence when the real read was something else.
-
-    Same rule as the other two parsers: a JSON body is read structurally and the regex fallback is
-    NOT reached from it, so an unrecognised shape yields nothing instead of arbitrary tokens.
-    """
-    limit = _MAX_FILES_PER_SOURCE if limit is None else limit
-    shape = response_shape("log.search_files")
-    body = _decode(text, structured)
-    names = []
-    if body is None:
-        names = _FILE_TOKEN.findall(text or "")
-    else:
-        exclude = {str(v).lower() for v in shape.get("kind_exclude") or ()}
-        for row in _rows(body, shape.get("entries") or ()) or ():
-            if isinstance(row, str):
-                names.append(row)
-            elif isinstance(row, dict):
-                kind = next((str(row[k]).lower() for k in shape.get("kind") or ()
-                             if isinstance(row.get(k), str)), "")
-                if kind and kind in exclude:
-                    continue                    # a directory is not a file to read
-                value = next((row[k] for k in shape.get("name") or ()
-                              if isinstance(row.get(k), str)), "")
-                if value:
-                    names.append(value)
-
-    cleaned, seen = [], set()
-    for name in names:
-        name = (name or "").strip().strip("\"',")
-        if not name or ".log" not in name.lower() or name in seen:
-            continue
-        seen.add(name)
-        cleaned.append(name)
-
-    def _rank(name):
-        base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-        # Same-day files first when the alert date is known, then the known log types, then shortest
-        # (a bare `otx_trace.log` beats a rotated `otx_trace.log.20260701`).
-        return (0 if alert_date and alert_date.replace("-", "") in base else 1,
-                next((i for i, known in enumerate(_PREFERRED_LOG_FILES) if known in base), 99),
-                len(base))
-
-    return sorted(cleaned, key=_rank)[:max(1, limit)]
-
-
-def _tool_outcome(out):
-    """An MCP result -> ("error"|"empty"|"hit", text). Four outcomes, not two.
-
-    A call can (1) fail in transport — raised, never reaches here; (2) run and report failure
-    (`ok: False`); (3) run and match nothing; (4) run and return content. Reading `text`
-    unconditionally collapses 2 into 4, which is the single worst bug this feature can have: the
-    tool's own error message ("unknown source hkl") is non-empty, so it would be wrapped up and
-    presented as log evidence. A failed call must never be able to look like a finding.
-    """
-    if not isinstance(out, dict):
-        return "error", "malformed MCP result"
-    if not out.get("ok") or out.get("tool_reported_error"):
-        return "error", (out.get("text") or out.get("error") or "the tool reported failure")
-    text = out.get("text") or ""
-    return ("hit", text) if text.strip() else ("empty", "")
 
 
 _TRANSPORT_ADVICE = {
@@ -1323,51 +274,6 @@ def investigate(alert_text, **kwargs):
     return packet
 
 
-# Portal's forward record is a DELIVERY record, so a hit is the most PII-dense thing this whole
-# module can touch: recipient, payload, template, message body. None of it is needed to answer "did
-# this message get delivered and if not, what kind of failure" — so the packet carries CATEGORIES
-# only and the raw JSON never leaves this function.
-_PORTAL_STATUSES = ("delivered", "failed", "pending", "unknown")
-_PORTAL_FAILURE_KINDS = ("policy", "provider", "template", "routing", "unknown")
-# Field names we are willing to READ out of their response. Anything not here is not looked at, so a
-# response that grows a `recipient` or `messageBody` field cannot leak by accident.
-_PORTAL_STATUS_KEYS = ("status", "deliverystatus", "delivery_status", "state", "result")
-_PORTAL_REASON_KEYS = ("failurereason", "failure_reason", "reason", "errorcategory",
-                       "error_category", "rejectedreason", "rejected_reason")
-
-
-def _portal_status(value):
-    """Their status text -> one of `_PORTAL_STATUSES`. Unknown maps to `unknown`, never to a guess."""
-    text = str(value or "").strip().lower()
-    if not text:
-        return "unknown"
-    for status in ("delivered", "failed", "pending"):
-        if status in text:
-            return status
-    if text in ("success", "ok", "sent", "complete", "completed"):
-        return "delivered"
-    if text in ("reject", "rejected", "error", "bounce", "bounced"):
-        return "failed"
-    return "unknown"
-
-
-def _portal_failure_kind(value):
-    """Their reason text -> a coarse category. Deliberately lossy: a reason string can carry a
-    template name or a customer identifier, and the category is what an incident answer needs."""
-    text = str(value or "").strip().lower()
-    if not text:
-        return "unknown"
-    for kind, markers in (("policy", ("consent", "optout", "opt-out", "blacklist", "policy",
-                                      "suppress")),
-                          ("provider", ("vendor", "provider", "gateway", "carrier", "smsc",
-                                        "mmsc", "upstream", "timeout", "connection")),
-                          ("template", ("template", "content", "render", "payload", "format")),
-                          ("routing", ("route", "routing", "router", "topic", "channel"))):
-        if any(marker in text for marker in markers):
-            return kind
-    return "unknown"
-
-
 def _portal_evidence(body, channel, operation, tracking_ref):
     """Their record -> a category-only evidence item, or None when the shape is not recognised.
 
@@ -1385,7 +291,7 @@ def _portal_evidence(body, channel, operation, tracking_ref):
     if status_value is None:
         return None                        # shape not recognised -> caller reports a parser failure
     reason_value = next((lowered[key] for key in _PORTAL_REASON_KEYS if key in lowered), "")
-    status = _portal_status(status_value)
+    status = incident_parse._portal_status(status_value)
     return {
         "kind": "portal_delivery",
         "environment": "production",
@@ -1394,7 +300,7 @@ def _portal_evidence(body, channel, operation, tracking_ref):
         "operation": operation,
         "record_found": True,
         "delivery_status": status,
-        "failure_category": _portal_failure_kind(reason_value) if status == "failed" else "unknown",
+        "failure_category": incident_parse._portal_failure_kind(reason_value) if status == "failed" else "unknown",
         # Presence only — a timestamp is a fact about the record, its VALUE is not needed here.
         "timestamps_present": any("time" in key or "date" in key for key in lowered),
         "tracking_ref": tracking_ref,
@@ -1459,7 +365,7 @@ def _portal_branch(query_plan, packet, counts):
 
         _record("executed", operation, ["tracking_id"], elapsed_ms=out.get("elapsed_ms"),
                 **_transport_meta(out))
-        outcome, detail = _tool_outcome(out)
+        outcome, detail = incident_parse._tool_outcome(out)
         if outcome == "error":
             packet["not_investigated"].append(
                 f"{operation} REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. That is the "
@@ -1468,7 +374,7 @@ def _portal_branch(query_plan, packet, counts):
                         operation=operation)
             continue
 
-        body = _decode(out.get("text"), out.get("structured"))
+        body = incident_parse._decode(out.get("text"), out.get("structured"))
         if outcome == "empty" or body in (None, [], {}):
             # A genuine not-found. It IS a result — and it is NOT proof the message was delivered,
             # nor proof there was no business impact.
@@ -1488,7 +394,7 @@ def _portal_branch(query_plan, packet, counts):
 
         item = _portal_evidence(body, channel, operation, tracking_ref)
         if item is None:
-            shape = describe_shape(body)
+            shape = incident_parse.describe_shape(body)
             packet["not_investigated"].append(
                 f"{operation} SUCCEEDED but our parser could not read the response shape "
                 f"({shape}). This is OUR wiring gap — a `response` mapping in "
@@ -1555,7 +461,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
         return
 
     _record("executed", "aws.get_alarm", ["alarm_name"], elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
-    outcome, text = _tool_outcome(out)
+    outcome, text = incident_parse._tool_outcome(out)
     if outcome != "hit":
         reason = redact(text[:200], counts) if outcome == "error" else "an empty response"
         packet["not_investigated"].append(
@@ -1566,7 +472,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
                     elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
-    identity, why = alarm_metric_identity(_decode(text, out.get("structured")))
+    identity, why = incident_parse.alarm_metric_identity(incident_parse._decode(text, out.get("structured")))
     if identity is None:
         packet["not_investigated"].append(
             f"the alarm was found but its metric identity could not be read: {why}. Nothing was "
@@ -1578,7 +484,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
 
     # ---- 2. the window, built around the ALERT and never around now() --------------------------
     alert_utc = datetime.strptime(cw["alert_utc"], _METRIC_TIME_FORMAT).replace(tzinfo=_utc_tz.utc)
-    window = metric_window_bounds(alert_utc, identity["period_seconds"],
+    window = incident_plan.metric_window_bounds(alert_utc, identity["period_seconds"],
                                   identity["evaluation_periods"])
     packet["cloudwatch_window"] = dict(window, timezone_conversion=cw.get("conversion", ""))
 
@@ -1650,7 +556,7 @@ def _cloudwatch_metric(cw, identity, window, packet, counts):
         return
 
     _record("executed", "aws.metric_window", payload, elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
-    outcome, text = _tool_outcome(out)
+    outcome, text = incident_parse._tool_outcome(out)
     if outcome == "error":
         _record("failed", "aws.metric_window", payload, refused_locally=False,
                 reason=redact(text[:200], counts))
@@ -1662,7 +568,7 @@ def _cloudwatch_metric(cw, identity, window, packet, counts):
                     elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
-    points, status_code, error = parse_metric_window(_decode(text, out.get("structured")))
+    points, status_code, error = incident_parse.parse_metric_window(incident_parse._decode(text, out.get("structured")))
     if points is None:
         packet["not_investigated"].append(
             f"the metric query SUCCEEDED but its response could not be read: {error}. This is our "
@@ -1770,71 +676,6 @@ def _explicit_resource_identity(identity):
     return {"resource": "", "resource_type": "", "resource_arn": "", "dimension_name": ""}
 
 
-def _parse_log_groups(body):
-    """Log-group names from their response, or None when the shape is not recognised.
-
-    None is a PARSER GAP, not an empty result — the caller must report it as our wiring problem.
-    """
-    if body is None:
-        return None
-    rows = body if isinstance(body, list) else _rows(body, ("logGroups", "log_groups", "groups",
-                                                            "items", "results"))
-    if rows is None:
-        return None
-    names = []
-    for row in rows:
-        if isinstance(row, str) and row.strip():
-            names.append(row.strip())
-        elif isinstance(row, dict):
-            for key in ("logGroupName", "log_group_name", "name", "logGroup"):
-                value = row.get(key)
-                if isinstance(value, str) and value.strip():
-                    names.append(value.strip())
-                    break
-    # `[]` when the container was RECOGNISED and empty; `None` only when it was not recognised. An
-    # earlier `names or None` here collapsed those two — which is the exact confusion this module
-    # exists to prevent, reintroduced one level down: "this resource has no log groups" would have
-    # been reported as "our parser is broken".
-    return names
-
-
-def _parse_cloudwatch_log_lines(body):
-    """Message strings from a Logs Insights result, or None when the shape is not recognised.
-
-    Reads ONLY explicit `@message`/`message` fields. Never `str(body).splitlines()` — that turns an
-    error envelope, or a field nobody scoped, into "log lines" (the 2026-07-30 defect class).
-    """
-    if body is None:
-        return None
-    rows = body if isinstance(body, list) else _rows(body, ("results", "events", "records",
-                                                            "messages", "items"))
-    if rows is None:
-        return None
-    lines = []
-    for row in rows:
-        if isinstance(row, str):
-            if row.strip():
-                lines.append(row)
-            continue
-        if isinstance(row, list):
-            # Insights returns [{"field": "@message", "value": "..."}, ...] per row.
-            for cell in row:
-                if isinstance(cell, dict) and str(cell.get("field", "")).lower() in (
-                        "@message", "message"):
-                    value = cell.get("value")
-                    if isinstance(value, str) and value.strip():
-                        lines.append(value)
-            continue
-        if isinstance(row, dict):
-            for key in ("@message", "message", "Message"):
-                value = row.get(key)
-                if isinstance(value, str) and value.strip():
-                    lines.append(value)
-                    break
-    # Same rule as `_parse_log_groups`: recognised-and-empty is `[]`, unrecognised is `None`.
-    return lines
-
-
 def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
     """resource -> its log groups -> a bounded Insights query -> redacted, bounded excerpts."""
     ledger = packet["cloudwatch_logs"]
@@ -1885,7 +726,7 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
 
     _record("executed", "aws.log_groups_for_resource", payload,
             elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
-    outcome, detail = _tool_outcome(out)
+    outcome, detail = incident_parse._tool_outcome(out)
     if outcome == "error":
         packet["not_investigated"].append(
             f"aws.log_groups_for_resource REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. "
@@ -1894,12 +735,12 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
                     operation="aws.log_groups_for_resource")
         return
 
-    body = _decode(out.get("text"), out.get("structured"))
-    groups = None if (outcome == "empty" or body in (None, "", [], {})) else _parse_log_groups(body)
+    body = incident_parse._decode(out.get("text"), out.get("structured"))
+    groups = None if (outcome == "empty" or body in (None, "", [], {})) else incident_parse._parse_log_groups(body)
     if groups is None and outcome != "empty" and body not in (None, "", [], {}):
         packet["not_investigated"].append(
             f"aws.log_groups_for_resource SUCCEEDED but our parser could not read the response "
-            f"shape ({describe_shape(body)}). OUR wiring gap — a `response` mapping in "
+            f"shape ({incident_parse.describe_shape(body)}). OUR wiring gap — a `response` mapping in "
             f"config/mcp_tools.json — NOT an absence of log groups.")
         yield _step("query_unreadable", "log group 返回体读不懂（我方映射缺口）",
                     server="cloudwatch", operation="aws.log_groups_for_resource", shape_error=True)
@@ -1943,7 +784,7 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
 
         _record("executed", "aws.query_logs", payload, keyword=keyword,
                 elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
-        outcome, detail = _tool_outcome(out)
+        outcome, detail = incident_parse._tool_outcome(out)
         if outcome == "error":
             packet["not_investigated"].append(
                 f"aws.query_logs REPORTED AN ERROR for {keyword!r}: "
@@ -1952,17 +793,17 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
                         operation="aws.query_logs")
             continue
 
-        body = _decode(out.get("text"), out.get("structured"))
+        body = incident_parse._decode(out.get("text"), out.get("structured"))
         if outcome == "empty" or body in (None, [], {}):
             yield _step("query_empty", f"{keyword}：0 条", server="cloudwatch",
                         operation="aws.query_logs")
             continue
 
-        lines = _parse_cloudwatch_log_lines(body)
+        lines = incident_parse._parse_cloudwatch_log_lines(body)
         if lines is None:
             packet["not_investigated"].append(
                 f"aws.query_logs SUCCEEDED for {keyword!r} but our parser could not read the "
-                f"response shape ({describe_shape(body)}). OUR wiring gap, NOT an empty log.")
+                f"response shape ({incident_parse.describe_shape(body)}). OUR wiring gap, NOT an empty log.")
             yield _step("query_unreadable", f"{keyword} 返回体读不懂（我方映射缺口）",
                         server="cloudwatch", operation="aws.query_logs", shape_error=True)
             continue
@@ -1993,38 +834,6 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
                              "A nil result speaks to those and nothing else."),
         })
         packet["contains_production_data"] = True
-
-
-# Tag keys worth reporting the PRESENCE of. Values are never kept: a tag value carries person
-# names, emails, team abbreviations and internal system ids, and none of that is needed to answer
-# "is this resource owned/labelled". Their live probe: an ECS service sample had 10 keys including
-# `owner`, and no `application` or `support group`.
-_TAG_KEYS_OF_INTEREST = {
-    "owner": "owner_tag_present",
-    "application": "application_tag_present",
-    "support group": "support_group_tag_present",
-    "supportgroup": "support_group_tag_present",
-    "environment": "environment_tag_present",
-}
-
-
-def _tag_keys(body):
-    """Tag KEYS from their response, or None when the shape is not recognised.
-
-    Confirmed live shape (2026-08-03): `{resourceArn, tags{key: value}, rawTags[{Key, Value}]}`.
-    `tags` is preferred; `rawTags` is the fallback. `resourceArn` is used only to confirm we got the
-    scope we asked for and is then dropped — it never enters the packet.
-    """
-    if not isinstance(body, dict):
-        return None
-    tags = body.get("tags")
-    if isinstance(tags, dict):
-        return [str(key) for key in tags]
-    raw = body.get("rawTags")
-    if isinstance(raw, list):
-        return [str(item.get("Key")) for item in raw
-                if isinstance(item, dict) and item.get("Key") is not None]
-    return None
 
 
 def _cloudwatch_tags(identity, packet, counts):
@@ -2074,20 +883,20 @@ def _cloudwatch_tags(identity, packet, counts):
     ledger["executed"].append({"server": "cloudwatch", "operation": "aws.resource_tags",
                                "args_sent": sorted(payload), "elapsed_ms": out.get("elapsed_ms"),
                                **_transport_meta(out)})
-    outcome, detail = _tool_outcome(out)
+    outcome, detail = incident_parse._tool_outcome(out)
     if outcome == "error":
         packet["not_investigated"].append(
             f"aws.resource_tags REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. Their tool "
             f"refusing is not an absence of tags.")
         return
-    body = _decode(out.get("text"), out.get("structured"))
+    body = incident_parse._decode(out.get("text"), out.get("structured"))
     if outcome == "empty" or body in (None, "", [], {}):
         return
-    keys = _tag_keys(body)
+    keys = incident_parse._tag_keys(body)
     if keys is None:
         packet["not_investigated"].append(
             f"aws.resource_tags SUCCEEDED but our parser could not read the response shape "
-            f"({describe_shape(body)}). OUR wiring gap, NOT an untagged resource.")
+            f"({incident_parse.describe_shape(body)}). OUR wiring gap, NOT an untagged resource.")
         yield _step("query_unreadable", "资源标签返回体读不懂（我方映射缺口）",
                     server="cloudwatch", operation="aws.resource_tags", shape_error=True)
         return
@@ -2153,7 +962,7 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
             return
         _record("executed", operation, payload, elapsed_ms=out.get("elapsed_ms"),
                 **_transport_meta(out))
-        outcome, detail = _tool_outcome(out)
+        outcome, detail = incident_parse._tool_outcome(out)
         if outcome == "error":
             packet["not_investigated"].append(
                 f"{operation} REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. Their tool "
@@ -2161,7 +970,7 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
             yield _step("query_rejected", f"{operation} 被拒绝", server="cloudwatch",
                         operation=operation)
             return
-        yield ("body", _decode(out.get("text"), out.get("structured")), out)
+        yield ("body", incident_parse._decode(out.get("text"), out.get("structured")), out)
 
     # --- alarm history: has this alarm been flapping, or did it just start? ---------------------
     body = None
@@ -2177,7 +986,7 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
         else:
             yield event
     if body not in (None, [], {}):
-        rows = body if isinstance(body, list) else _rows(body, ("items", "history", "entries")) or []
+        rows = body if isinstance(body, list) else incident_parse._rows(body, ("items", "history", "entries")) or []
         rows = [row for row in rows if isinstance(row, dict)][:_MAX_CONTEXT_ITEMS]
         stamps = [next((str(v) for k, v in row.items() if "time" in str(k).lower()), "")
                   for row in rows]
@@ -2203,7 +1012,7 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
               "from_time": (window or {}).get("start_utc"),
               "to_time": (window or {}).get("end_utc"),
               "max_results": _MAX_CONTEXT_ITEMS}
-    resource = _explicit_resource(identity)
+    resource = incident_plan._explicit_resource(identity)
     if resource:
         wanted["resource"] = resource
     body = None
@@ -2214,7 +1023,7 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
         else:
             yield event
     if body not in (None, [], {}):
-        rows = body if isinstance(body, list) else _rows(body, ("items", "events", "changes")) or []
+        rows = body if isinstance(body, list) else incident_parse._rows(body, ("items", "events", "changes")) or []
         rows = [row for row in rows if isinstance(row, dict)][:_MAX_CONTEXT_ITEMS]
         kinds = sorted({str(next((v for k, v in row.items()
                                   if str(k).lower() in ("eventname", "event_name", "kind", "type")),
@@ -2258,7 +1067,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     counts = {}
     budget = max(1, int(max_queries or _MAX_LOG_QUERIES))
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
-    query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
+    query_plan = query_plan or incident_plan.plan(alert_text, repos=repos, timezone=timezone,
                                     keywords=keywords, sources=sources, alert_time=alert_time,
                                     alarm_name=alarm_name, target_repos=target_repos,
                                     tracking_id=tracking_id, portal_channel=portal_channel)
@@ -2303,7 +1112,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         "environments": {
             # Built from the configured names: the last hand-written copy said `hk1` for `hkl`.
             "logs": "production (LogDream %s — all production, different content)"
-                    % " + ".join(log_sources()),
+                    % " + ".join(incident_plan.log_sources()),
             "metrics": "production (CloudWatch, queried in UTC around the alert time)",
             "route_snapshot": "dev/SCT — absence there is NOT evidence of absence in production",
         },
@@ -2377,7 +1186,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         server="logdream", operation="log.list_apps", source=source,
                         error=str(exc))
             continue
-        outcome, text = _tool_outcome(listing)
+        outcome, text = incident_parse._tool_outcome(listing)
         if outcome == "error":
             # The tool ran and refused — e.g. an unknown source name. Its error body is non-empty, so
             # without this branch it would be split on whitespace and become "app names".
@@ -2389,7 +1198,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         server="logdream", operation="log.list_apps", source=source,
                         rejected=True, elapsed_ms=listing.get("elapsed_ms"), **_transport_meta(listing))
             continue
-        names, note, error = extract_app_names(text, listing.get("structured"))
+        names, note, error = incident_parse.extract_app_names(text, listing.get("structured"))
         if names is None:
             # The listing succeeded but we cannot read its shape. Treated exactly like a source that
             # refused: no app on this source is verified, so nothing on it is queried. The old code
@@ -2486,7 +1295,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             server="logdream", operation="log.search_files",
                             app=match, source=source)
                 continue
-            outcome, text = _tool_outcome(found)
+            outcome, text = incident_parse._tool_outcome(found)
             if outcome == "error":
                 packet["not_investigated"].append(
                     f"{match}/{source}: the file-search tool REPORTED AN ERROR ({redact(text[:200], counts)}). "
@@ -2496,7 +1305,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, rejected=True,
                             elapsed_ms=found.get("elapsed_ms"), **_transport_meta(found))
                 continue
-            picked = select_log_files(text, alert_date=alert_date,
+            picked = incident_parse.select_log_files(text, alert_date=alert_date,
                                       structured=found.get("structured"))
             if not picked:
                 packet["not_investigated"].append(
@@ -2598,7 +1407,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, keyword=term, file=log_file)
                 continue
             packet["queries_executed"].append(attempt)
-            outcome, text = _tool_outcome(out)
+            outcome, text = incident_parse._tool_outcome(out)
             if outcome == "error":
                 # The tool ran and reported failure. Its message is NON-EMPTY, so treating text as
                 # content here would wrap "unknown source hkl" up as a log finding and report a failed
@@ -2626,7 +1435,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
             # Structured body -> the actual log-line fields. Splitting the JSON source counted 11
             # "lines" for a 2-line response (intranet, 2026-07-31), and every number downstream —
             # lines_seen, exception classes, excerpts, the retained raw — was computed off that.
-            lines, reported, shape_error = extract_log_lines(text, out.get("structured"))
+            lines, reported, shape_error = incident_parse.extract_log_lines(text, out.get("structured"))
             if lines is None:
                 packet["not_investigated"].append(
                     f"{match}/{source}:{log_file} keyword {term!r}: {shape_error} The query "

@@ -35,7 +35,11 @@ of minutes and one of days.
 """
 import json
 
-from . import config, incident_raw_store, mcp_client, mcp_registry, redaction
+# All four are cheap, stdlib-and-config only. `incident_parse` used to be reachable only through
+# `incident_investigator`, which drags in the whole retrieval stack, so it had to be imported lazily
+# inside `run()`; splitting the parse layer out removed that constraint, and the exit gate belongs at
+# the top anyway — it must not be possible to reach `run()` without it.
+from . import config, incident_parse, incident_raw_store, mcp_client, mcp_registry, redaction
 
 # Ceiling on how much of a response is retained for click-through, expressed in lines. The store
 # applies its own per-entry line cap on top; this one keeps a pathological single-line response from
@@ -95,12 +99,6 @@ def run(operation, args=None, owner=""):
         raise ConsoleDisabled(
             "the MCP console is disabled (SDLC_MCP_CONSOLE=0); operations can still be listed")
 
-    # `describe_response` is the only thing still needed from the investigator, and it pulls in the
-    # retrieval stack — so it stays a local import, like the one in tools.py, and the console's read
-    # half remains usable in a checkout where that stack is not built. The exit gate itself is a
-    # top-level import (`redaction`), because it must not be possible to reach `run()` without it.
-    from . import incident_investigator as inv
-
     operation = (operation or "").strip()
     args = {key: value for key, value in (args or {}).items() if value not in (None, "")}
 
@@ -153,7 +151,7 @@ def run(operation, args=None, owner=""):
         "provenance": out.get("provenance") or "",
         # What their body actually looked like next to what we declared. The single most useful thing
         # to paste back from the box when a field mapping is wrong, and it carries no production text.
-        "shape": inv.describe_response(out, operation),
+        "shape": incident_parse.describe_response(out, operation),
         "timezone_warning": out.get("timezone_warning") or "",
     }
 

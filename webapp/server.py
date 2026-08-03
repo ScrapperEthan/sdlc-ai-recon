@@ -20,6 +20,14 @@ from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
 INDEX = os.path.join(HERE, "static", "index.html")
+# The page's own stylesheet and script, split out of index.html once it passed 3600 lines carrying
+# markup, styling and behaviour in one file. Served from a fixed map rather than by joining the
+# request path onto a directory — the request never contributes to a filesystem path, so the classic
+# `/static/../../etc/passwd` hole cannot be reintroduced by a later edit.
+STATIC_FILES = {
+    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
+}
 
 # Generic, sanitized message for any connect/select/register probe failure. Deliberately never the
 # raw exception str() -- a provider's own error can embed the upstream response body or a full
@@ -264,6 +272,24 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             with open(INDEX, "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
+        elif path in STATIC_FILES:
+            # An explicit MAP, not a directory server: the request path never takes part in building
+            # a filesystem path, so there is no traversal to get wrong. `no-cache` because this is an
+            # internal tool people edit and reload — a stale app.js that "did not pick up my change"
+            # costs more than the byte savings.
+            name, ctype = STATIC_FILES[path]
+            try:
+                with open(os.path.join(HERE, "static", name), "rb") as f:
+                    body = f.read()
+            except FileNotFoundError:
+                self._send(404, b"not found", "text/plain; charset=utf-8")
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
         elif path == "/static/vendor/mermaid.min.js":
             # Locally vendored (air-gapped, no CDN). Absent until dropped in -> 404, and the page
             # degrades to showing mermaid source as text.
@@ -360,9 +386,13 @@ class Handler(BaseHTTPRequestHandler):
             # cross-check of the declared tool names against each server's own tools/list only with
             # ?probe=1, since that opens connections to production systems.
             qs = parse_qs(urlparse(self.path).query)
-            want_probe = (qs.get("probe") or [""])[0] not in ("", "0", "false")
+            probe_arg = (qs.get("probe") or [""])[0]
+            want_probe = probe_arg not in ("", "0", "false")
+            # Probes are cached for MCP_PROBE_TTL so the panel's button cannot hammer production;
+            # `?probe=fresh` is the box's escape hatch for "I just edited the config, ask again".
             try:
-                self._send_json(200, mcp_client.status(probe_servers=want_probe))
+                self._send_json(200, mcp_client.status(
+                    probe_servers=want_probe, fresh=probe_arg in ("fresh", "force")))
             except Exception as e:  # noqa: BLE001 -- a status page must not 500 on a wiring problem
                 self._send_json(200, {"error": str(e), "calling_enabled": bool(config.MCP_ENABLED)})
         elif path == "/api/mcp/catalog":

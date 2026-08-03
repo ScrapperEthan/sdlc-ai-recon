@@ -479,5 +479,59 @@ class ProbeTests(_ServerCase):
         self.assertTrue(out["calling_enabled"])
 
 
+class ProbeCacheTests(_ServerCase):
+    """The panel put a production fan-out behind a button, so repeated clicks must not repeat it."""
+
+    def setUp(self):
+        super().setUp()
+        mcp_client.clear_probe_cache()
+        self.addCleanup(mcp_client.clear_probe_cache)
+
+    def _sessions_opened(self):
+        return SEEN.count("tools/list")
+
+    def test_a_second_status_within_the_ttl_opens_no_new_session(self):
+        REPLIES["tools"] = ["get_alarm"]
+        mcp_client.status(probe_servers=True)
+        first = self._sessions_opened()
+        self.assertGreater(first, 0)
+        out = mcp_client.status(probe_servers=True)
+        self.assertEqual(self._sessions_opened(), first)
+        self.assertTrue(out["probes"]["cloudwatch"]["cached"])
+
+    def test_a_cached_answer_always_says_how_old_it_is(self):
+        """A stale probe presented as live is the same confusion this subsystem exists to prevent,
+        one level up: "we checked and the names match" must not mean "we checked a minute ago"."""
+        REPLIES["tools"] = ["get_alarm"]
+        mcp_client.status(probe_servers=True)
+        out = mcp_client.status(probe_servers=True)
+        self.assertIn("cached_age_seconds", out["probes"]["cloudwatch"])
+        self.assertEqual(out["probe_cache_ttl_seconds"], config.MCP_PROBE_TTL)
+
+    def test_fresh_bypasses_the_cache(self):
+        REPLIES["tools"] = ["get_alarm"]
+        mcp_client.status(probe_servers=True)
+        first = self._sessions_opened()
+        out = mcp_client.status(probe_servers=True, fresh=True)
+        self.assertGreater(self._sessions_opened(), first)
+        self.assertFalse(out["probes"]["cloudwatch"]["cached"])
+
+    def test_a_zero_ttl_disables_caching_entirely(self):
+        REPLIES["tools"] = ["get_alarm"]
+        with mock.patch.object(config, "MCP_PROBE_TTL", 0):
+            mcp_client.status(probe_servers=True)
+            first = self._sessions_opened()
+            mcp_client.status(probe_servers=True)
+            self.assertGreater(self._sessions_opened(), first)
+
+    def test_a_direct_probe_is_never_served_from_cache(self):
+        """`probe()` is the deliberate command-line act; it must always actually ask."""
+        REPLIES["tools"] = ["get_alarm"]
+        mcp_client.status(probe_servers=True)
+        first = self._sessions_opened()
+        mcp_client.probe("cloudwatch")
+        self.assertGreater(self._sessions_opened(), first)
+
+
 if __name__ == "__main__":
     unittest.main()

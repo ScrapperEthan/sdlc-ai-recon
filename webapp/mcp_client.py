@@ -46,6 +46,7 @@ where the time goes.
 """
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -615,8 +616,47 @@ def probe(server, timeout=None):
     }
 
 
-def status(probe_servers=False, timeout=None):
-    """Registry readiness plus, optionally, a live cross-check. The box's verification surface."""
+# Last probe per server, so the panel's button cannot become a way to hammer production. Only
+# `status()` reads it — a direct `probe()` call is always live, because that is the deliberate
+# command-line act the box performs when it wants a fresh answer.
+_PROBE_CACHE = {}
+_PROBE_LOCK = threading.Lock()
+
+
+def clear_probe_cache():
+    with _PROBE_LOCK:
+        _PROBE_CACHE.clear()
+
+
+def _cached_probe(server, timeout=None):
+    """A probe result, reused within `MCP_PROBE_TTL`, always carrying how old it is.
+
+    The lock is NOT held across the network call. Two simultaneous first-clicks may both probe,
+    which costs one extra session; holding it would queue every caller behind a probe that
+    RUNBOOK-55 clocked at 26 seconds, and a status endpoint that blocks for half a minute is worse
+    than a duplicate connection.
+    """
+    ttl = max(0, config.MCP_PROBE_TTL)
+    now = time.monotonic()
+    if ttl:
+        with _PROBE_LOCK:
+            stamp, cached = _PROBE_CACHE.get(server, (0.0, None))
+        if cached is not None and now - stamp < ttl:
+            # Age travels with it. A cached probe presented as live is exactly the "we looked and it
+            # was fine" confusion this whole subsystem exists to prevent, one level up.
+            return dict(cached, cached=True, cached_age_seconds=round(now - stamp, 1))
+    result = probe(server, timeout)
+    with _PROBE_LOCK:
+        _PROBE_CACHE[server] = (time.monotonic(), result)
+    return dict(result, cached=False, cached_age_seconds=0.0)
+
+
+def status(probe_servers=False, timeout=None, fresh=False):
+    """Registry readiness plus, optionally, a live cross-check. The box's verification surface.
+
+    `fresh=True` bypasses the probe cache — for the box, which wants a real answer after editing
+    config, not a 60-second-old one.
+    """
     out = dict(mcp_registry.summary())
     out["calling_enabled"] = bool(config.MCP_ENABLED)
     if not config.MCP_ENABLED:
@@ -624,6 +664,9 @@ def status(probe_servers=False, timeout=None):
                                "config reports `ready`. Readiness is about wiring, not permission.")
     if not probe_servers:
         return out
-    out["probes"] = {name: probe(name, timeout)
+    if fresh:
+        clear_probe_cache()
+    out["probes"] = {name: _cached_probe(name, timeout)
                      for name, spec in mcp_registry.servers().items() if spec.get("enabled")}
+    out["probe_cache_ttl_seconds"] = max(0, config.MCP_PROBE_TTL)
     return out

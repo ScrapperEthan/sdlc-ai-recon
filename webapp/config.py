@@ -205,6 +205,13 @@ MCP_CONSOLE = os.environ.get("SDLC_MCP_CONSOLE", "1") not in ("", "0", "false", 
 # 4 MB DOM. Truncation is reported, and the untruncated text is what goes to the raw store (subject
 # to its own line cap) when retention is on, so nothing is lost that retention would have kept.
 MCP_CONSOLE_MAX_CHARS = int(os.environ.get("SDLC_MCP_CONSOLE_MAX_CHARS", "20000"))
+# How long a `tools/list` cross-check is reused before the next one actually reconnects. A probe
+# opens a session to every enabled production server, and the panel put that behind a button — so
+# what used to be a deliberate command-line act is now something you can lean on. Tool names change
+# on the scale of days, not seconds, so a short window costs nothing real and turns a double-click
+# into one round trip. The age of a cached answer travels with it; a stale probe presented as live
+# is the failure this must not introduce. 0 disables caching.
+MCP_PROBE_TTL = int(os.environ.get("SDLC_MCP_PROBE_TTL", "60"))
 
 # ---- incident investigator: raw log retention (UAT internal test ONLY) ----
 # OFF by default. ON retains the raw log text an investigation read, so a devops tester can click an

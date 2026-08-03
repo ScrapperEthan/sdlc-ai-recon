@@ -879,13 +879,16 @@ class NoSecretLoggingTests(unittest.TestCase):
 
 
 class FrontendModelSelectorSourceTests(unittest.TestCase):
-    """Static checks on webapp/static/index.html's inline JS -- for a race-condition class of bug
-    that's easiest (and, for statement ORDER within a function body, only practically possible) to
-    pin at the source level rather than by driving a real browser."""
+    """Static checks on webapp/static/app.js -- for a race-condition class of bug that's easiest
+    (and, for statement ORDER within a function body, only practically possible) to pin at the
+    source level rather than by driving a real browser.
+
+    The script used to be inline in index.html and was split out once that file passed 3600 lines;
+    these checks follow the code, not the file it happens to live in."""
 
     @staticmethod
-    def _index_html_source():
-        path = os.path.join(os.path.dirname(webserver.__file__), "static", "index.html")
+    def _frontend_source():
+        path = os.path.join(os.path.dirname(webserver.__file__), "static", "app.js")
         with open(path, encoding="utf-8") as handle:
             return handle.read()
 
@@ -910,13 +913,13 @@ class FrontendModelSelectorSourceTests(unittest.TestCase):
         """Acceptance: loadTokenModelOptions() must check `revision !== llmStatusRevision` BEFORE
         calling populateModelSelect() -- otherwise a slower, now-superseded model-list response
         writes to the dropdown before it discovers it's stale."""
-        body = self._function_body(self._index_html_source(), "loadTokenModelOptions")
+        body = self._function_body(self._frontend_source(), "loadTokenModelOptions")
         guard_position = body.index("revision !== llmStatusRevision")
         dom_write_position = body.index("populateModelSelect")
         self.assertLess(guard_position, dom_write_position)
 
     def test_frontend_preserves_structured_llm_errors_and_refreshes_on_auth_failure(self):
-        source = self._index_html_source()
+        source = self._frontend_source()
         fetch_start = source.index("async function fetchJson(")
         fetch_end = source.index("async function refreshSessions", fetch_start)
         fetch_body = source[fetch_start:fetch_end]
@@ -927,9 +930,9 @@ class FrontendModelSelectorSourceTests(unittest.TestCase):
         self.assertIn("d.reconnect_required", source)
 
     def test_connect_reuses_its_returned_models_listing(self):
-        body = self._function_body(self._index_html_source(), "connectLlm")
+        body = self._function_body(self._frontend_source(), "connectLlm")
         self.assertIn("refreshLlmStatus(tokenListing)", body)
-        refresh_body = self._function_body(self._index_html_source(), "refreshLlmStatus")
+        refresh_body = self._function_body(self._frontend_source(), "refreshLlmStatus")
         self.assertLess(refresh_body.index("if (tokenListing)"),
                         refresh_body.index("await loadTokenModelOptions"))
 
@@ -937,7 +940,7 @@ class FrontendModelSelectorSourceTests(unittest.TestCase):
         """NDJSON stream errors do not have an HTTP status or fetchJson's camelCase conversion;
         the live askStream path must still turn the server's structured 429 event into a useful
         retry/model-switch message rather than rendering only its generic sanitized error."""
-        source = self._index_html_source()
+        source = self._frontend_source()
         describe_body = self._function_body(source, "describeLlmError")
         stream_body = self._function_body(source, "askStream")
         self.assertIn("error.code === 'copilot_rate_limit'", describe_body)
@@ -1265,7 +1268,7 @@ class _Browser:
 
     Also remembers `user_token` (the credential_id or tunnel token from a successful connect/
     register) and sends it as `X-SDLC-User-Token` on every later call, mirroring the real frontend's
-    `authHeaders()` (index.html) -- set it explicitly after a successful connect/register."""
+    `authHeaders()` (static/app.js) -- set it explicitly after a successful connect/register."""
 
     def __init__(self, base):
         self.base = base

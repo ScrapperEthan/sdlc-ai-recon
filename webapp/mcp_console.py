@@ -35,7 +35,7 @@ of minutes and one of days.
 """
 import json
 
-from . import config, incident_raw_store, mcp_client, mcp_registry
+from . import config, incident_raw_store, mcp_client, mcp_registry, redaction
 
 # Ceiling on how much of a response is retained for click-through, expressed in lines. The store
 # applies its own per-entry line cap on top; this one keeps a pathological single-line response from
@@ -95,8 +95,10 @@ def run(operation, args=None, owner=""):
         raise ConsoleDisabled(
             "the MCP console is disabled (SDLC_MCP_CONSOLE=0); operations can still be listed")
 
-    # Local, like the one in tools.py: this pulls in the retrieval stack, and the console's read half
-    # must stay usable in a checkout where that is not built.
+    # `describe_response` is the only thing still needed from the investigator, and it pulls in the
+    # retrieval stack — so it stays a local import, like the one in tools.py, and the console's read
+    # half remains usable in a checkout where that stack is not built. The exit gate itself is a
+    # top-level import (`redaction`), because it must not be possible to reach `run()` without it.
     from . import incident_investigator as inv
 
     operation = (operation or "").strip()
@@ -116,9 +118,9 @@ def run(operation, args=None, owner=""):
                 "error": str(exc)}
 
     counts = {}
-    text, text_truncated = _clip(inv.redact(out.get("text") or "", counts),
+    text, text_truncated = _clip(redaction.redact(out.get("text") or "", counts),
                                  config.MCP_CONSOLE_MAX_CHARS)
-    structured = _redact_tree(out.get("structured"), inv.redact, counts)
+    structured = _redact_tree(out.get("structured"), redaction.redact, counts)
     # Structured bodies get the same render budget; a 4 MB JSON array is no more renderable than a
     # 4 MB string. Measured after redaction so the check is on what would actually be sent.
     structured_truncated = False
@@ -173,6 +175,6 @@ def run(operation, args=None, owner=""):
     # Defence 2, and the one that is actually a leak test: anything still PII-shaped at the exit is a
     # bug upstream, so it is counted rather than quietly fixed. A silent save is indistinguishable
     # from correct behaviour, which is how a redaction bug survives a demo.
-    cleaned, leak = inv.sanitize_packet(result)
+    cleaned, leak = redaction.sanitize_packet(result)
     cleaned["exit_scan"] = leak
     return cleaned

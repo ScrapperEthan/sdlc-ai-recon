@@ -158,7 +158,11 @@ class EveryPersistedStoreUsesItTests(unittest.TestCase):
 
     def test_no_store_calls_os_replace_directly_any_more(self):
         for module in (session_store, incident_raw_store, llm_routes):
-            source = open(module.__file__, encoding="utf-8").read()
+            # `with`, not a bare open(): the un-closed handle raised a ResourceWarning the intranet
+            # picked up in RUNBOOK-65, and on Windows a lingering handle is exactly what the retry
+            # logic under test exists to survive — a test must not add one.
+            with open(module.__file__, encoding="utf-8") as handle:
+                source = handle.read()
             self.assertNotIn("os.replace", source, module.__name__)
             self.assertIn("atomic_json", source, module.__name__)
 

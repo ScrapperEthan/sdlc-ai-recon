@@ -28,3 +28,7 @@ index/codegraph/
 
 # human-reviewed generated scratch outputs
 scratch/
+
+# eval placeholder map: the shipped config/eval_repos.json is an EMPTY public template;
+# the box keeps its real repo/use-case ids here and they must never be committed.
+/config/eval_repos.local.json

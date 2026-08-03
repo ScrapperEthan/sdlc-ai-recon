@@ -1640,6 +1640,24 @@ def _cloudwatch_branch(query_plan, packet, counts):
                                   identity["evaluation_periods"])
     packet["cloudwatch_window"] = dict(window, timezone_conversion=cw.get("conversion", ""))
 
+    # Everything above is the COMMON PREFIX: without an alarm identity and a window, none of the
+    # three sub-branches below can run. From here down they are independent, and each is its own
+    # generator so that its early `return` ends only ITSELF. That matters: this function used to
+    # return outright when the metric read failed, which would have meant CloudWatch Logs never ran
+    # on exactly the incidents where the metric was unavailable (intranet handoff §1.2).
+    yield from _cloudwatch_metric(cw, identity, window, packet, counts)
+    yield from _cloudwatch_context(cw, identity, window, packet, counts)
+    yield from _cloudwatch_logs(cw, identity, window, query_plan, packet, counts)
+
+
+def _cloudwatch_metric(cw, identity, window, packet, counts):
+    """The measurement itself. Categories out, raw datapoints discarded."""
+    ledger = packet["cloudwatch_queries"]
+
+    def _record(bucket, operation, args_sent, **extra):
+        ledger[bucket].append({"server": "cloudwatch", "operation": operation,
+                               "args_sent": sorted(args_sent), **extra})
+
     args = {"namespace": identity["namespace"], "metric": identity["metric"],
             "dimensions": identity["dimensions"], "statistic": identity["statistic"],
             "period_seconds": identity["period_seconds"],
@@ -1734,13 +1752,304 @@ def _cloudwatch_branch(query_plan, packet, counts):
         points_seen=item["points_seen"], summary=item["summary"],
         elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
 
-    # ---- 3. context around the alarm, strictly AFTER the measurement ---------------------------
-    # Alarm history and recent infrastructure changes answer "did this just start, and did anything
-    # change just before it" — the two questions an operator asks next. Deliberately last and
-    # deliberately in their own ledger: a failure here must leave the metric evidence above
-    # untouched, and neither is ever allowed to become a stated root cause.
-    for event in _cloudwatch_context(cw, identity, window, packet, counts):
-        yield event
+
+
+# ---- CloudWatch Logs -------------------------------------------------------------------------
+# The second log source. It matters because LogDream resolves an app for only a fraction of the
+# estate (84/460 as of 2026-08-03) — for the rest, CloudWatch Logs is the only log evidence there
+# is. Every bound below is a hard cap from the intranet handoff §1.5; none of them may be raised by
+# a tool argument or by anything the model says.
+_MAX_LOG_GROUPS = 5
+_MAX_LOGS_KEYWORDS = 5
+_MAX_LOGS_KEYWORD_CHARS = 80
+_MAX_LOGS_LIMIT = 100
+_MAX_LOGS_WINDOW_MINUTES = 36
+# Regex metacharacters have no business in a keyword we derived from a repo name or an exception
+# class; stripping them is simpler and safer than escaping, because a keyword that needs them is a
+# keyword we did not intend to send.
+_LOGS_KEYWORD_SAFE = re.compile(r"[^A-Za-z0-9_.\- ]+")
+
+
+def _bounded_keyword(term):
+    """One keyword, stripped to a safe literal and length-capped, or "" if nothing usable is left."""
+    cleaned = _LOGS_KEYWORD_SAFE.sub(" ", str(term or "")).strip()
+    return cleaned[:_MAX_LOGS_KEYWORD_CHARS].strip()
+
+
+def _bounded_logs_keywords(query_plan):
+    """At most `_MAX_LOGS_KEYWORDS` safe keywords from the plan, in plan order, de-duplicated."""
+    out = []
+    for item in (query_plan or {}).get("keywords") or []:
+        term = _bounded_keyword(item.get("term") if isinstance(item, dict) else item)
+        if term and term not in out:
+            out.append(term)
+        if len(out) >= _MAX_LOGS_KEYWORDS:
+            break
+    return out
+
+
+def _fixed_logs_query(keyword):
+    """The ONLY query string this code ever sends.
+
+    Built here, from a template, with the keyword already reduced to a safe literal. The model never
+    supplies a query and cannot influence `fields`, `sort` or `limit` — a Logs Insights query is a
+    small language, and handing a language to the model is handing it the ability to read log groups
+    and fields nobody scoped.
+    """
+    return ("fields @timestamp, @message "
+            f"| filter @message like /{keyword}/ "
+            "| sort @timestamp desc "
+            f"| limit {_MAX_LOGS_LIMIT}")
+
+
+def _explicit_resource_identity(identity):
+    """Resource fields copied VERBATIM from `get_alarm`'s Dimensions, or blanks.
+
+    `resource` maps to their `resourceName` and `resource_arn` to `resourceArn` — confirmed by the
+    intranet 2026-08-03, and they are NOT interchangeable. `resource_type` is left empty on purpose:
+    its value domain is unconfirmed, and inventing an enum value to make a request "more complete"
+    is exactly the guess this seam exists to stop.
+    """
+    dimensions = (identity or {}).get("dimensions") or []
+    if not isinstance(dimensions, list):
+        return {"resource": "", "resource_type": "", "resource_arn": "", "dimension_name": ""}
+    by_name = {str(item.get("Name") or ""): str(item.get("Value") or "")
+               for item in dimensions if isinstance(item, dict)}
+    for name in _RESOURCE_DIMENSIONS:
+        value = by_name.get(name, "").strip()
+        if not value:
+            continue
+        is_arn = value.startswith("arn:")
+        return {"resource": "" if is_arn else value,
+                "resource_type": "",
+                "resource_arn": value if is_arn else "",
+                "dimension_name": name}
+    return {"resource": "", "resource_type": "", "resource_arn": "", "dimension_name": ""}
+
+
+def _parse_log_groups(body):
+    """Log-group names from their response, or None when the shape is not recognised.
+
+    None is a PARSER GAP, not an empty result — the caller must report it as our wiring problem.
+    """
+    if body is None:
+        return None
+    rows = body if isinstance(body, list) else _rows(body, ("logGroups", "log_groups", "groups",
+                                                            "items", "results"))
+    if rows is None:
+        return None
+    names = []
+    for row in rows:
+        if isinstance(row, str) and row.strip():
+            names.append(row.strip())
+        elif isinstance(row, dict):
+            for key in ("logGroupName", "log_group_name", "name", "logGroup"):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    names.append(value.strip())
+                    break
+    # `[]` when the container was RECOGNISED and empty; `None` only when it was not recognised. An
+    # earlier `names or None` here collapsed those two — which is the exact confusion this module
+    # exists to prevent, reintroduced one level down: "this resource has no log groups" would have
+    # been reported as "our parser is broken".
+    return names
+
+
+def _parse_cloudwatch_log_lines(body):
+    """Message strings from a Logs Insights result, or None when the shape is not recognised.
+
+    Reads ONLY explicit `@message`/`message` fields. Never `str(body).splitlines()` — that turns an
+    error envelope, or a field nobody scoped, into "log lines" (the 2026-07-30 defect class).
+    """
+    if body is None:
+        return None
+    rows = body if isinstance(body, list) else _rows(body, ("results", "events", "records",
+                                                            "messages", "items"))
+    if rows is None:
+        return None
+    lines = []
+    for row in rows:
+        if isinstance(row, str):
+            if row.strip():
+                lines.append(row)
+            continue
+        if isinstance(row, list):
+            # Insights returns [{"field": "@message", "value": "..."}, ...] per row.
+            for cell in row:
+                if isinstance(cell, dict) and str(cell.get("field", "")).lower() in (
+                        "@message", "message"):
+                    value = cell.get("value")
+                    if isinstance(value, str) and value.strip():
+                        lines.append(value)
+            continue
+        if isinstance(row, dict):
+            for key in ("@message", "message", "Message"):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    lines.append(value)
+                    break
+    # Same rule as `_parse_log_groups`: recognised-and-empty is `[]`, unrecognised is `None`.
+    return lines
+
+
+def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
+    """resource -> its log groups -> a bounded Insights query -> redacted, bounded excerpts."""
+    ledger = packet["cloudwatch_logs"]
+
+    def _record(bucket, operation, args_sent, **extra):
+        ledger[bucket].append({"server": "cloudwatch", "operation": operation,
+                               "args_sent": sorted(args_sent), **extra})
+
+    resource = _explicit_resource_identity(identity)
+    if not resource["resource"] and not resource["resource_arn"]:
+        packet["not_investigated"].append(
+            "CloudWatch Logs was skipped: get_alarm exposed no explicit resource name or ARN in its "
+            "Dimensions, and a resource is NEVER assembled from the alarm name or a repo id. "
+            "Nothing was guessed and nothing was queried — this is not 'the service has no logs'.")
+        yield _step("cw_logs_skipped", "CloudWatch Logs 跳过：告警维度里没有明确资源，不猜",
+                    resolved=False)
+        return
+
+    keywords = _bounded_logs_keywords(query_plan)
+    if not keywords:
+        packet["not_investigated"].append(
+            "CloudWatch Logs was skipped: no usable keyword survived the plan. A query with no "
+            "keyword would return whatever happened to be latest, which is not evidence.")
+        return
+
+    find_args = {"resource": resource["resource"], "resource_arn": resource["resource_arn"],
+                 "resource_type": resource["resource_type"], "max_results": _MAX_LOG_GROUPS}
+    payload = _payload("aws.log_groups_for_resource", find_args)
+    yield _step("cw_log_groups", "找该资源的 log groups（维度 %s）" % resource["dimension_name"],
+                server="cloudwatch", operation="aws.log_groups_for_resource")
+    _record("attempted", "aws.log_groups_for_resource", payload)
+    try:
+        out = mcp_client.call("aws.log_groups_for_resource", payload)
+    except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+        _record("failed", "aws.log_groups_for_resource", payload, refused_locally=True)
+        packet["not_investigated"].append(f"aws.log_groups_for_resource is not callable: {exc}.")
+        yield _step("unwired", "aws.log_groups_for_resource 未接线", server="cloudwatch",
+                    operation="aws.log_groups_for_resource", refused_locally=True)
+        return
+    except mcp_client.TransportError as exc:
+        _record("failed", "aws.log_groups_for_resource", payload, error=str(exc)[:200])
+        packet["not_investigated"].append(
+            f"aws.log_groups_for_resource did not respond ({str(exc)[:160]}). No CloudWatch log "
+            f"group was identified, so none was read.")
+        yield _step("query_failed", "log group 查询没有响应", server="cloudwatch",
+                    operation="aws.log_groups_for_resource")
+        return
+
+    _record("executed", "aws.log_groups_for_resource", payload,
+            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
+    outcome, detail = _tool_outcome(out)
+    if outcome == "error":
+        packet["not_investigated"].append(
+            f"aws.log_groups_for_resource REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. "
+            f"Their tool refusing is not an absence of log groups.")
+        yield _step("query_rejected", "log group 查询被拒绝", server="cloudwatch",
+                    operation="aws.log_groups_for_resource")
+        return
+
+    body = _decode(out.get("text"), out.get("structured"))
+    groups = None if (outcome == "empty" or body in (None, "", [], {})) else _parse_log_groups(body)
+    if groups is None and outcome != "empty" and body not in (None, "", [], {}):
+        packet["not_investigated"].append(
+            f"aws.log_groups_for_resource SUCCEEDED but our parser could not read the response "
+            f"shape ({describe_shape(body)}). OUR wiring gap — a `response` mapping in "
+            f"config/mcp_tools.json — NOT an absence of log groups.")
+        yield _step("query_unreadable", "log group 返回体读不懂（我方映射缺口）",
+                    server="cloudwatch", operation="aws.log_groups_for_resource", shape_error=True)
+        return
+    groups = (groups or [])[:_MAX_LOG_GROUPS]
+    if not groups:
+        packet["not_investigated"].append(
+            "aws.log_groups_for_resource returned no log group for this resource. That is a query "
+            "result about the RESOURCE MAPPING, not evidence that the service writes no logs.")
+        yield _step("cw_logs_empty", "该资源没有返回 log group", server="cloudwatch",
+                    operation="aws.log_groups_for_resource")
+        return
+
+    # The Logs window is bounded independently of the metric window: a metric window widens with the
+    # alarm's own evaluation periods, and a log scan must not inherit that.
+    start, end = window.get("start_utc", ""), window.get("end_utc", "")
+    matches, classes, excerpts = 0, set(), []
+    for keyword in keywords:
+        args = {"log_groups": groups, "query": _fixed_logs_query(keyword),
+                "from_time": start, "to_time": end, "limit": _MAX_LOGS_LIMIT}
+        payload = _payload("aws.query_logs", args)
+        yield _step("cw_logs_query", "查 CloudWatch Logs · 关键字 %s（%d 个 group）" % (
+            keyword, len(groups)), server="cloudwatch", operation="aws.query_logs")
+        _record("attempted", "aws.query_logs", payload, keyword=keyword)
+        try:
+            out = mcp_client.call("aws.query_logs", payload)
+        except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+            _record("failed", "aws.query_logs", payload, refused_locally=True)
+            packet["not_investigated"].append(f"aws.query_logs is not callable: {exc}.")
+            yield _step("unwired", "aws.query_logs 未接线", server="cloudwatch",
+                        operation="aws.query_logs", refused_locally=True)
+            return
+        except mcp_client.TransportError as exc:
+            _record("failed", "aws.query_logs", payload, error=str(exc)[:200])
+            packet["not_investigated"].append(
+                f"aws.query_logs did not respond for {keyword!r} ({str(exc)[:160]}). That keyword "
+                f"was NOT searched.")
+            yield _step("query_failed", f"{keyword} 查询没有响应", server="cloudwatch",
+                        operation="aws.query_logs")
+            continue
+
+        _record("executed", "aws.query_logs", payload, keyword=keyword,
+                elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
+        outcome, detail = _tool_outcome(out)
+        if outcome == "error":
+            packet["not_investigated"].append(
+                f"aws.query_logs REPORTED AN ERROR for {keyword!r}: "
+                f"{redact(str(detail)[:200], counts)}. The tool refusing is not an empty log.")
+            yield _step("query_rejected", f"{keyword} 被拒绝", server="cloudwatch",
+                        operation="aws.query_logs")
+            continue
+
+        body = _decode(out.get("text"), out.get("structured"))
+        if outcome == "empty" or body in (None, [], {}):
+            yield _step("query_empty", f"{keyword}：0 条", server="cloudwatch",
+                        operation="aws.query_logs")
+            continue
+
+        lines = _parse_cloudwatch_log_lines(body)
+        if lines is None:
+            packet["not_investigated"].append(
+                f"aws.query_logs SUCCEEDED for {keyword!r} but our parser could not read the "
+                f"response shape ({describe_shape(body)}). OUR wiring gap, NOT an empty log.")
+            yield _step("query_unreadable", f"{keyword} 返回体读不懂（我方映射缺口）",
+                        server="cloudwatch", operation="aws.query_logs", shape_error=True)
+            continue
+
+        matches += len(lines)
+        for line in lines:
+            classes.update(_EXCEPTION_CLASS.findall(line))
+        # Redact FIRST, then bound — the same order as LogDream, so no unredacted text can survive
+        # a truncation that happens to cut before the redaction pass.
+        for line in lines[:_MAX_EXCERPTS - len(excerpts)]:
+            excerpts.append(redact(line[:_MAX_EXCERPT_CHARS], counts))
+        yield _step("cw_logs_hit", f"{keyword}：{len(lines)} 条", server="cloudwatch",
+                    operation="aws.query_logs")
+
+    if matches:
+        packet["evidence"].append({
+            "kind": "cloudwatch_logs",
+            "environment": "production",
+            "source": "cloudwatch",
+            "log_groups_seen": len(groups),
+            "matches_seen": matches,
+            "exception_classes": sorted(classes)[:_MAX_EXCERPTS],
+            "excerpts": excerpts[:_MAX_EXCERPTS],
+            "keywords": keywords,
+            "window_utc": {"start": start, "end": end},
+            "reading_rule": ("Only the log groups this alarm's own resource dimension resolved to, "
+                             "only these keywords, and only this bounded UTC window were queried. "
+                             "A nil result speaks to those and nothing else."),
+        })
+        packet["contains_production_data"] = True
 
 
 def _relative_to_alarm(stamp_text, window):
@@ -1930,6 +2239,9 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         "cloudwatch_history": {"attempted": [], "executed": [], "failed": []},
         # The Portal delivery-record branch, same three-way accounting for the same reason.
         "portal_queries": {"attempted": [], "executed": [], "failed": []},
+        # CloudWatch Logs is a SECOND log source, kept out of both `cloudwatch_queries` (a metric
+        # ledger) and the LogDream ledger — otherwise "which log chain failed" is unanswerable.
+        "cloudwatch_logs": {"attempted": [], "executed": [], "failed": []},
         "not_investigated": [],
         "contains_production_data": False,
         "environments": {

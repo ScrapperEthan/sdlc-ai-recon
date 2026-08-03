@@ -252,6 +252,7 @@ They differ in what they need to know, which is what decides when each one is av
 | **Portal** delivery record | a `tracking_id` — nothing else | "did this specific message get delivered, and if not what kind of failure" |
 | **CloudWatch** metric | an alarm name + a time window | "was the metric abnormal around the alarm" |
 | **LogDream** logs | a repo/app + a time window | "what does the log actually say" |
+| **CloudWatch Logs** | an explicit resource dimension on the alarm | the same question, for the ~80% of repos LogDream cannot resolve an app for |
 
 **`MDC Alert - General SHP API Error` is the case that matters here.** It is one of the largest
 alert families and it carries **no CloudWatch alarm name and no resolvable app**, so the log and
@@ -270,6 +271,13 @@ another's result — say which ran. Two Portal-specific honesty rules:
 
 Alarm **history** and **recent changes** are context, not causes. "A deployment happened before the
 alarm" is a co-occurrence — say a change was seen in the window, never write it up as the reason.
+
+**There are TWO log sources and they fail for different reasons — say which one you actually read.**
+LogDream needs a confirmed app name and resolves one for only a minority of repos; CloudWatch Logs
+needs the alarm to carry an explicit resource dimension. "CloudWatch Logs was skipped because the
+alarm exposed no resource" is a statement about the ALARM, never about whether the service writes
+logs — and "no log group was returned for this resource" is about the resource MAPPING, not about
+the service either. Neither is ever "the logs were clean".
 
 Three things about metric evidence must be reported honestly:
 

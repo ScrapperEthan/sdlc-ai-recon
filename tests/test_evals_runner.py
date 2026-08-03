@@ -10,7 +10,9 @@ it encodes. A red case nobody can trace back to a real defect gets deleted rathe
 import json
 import os
 import re
+import tempfile
 import unittest
+from unittest import mock
 
 from evals import run as evals
 
@@ -232,14 +234,17 @@ class PlaceholderTests(unittest.TestCase):
         self.assertEqual(resolved["question"], case["question"])
 
     def test_the_readme_block_is_not_treated_as_a_placeholder_value(self):
-        repos = evals.load_repos(evals.DEFAULT_REPOS)
+        repos = evals.load_repos(evals.SHIPPED_REPOS)
         self.assertNotIn("_README", repos)
 
-    def test_the_shipped_config_leaves_the_intranet_owned_ids_blank(self):
-        """A committed guess would defeat the whole point — blank is the correct shipped state."""
-        with open(evals.DEFAULT_REPOS, encoding="utf-8-sig") as handle:
+    def test_the_shipped_template_leaves_intranet_ids_blank(self):
+        """The COMMITTED template must stay empty — a committed guess at a repo id is the defect
+        this seam exists to prevent. The box's real values live in the gitignored local override,
+        so this assertion and a filled-in box no longer contradict each other (they did, and the
+        intranet's real config broke this test — that was a design fault here, not their error)."""
+        with open(evals.SHIPPED_REPOS, encoding="utf-8-sig") as handle:
             raw = json.load(handle)
-        for key in ("sms_delivery", "vendor_repo", "known_use_case"):
+        for key in ("sms_delivery", "vendor_repo", "known_use_case", "unknown_use_case"):
             self.assertEqual(raw[key], "", key)
 
     def test_no_case_hardcodes_an_unverified_repo_id(self):
@@ -250,6 +255,66 @@ class PlaceholderTests(unittest.TestCase):
                 with self.subTest(case=case["id"]):
                     self.assertIn(token, allowed, f"{case['id']} hardcodes {token}")
 
+class RepoOverrideChainTests(unittest.TestCase):
+    """--repos -> SDLC_EVAL_REPOS -> config/eval_repos.local.json -> shipped template."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._env = mock.patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        os.environ.pop("SDLC_EVAL_REPOS", None)
+
+    def _write(self, name, payload):
+        path = os.path.join(self._tmp.name, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return path
+
+    def test_without_any_override_it_uses_the_shipped_template(self):
+        with mock.patch.object(evals, "LOCAL_REPOS", os.path.join(self._tmp.name, "absent.json")):
+            self.assertEqual(evals.default_repos_path(), evals.SHIPPED_REPOS)
+
+    def test_a_local_override_wins_over_the_template(self):
+        local = self._write("eval_repos.local.json", {"sms_delivery": "mc-hk-hase-local"})
+        with mock.patch.object(evals, "LOCAL_REPOS", local):
+            self.assertEqual(evals.default_repos_path(), local)
+            self.assertEqual(evals.load_repos()["sms_delivery"], "mc-hk-hase-local")
+
+    def test_the_env_var_wins_over_the_local_override(self):
+        local = self._write("eval_repos.local.json", {"sms_delivery": "from-local"})
+        env = self._write("elsewhere.json", {"sms_delivery": "from-env"})
+        with mock.patch.object(evals, "LOCAL_REPOS", local):
+            os.environ["SDLC_EVAL_REPOS"] = env
+            self.assertEqual(evals.load_repos()["sms_delivery"], "from-env")
+
+    def test_the_path_is_resolved_when_called_not_at_import(self):
+        """The box creates the override after this module is already loaded."""
+        local = os.path.join(self._tmp.name, "eval_repos.local.json")
+        with mock.patch.object(evals, "LOCAL_REPOS", local):
+            self.assertEqual(evals.default_repos_path(), evals.SHIPPED_REPOS)
+            self._write("eval_repos.local.json", {"sms_delivery": "appeared-later"})
+            self.assertEqual(evals.default_repos_path(), local)
+
+    def test_the_readme_block_is_stripped_from_the_override_too(self):
+        local = self._write("eval_repos.local.json",
+                            {"_README": ["notes"], "sms_delivery": "mc-hk-hase-local"})
+        with mock.patch.object(evals, "LOCAL_REPOS", local):
+            repos = evals.load_repos()
+        self.assertEqual(repos, {"sms_delivery": "mc-hk-hase-local"})
+
+    def test_an_unreadable_override_degrades_to_no_ids_not_a_crash(self):
+        bad = os.path.join(self._tmp.name, "bad.json")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(evals.load_repos(bad), {})
+
+    def test_the_local_override_is_gitignored(self):
+        """It holds real intranet ids; committing it is the one outcome that must be impossible."""
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(evals.__file__))),
+                               ".gitignore"), encoding="utf-8") as handle:
+            self.assertIn("eval_repos.local.json", handle.read())
 
 class CasesFileTests(unittest.TestCase):
     @classmethod

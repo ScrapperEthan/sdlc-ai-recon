@@ -1506,8 +1506,11 @@ class CloudWatchBranchTests(InvestigateTests):
         self._packet()
         order = [op for op, _ in self.calls if op.startswith("aws.")]
         self.assertEqual(order[:2], ["aws.get_alarm", "aws.metric_window"])
+        # After the measurement come the two context calls and then the CloudWatch Logs chain,
+        # each in its own sub-branch so that one failing cannot stop the next.
         self.assertEqual(order, ["aws.get_alarm", "aws.metric_window",
-                                 "aws.alarm_history", "aws.recent_changes"])
+                                 "aws.alarm_history", "aws.recent_changes",
+                                 "aws.log_groups_for_resource"])
 
     def test_get_alarm_is_called_with_the_abstract_arg_name(self):
         """The registry maps it to `alarmName`; nothing in this module names a real parameter."""

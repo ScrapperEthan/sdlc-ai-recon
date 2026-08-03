@@ -49,14 +49,34 @@ except Exception:  # noqa: BLE001 -- the runner must still work without the retr
     citations = None
 
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CASES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases.jsonl")
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.json")
-DEFAULT_REPOS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "config", "eval_repos.json")
+
+# TWO files, because one file cannot do both jobs. The shipped template is committed and must stay
+# EMPTY — a committed guess at a repo id is the defect this whole seam exists to prevent. The local
+# override is gitignored and holds the box's real ids. The first version had only the template, so
+# the intranet filling in real values broke a test asserting it was blank; that was a design fault
+# on this side, not a data-entry mistake on theirs.
+SHIPPED_REPOS = os.path.join(_ROOT, "config", "eval_repos.json")
+LOCAL_REPOS = os.path.join(_ROOT, "config", "eval_repos.local.json")
 
 
-def load_repos(path=DEFAULT_REPOS):
-    """`{placeholder: real id}` from the intranet-owned config, minus the `_README` block."""
+def default_repos_path():
+    """Explicit env var, then the local override, then the shipped template.
+
+    Resolved when CALLED, never frozen at import: a test (or the box) that creates the local
+    override after this module loads must still be seen.
+    """
+    explicit = (os.environ.get("SDLC_EVAL_REPOS") or "").strip()
+    if explicit:
+        return explicit
+    return LOCAL_REPOS if os.path.exists(LOCAL_REPOS) else SHIPPED_REPOS
+
+
+def load_repos(path=None):
+    """`{placeholder: real id}`, minus the `_README` block and any blank value."""
+    path = path or default_repos_path()
     try:
         with open(path, encoding="utf-8-sig") as handle:
             data = json.load(handle)
@@ -320,8 +340,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Assistant answer-quality regression.")
     parser.add_argument("--cases", default=DEFAULT_CASES)
     parser.add_argument("--out", default=DEFAULT_OUT)
-    parser.add_argument("--repos", default=DEFAULT_REPOS,
-                        help="intranet-owned map of {placeholder} -> real repo/use-case id")
+    parser.add_argument("--repos", default=None,
+                        help="explicit {placeholder} -> real id map; otherwise SDLC_EVAL_REPOS, "
+                             "then config/eval_repos.local.json, then the shipped template")
     parser.add_argument("--http", help="POST to a running /api/chat instead of calling in-process")
     parser.add_argument("--lane", help="only cases with this lane (incident / retrieval)")
     parser.add_argument("--case", help="only case ids matching this glob")
@@ -337,7 +358,8 @@ def main(argv=None):
         print("no cases selected")
         return 2
 
-    repos = load_repos(args.repos)
+    repos_path = args.repos or default_repos_path()
+    repos = load_repos(repos_path)
     previous = _previous(args.out)
     results, skipped = [], []
     for index, case in enumerate(cases, 1):

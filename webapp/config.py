@@ -183,6 +183,13 @@ MCP_USE_PROXY = os.environ.get("SDLC_MCP_USE_PROXY", "") not in ("", "0", "false
 # must not require an external code change and a push we may not be able to deliver.
 MCP_PROTOCOL_STREAMABLE = os.environ.get("SDLC_MCP_PROTOCOL_HTTP", "2025-03-26")
 MCP_PROTOCOL_SSE = os.environ.get("SDLC_MCP_PROTOCOL_SSE", "2024-11-05")
+# Total attempts per MCP call (1 = the old behaviour, no retry). RUNBOOK-65 observed a single
+# `getaddrinfo failed` that was healthy again 3 seconds later; without a retry that blip is written
+# up as "we looked and there were no logs", which is the exact confusion this feature must not
+# create. Only transport failures that did NOT carry the request are retried, and only because every
+# allow-listed MCP operation is a read.
+MCP_RETRY_ATTEMPTS = int(os.environ.get("SDLC_MCP_RETRY_ATTEMPTS", "2"))
+MCP_RETRY_DELAY = float(os.environ.get("SDLC_MCP_RETRY_DELAY", "3"))
 
 # ---- incident investigator: raw log retention (UAT internal test ONLY) ----
 # OFF by default. ON retains the raw log text an investigation read, so a devops tester can click an

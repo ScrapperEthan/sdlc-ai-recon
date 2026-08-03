@@ -133,7 +133,8 @@ class ReadinessTests(_WithConfig):
 
     def test_addresses_come_from_env_never_from_the_committed_config(self):
         self.assertEqual(mcp_registry.server_url("logdream"), "http://example.invalid/sse")
-        raw = open(self.path, encoding="utf-8").read()
+        with open(self.path, encoding="utf-8") as handle:
+            raw = handle.read()
         self.assertNotIn("http://example.invalid", raw)
 
     def test_missing_config_degrades_to_nothing_callable(self):

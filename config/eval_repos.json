@@ -1,0 +1,33 @@
+{
+  "_README": [
+    "Real repo ids for the eval cases (evals/cases.jsonl). INTRANET-OWNED — fill these in on the box.",
+    "",
+    "Why this file exists: RUNBOOK-65 caught the external side writing `mc-hk-hase-csl-sms-deli-job`",
+    "into a runbook AND into eval cases. It is not a real repo id. The system correctly fail-closed",
+    "(0 MCP calls, which is the guard working), but a question built on a repo that does not exist",
+    "tests nothing — and a BASELINE built on it would be worse than no baseline.",
+    "",
+    "This is the same lesson as the four rounds before it: names, shapes, formats and values that",
+    "only the intranet can observe do not belong in external Python or external fixtures. Keep the",
+    "abstract side out here, let the box own every real name.",
+    "",
+    "HOW TO FILL: run `python -m webapp.cli list_repos` (or the list_repos tool) and paste EXACT ids.",
+    "Any placeholder left empty makes its cases SKIP with a loud note — never run against a guess.",
+    "",
+    "sms_delivery      : a repo that delivers SMS AND resolves to a LogDream app if possible",
+    "                    (RUNBOOK-62 measured 51/460 resolvable; prefer one of those 51)",
+    "push_delivery     : the equivalent on the push/Aurora lane",
+    "ingress           : the entry service (mc-hk-hase-ingress-api has been verified on the box",
+    "                    before, so it is pre-filled — correct it if that is wrong)",
+    "known_use_case    : a use-case id that EXISTS in the active snapshot",
+    "unknown_use_case  : a use-case-shaped id that is NOT in the snapshot (leave as is unless it",
+    "                    happens to be real, in which case pick another)",
+    "vendor_repo       : a repo whose name contains a vendor token, for the do-not-infer-vendor case"
+  ],
+  "sms_delivery": "",
+  "push_delivery": "",
+  "ingress": "mc-hk-hase-ingress-api",
+  "known_use_case": "",
+  "unknown_use_case": "K9999",
+  "vendor_repo": ""
+}

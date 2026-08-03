@@ -37,6 +37,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import time
 import traceback
 import urllib.error
@@ -50,6 +51,39 @@ except Exception:  # noqa: BLE001 -- the runner must still work without the retr
 
 DEFAULT_CASES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases.jsonl")
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.json")
+DEFAULT_REPOS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "config", "eval_repos.json")
+
+
+def load_repos(path=DEFAULT_REPOS):
+    """`{placeholder: real id}` from the intranet-owned config, minus the `_README` block."""
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return {key: str(value).strip() for key, value in data.items()
+            if not key.startswith("_") and str(value).strip()}
+
+
+def resolve_case(case, repos):
+    """Substitute `{placeholder}` in the question. Returns (case, missing_placeholders).
+
+    A case with an unresolved placeholder is SKIPPED, never run. RUNBOOK-65: the external side wrote
+    a repo id that does not exist into a runbook and into these cases; the system fail-closed
+    correctly, but a case built on a repo nobody has heard of measures nothing, and a BASELINE built
+    on one is worse than having no baseline at all. Names only the box can observe belong to the box.
+    """
+    question = case.get("question") or ""
+    missing = sorted({name for name in re.findall(r"\{([a-z_]+)\}", question)
+                      if not repos.get(name)})
+    if missing:
+        return case, missing
+    resolved = dict(case)
+    for name, value in repos.items():
+        question = question.replace("{" + name + "}", value)
+    resolved["question"] = question
+    return resolved, []
 
 # Phrases that count as "it stopped and asked" rather than "it answered anyway". Deliberately
 # generous: the check that carries the weight is `must_not_mention`, and a false PASS here is
@@ -234,6 +268,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Assistant answer-quality regression.")
     parser.add_argument("--cases", default=DEFAULT_CASES)
     parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--repos", default=DEFAULT_REPOS,
+                        help="intranet-owned map of {placeholder} -> real repo/use-case id")
     parser.add_argument("--http", help="POST to a running /api/chat instead of calling in-process")
     parser.add_argument("--lane", help="only cases with this lane (incident / retrieval)")
     parser.add_argument("--case", help="only case ids matching this glob")
@@ -249,11 +285,31 @@ def main(argv=None):
         print("no cases selected")
         return 2
 
+    repos = load_repos(args.repos)
     previous = _previous(args.out)
-    results = []
+    results, skipped = [], []
     for index, case in enumerate(cases, 1):
+        resolved, missing = resolve_case(case, repos)
+        if missing:
+            skipped.append((case["id"], missing))
+            print(f"[{index}/{len(cases)}] {case['id']} SKIPPED (no real id for "
+                  f"{', '.join(missing)})", flush=True)
+            continue
         print(f"[{index}/{len(cases)}] {case['id']} ...", flush=True)
-        results.append(_run_case(case, args.http))
+        results.append(_run_case(resolved, args.http))
+
+    if skipped:
+        needed = sorted({name for _id, names in skipped for name in names})
+        print(f"\n!! {len(skipped)} case(s) SKIPPED — fill these in {args.repos}: "
+              f"{', '.join(needed)}")
+        print("!! They are not failures and not passes. A case run against a made-up repo id")
+        print("!! measures nothing, so it is not run at all (RUNBOOK-65).")
+        for case_id, names in skipped:
+            print(f"     {case_id}  needs {', '.join(names)}")
+
+    if not results:
+        print("\nnothing ran.")
+        return 2
 
     _print_table(results, previous)
 

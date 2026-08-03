@@ -76,7 +76,15 @@ class TransportError(RuntimeError):
 
     Kept distinct from a tool that ran and returned nothing, because during an incident those two
     lead to opposite conclusions — "the log service is down" versus "there are no matching lines".
+
+    `retryable` marks the subset worth one more attempt: DNS/connect/reset/timeout, i.e. the network
+    did not carry the request. An HTTP 4xx is NOT retryable — the server answered, and asking again
+    changes nothing except how much we hammer it.
     """
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _require_enabled():
@@ -125,11 +133,14 @@ def _post(url, payload, headers, timeout):
         return _urlopen(request, timeout)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
-        raise TransportError(f"MCP HTTP {exc.code} from {url}: {detail}")
+        # 5xx is the server failing to serve a request it DID receive — worth one more try.
+        # 4xx is an answer: wrong tool, no auth, bad argument. Retrying only hammers them.
+        raise TransportError(f"MCP HTTP {exc.code} from {url}: {detail}",
+                             retryable=exc.code >= 500)
     except urllib.error.URLError as exc:
-        raise TransportError(f"MCP unreachable at {url}: {exc.reason}")
+        raise TransportError(f"MCP unreachable at {url}: {exc.reason}", retryable=True)
     except (TimeoutError, OSError) as exc:
-        raise TransportError(f"MCP transport failure at {url}: {exc}")
+        raise TransportError(f"MCP transport failure at {url}: {exc}", retryable=True)
 
 
 def _iter_sse(stream):
@@ -288,11 +299,12 @@ class _LegacySse:
             self._stream = _urlopen(request, self.timeout)
         except urllib.error.HTTPError as exc:
             raise TransportError(f"MCP SSE HTTP {exc.code} from {self.url}: "
-                                 f"{exc.read().decode('utf-8', 'replace')[:300]}")
+                                 f"{exc.read().decode('utf-8', 'replace')[:300]}",
+                                 retryable=exc.code >= 500)
         except urllib.error.URLError as exc:
-            raise TransportError(f"MCP SSE unreachable at {self.url}: {exc.reason}")
+            raise TransportError(f"MCP SSE unreachable at {self.url}: {exc.reason}", retryable=True)
         except (TimeoutError, OSError) as exc:
-            raise TransportError(f"MCP SSE transport failure at {self.url}: {exc}")
+            raise TransportError(f"MCP SSE transport failure at {self.url}: {exc}", retryable=True)
         self._events = _iter_sse(self._stream)
         for event, data in self._events:
             text = data.strip()
@@ -402,11 +414,34 @@ def call(operation, args=None, timeout=None):
     _require_enabled()
     server, tool, params = mcp_registry.build_call(operation, args)   # allow-list + deny + naming
     started = time.time()
-    with _session(server, timeout) as session:
-        result = session.request("tools/call", {"name": tool, "arguments": params})
-        truncated = getattr(session, "truncated", False)
-        protocol = session.protocol
-        server_info = getattr(session, "server_info", {}) or {}
+
+    # One short, audited retry for a transport failure that did not carry the request (RUNBOOK-65:
+    # a single `getaddrinfo failed` that was healthy again 3 seconds later). Safe here because every
+    # allow-listed operation is a READ — the deny layer in mcp_registry is what makes that true, so
+    # a retry cannot repeat a side effect. NOT retried: a tool that ran and reported an error (their
+    # answer, not a network blip) and any 4xx (also an answer).
+    #
+    # The attempt count travels in the result and into the packet on purpose. The failure mode this
+    # guards against is the one this whole module exists for: a first-attempt blip being written up
+    # as "no logs found".
+    attempts = 0
+    last_error = None
+    while attempts < max(1, config.MCP_RETRY_ATTEMPTS):
+        attempts += 1
+        try:
+            with _session(server, timeout) as session:
+                result = session.request("tools/call", {"name": tool, "arguments": params})
+                truncated = getattr(session, "truncated", False)
+                protocol = session.protocol
+                server_info = getattr(session, "server_info", {}) or {}
+            break
+        except TransportError as exc:
+            last_error = exc
+            if not getattr(exc, "retryable", False) or attempts >= max(1, config.MCP_RETRY_ATTEMPTS):
+                raise TransportError(
+                    f"{exc} [after {attempts} attempt(s)]",
+                    retryable=getattr(exc, "retryable", False)) from None
+            time.sleep(config.MCP_RETRY_DELAY)
     text, blocks, other_kinds = _flatten_content(result)
     is_error = bool(result.get("isError"))
     return {
@@ -424,6 +459,12 @@ def call(operation, args=None, timeout=None):
             result.get("structuredContent"), (dict, list)) else None,
         "non_text_blocks": other_kinds,
         "truncated": truncated,
+        # Auditable: >1 means the first attempt failed at the transport and this result came from a
+        # retry. Surfaced in the step stream and the packet so a reader can tell a flaky network
+        # from a quiet one, and so nobody writes up a blip as an absence of logs.
+        "attempts": attempts,
+        "retried": attempts > 1,
+        "retry_reason": str(last_error)[:200] if attempts > 1 and last_error else "",
         "elapsed_ms": int((time.time() - started) * 1000),
         "protocol": protocol,
         "server_info": {"name": server_info.get("name") or "",

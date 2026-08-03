@@ -36,6 +36,35 @@ git pull                       # 需要 e86e8fd 之后的版本
 - `mirror/` 有真实源码
 - `index/` 有 `repo_tags.json` 等产物
 
+### ⚠️ 必做第一步：填 `config/eval_repos.json`
+
+**这是 RUNBOOK-65 抓到的问题的直接后果。** 我在 RB-65 里写的
+`mc-hk-hase-csl-sms-deli-job` 不是真实 repo id（你们查了：不在 460 universe 里，系统正确
+fail-closed、0 次 MCP 调用——**那是防线在正常工作**）。同一个假 id 也被我写进了 eval 题目里。
+
+**用假 id 跑出来的基线是没有意义的**，所以现在改成了：题目里写占位符，真实 id 由你们填。
+**没填的题会直接 SKIP，不会拿猜的 id 去跑。**
+
+```bash
+# 看一眼要填哪些
+cat config/eval_repos.json
+```
+
+要填 4 个（`ingress` 我预填了 `mc-hk-hase-ingress-api`，因为之前在盒子上验证过，
+**如果不对请改掉**）：
+
+| key | 要什么 |
+| --- | --- |
+| `sms_delivery` | 一个真实的 SMS 投递仓库，**最好是那 51 个能解析出 LogDream app 的之一** |
+| `push_delivery` | push/Aurora 那条线的对应仓库 |
+| `known_use_case` | 一个**在当前快照里真实存在**的 use-case id |
+| `vendor_repo` | 名字里带厂商 token 的仓库（用于"不要从仓库名推断厂商"那条） |
+
+`unknown_use_case` 默认 `K9999`——**如果它恰好是真的，请换一个不存在的**，那条题的前提就是它不存在。
+
+> 顺带回答你们 RB-65 的建议 3：Runbook 示例已经全部改成"请先用 `list_repos` 拿精确 id"，
+> 不再出现我编的简写。
+
 **成本提醒**：一条 case = 一次真实模型对话，有些会跑好几轮工具。20 条大概
 **十几到几十分钟**，会烧配额。所以这个是"改动前后各跑一次"的闸门，不是每次提交都跑的东西。
 

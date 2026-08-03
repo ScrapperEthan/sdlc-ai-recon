@@ -9,6 +9,7 @@ it encodes. A red case nobody can trace back to a real defect gets deleted rathe
 """
 import json
 import os
+import re
 import unittest
 
 from evals import run as evals
@@ -142,6 +143,54 @@ class RunnerBehaviourTests(unittest.TestCase):
                          "DOWN was PASS")
         self.assertEqual(evals._delta({"id": "c", "passed": 3, "total": 3}, previous), "=")
         self.assertEqual(evals._delta({"id": "new", "passed": 1, "total": 1}, previous), "new")
+
+
+class PlaceholderTests(unittest.TestCase):
+    """RUNBOOK-65: the external side wrote `mc-hk-hase-csl-sms-deli-job` — not a real repo — into a
+    runbook AND into these cases. The system fail-closed correctly, but a case built on a repo
+    nobody has heard of measures nothing, and a BASELINE built on one is worse than no baseline.
+    Real ids now come from the intranet-owned config; unresolved means SKIP, never guess."""
+
+    def test_a_resolved_placeholder_is_substituted(self):
+        case = {"id": "x", "question": "{sms_delivery} 挂了会影响谁？"}
+        resolved, missing = evals.resolve_case(case, {"sms_delivery": "mc-hk-hase-real-one"})
+        self.assertEqual(missing, [])
+        self.assertEqual(resolved["question"], "mc-hk-hase-real-one 挂了会影响谁？")
+
+    def test_an_unfilled_placeholder_is_reported_missing_not_substituted(self):
+        case = {"id": "x", "question": "{sms_delivery} 挂了会影响谁？"}
+        _resolved, missing = evals.resolve_case(case, {"sms_delivery": ""})
+        self.assertEqual(missing, ["sms_delivery"])
+
+    def test_a_completely_absent_config_misses_every_placeholder(self):
+        case = {"id": "x", "question": "{a} and {b}"}
+        _resolved, missing = evals.resolve_case(case, {})
+        self.assertEqual(missing, ["a", "b"])
+
+    def test_a_case_with_no_placeholder_always_runs(self):
+        case = {"id": "x", "question": "MDC 有多少个仓库？"}
+        resolved, missing = evals.resolve_case(case, {})
+        self.assertEqual(missing, [])
+        self.assertEqual(resolved["question"], case["question"])
+
+    def test_the_readme_block_is_not_treated_as_a_placeholder_value(self):
+        repos = evals.load_repos(evals.DEFAULT_REPOS)
+        self.assertNotIn("_README", repos)
+
+    def test_the_shipped_config_leaves_the_intranet_owned_ids_blank(self):
+        """A committed guess would defeat the whole point — blank is the correct shipped state."""
+        with open(evals.DEFAULT_REPOS, encoding="utf-8-sig") as handle:
+            raw = json.load(handle)
+        for key in ("sms_delivery", "vendor_repo", "known_use_case"):
+            self.assertEqual(raw[key], "", key)
+
+    def test_no_case_hardcodes_an_unverified_repo_id(self):
+        """The one allowed literal is the deliberately-fake repo, whose whole point is to be fake."""
+        allowed = {"mc-hk-hase-totally-made-up-service"}
+        for case in evals._load_cases(evals.DEFAULT_CASES):
+            for token in re.findall(r"mc-hk-hase-[a-z0-9-]+", case["question"]):
+                with self.subTest(case=case["id"]):
+                    self.assertIn(token, allowed, f"{case['id']} hardcodes {token}")
 
 
 class CasesFileTests(unittest.TestCase):

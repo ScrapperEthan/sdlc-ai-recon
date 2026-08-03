@@ -1276,6 +1276,19 @@ def _tool_outcome(out):
     return ("hit", text) if text.strip() else ("empty", "")
 
 
+def _transport_meta(out):
+    """Retry facts worth carrying out of an MCP result, or {} for the normal single-attempt case.
+
+    A retried call is a fact about the NETWORK, not about the logs. RUNBOOK-65 caught one
+    `getaddrinfo failed` that was healthy again three seconds later; a reader who cannot see that
+    happened would read the surrounding result as a quiet system rather than a flaky link — the same
+    "we did not look, and it reads like we did" confusion this module exists to prevent.
+    """
+    if not isinstance(out, dict) or not out.get("retried"):
+        return {}
+    return {"attempts": out.get("attempts"), "retried": True}
+
+
 def _step(step, label, **detail):
     """One progress event.
 
@@ -1348,7 +1361,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
                     server="cloudwatch", operation="aws.get_alarm")
         return
 
-    _record("executed", "aws.get_alarm", ["alarm_name"], elapsed_ms=out.get("elapsed_ms"))
+    _record("executed", "aws.get_alarm", ["alarm_name"], elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
     outcome, text = _tool_outcome(out)
     if outcome != "hit":
         reason = redact(text[:200], counts) if outcome == "error" else "an empty response"
@@ -1357,7 +1370,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
             f"({reason}). No metric was read, and this is not evidence about the service.")
         yield _step("alarm_lookup_failed", "告警配置查询失败，不作为证据",
                     server="cloudwatch", operation="aws.get_alarm", rejected=True,
-                    elapsed_ms=out.get("elapsed_ms"))
+                    elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
     identity, why = alarm_metric_identity(_decode(text, out.get("structured")))
@@ -1424,7 +1437,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
                     server="cloudwatch", operation="aws.metric_window")
         return
 
-    _record("executed", "aws.metric_window", payload, elapsed_ms=out.get("elapsed_ms"))
+    _record("executed", "aws.metric_window", payload, elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
     outcome, text = _tool_outcome(out)
     if outcome == "error":
         _record("failed", "aws.metric_window", payload, refused_locally=False,
@@ -1434,7 +1447,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
             f"datapoint and not evidence.")
         yield _step("metric_window_failed", "指标工具报错，不作为证据",
                     server="cloudwatch", operation="aws.metric_window", rejected=True,
-                    elapsed_ms=out.get("elapsed_ms"))
+                    elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
     points, status_code, error = parse_metric_window(_decode(text, out.get("structured")))
@@ -1445,7 +1458,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
             f"real field names under operations['aws.metric_window'].response in mcp_tools.json.")
         yield _step("metric_window_failed", "指标返回体格式看不懂，不作为证据（查询本身成功）",
                     server="cloudwatch", operation="aws.metric_window", shape_error=True,
-                    elapsed_ms=out.get("elapsed_ms"))
+                    elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
     if not points:
@@ -1457,7 +1470,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
         yield _step("metric_window_empty", "该时间窗内没有数据点 —— 这不等于“系统正常”",
                     server="cloudwatch", operation="aws.metric_window",
                     namespace=identity["namespace"], metric=identity["metric"],
-                    points_seen=0, elapsed_ms=out.get("elapsed_ms"))
+                    points_seen=0, elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
         return
 
     item = _cloudwatch_evidence(identity, window, points, status_code, counts)
@@ -1468,7 +1481,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
         server="cloudwatch", operation="aws.metric_window",
         namespace=identity["namespace"], metric=identity["metric"],
         points_seen=item["points_seen"], summary=item["summary"],
-        elapsed_ms=out.get("elapsed_ms"))
+        elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
 
 
 def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
@@ -1599,7 +1612,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                 f"mcp_tools.json — a bad source name otherwise costs half the log coverage silently.")
             yield _step("apps_failed", "%s 被服务器拒绝，该 source 不查（可能是 source 名写错）" % source,
                         server="logdream", operation="log.list_apps", source=source,
-                        rejected=True, elapsed_ms=listing.get("elapsed_ms"))
+                        rejected=True, elapsed_ms=listing.get("elapsed_ms"), **_transport_meta(listing))
             continue
         names, note, error = extract_app_names(text, listing.get("structured"))
         if names is None:
@@ -1611,7 +1624,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
             packet["not_investigated"].append(f"source {source!r}: {error} Nothing was searched there.")
             yield _step("apps_failed", "%s 的应用清单格式看不懂，该 source 不查（不猜应用名）" % source,
                         server="logdream", operation="log.list_apps", source=source,
-                        shape_error=True, elapsed_ms=listing.get("elapsed_ms"))
+                        shape_error=True, elapsed_ms=listing.get("elapsed_ms"), **_transport_meta(listing))
             continue
         apps_by_source[source] = set(names)
         if note:
@@ -1619,7 +1632,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         yield _step("apps_done", "%s 上有 %d 个应用" % (source, len(names)),
                     server="logdream", operation="log.list_apps", source=source,
                     app_count=len(names), note=note or None,
-                    elapsed_ms=listing.get("elapsed_ms"))
+                    elapsed_ms=listing.get("elapsed_ms"), **_transport_meta(listing))
 
     if not apps_by_source:
         packet["caveats"].append(
@@ -1706,7 +1719,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                 yield _step("query_rejected", "%s / %s：文件搜索工具报错" % (match, source),
                             server="logdream", operation="log.search_files",
                             app=match, source=source, rejected=True,
-                            elapsed_ms=found.get("elapsed_ms"))
+                            elapsed_ms=found.get("elapsed_ms"), **_transport_meta(found))
                 continue
             picked = select_log_files(text, alert_date=alert_date,
                                       structured=found.get("structured"))
@@ -1716,14 +1729,14 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                     f"nothing was read. A file name is never guessed.")
                 yield _step("no_files", "%s / %s：没找到可用的日志文件，不读" % (match, source),
                             server="logdream", operation="log.search_files",
-                            app=match, source=source, elapsed_ms=found.get("elapsed_ms"))
+                            app=match, source=source, elapsed_ms=found.get("elapsed_ms"), **_transport_meta(found))
                 continue
             files_by_source[source] = picked
             target.setdefault("files", {})[source] = picked
             yield _step("files_found", "%s / %s：选中 %s" % (match, source, "、".join(picked)),
                         server="logdream", operation="log.search_files",
                         app=match, source=source, files=picked,
-                        elapsed_ms=found.get("elapsed_ms"))
+                        elapsed_ms=found.get("elapsed_ms"), **_transport_meta(found))
 
         if not files_by_source:
             continue
@@ -1826,14 +1839,14 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                                 match, source, log_file, term),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term, file=log_file, rejected=True,
-                            elapsed_ms=out.get("elapsed_ms"))
+                            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
             if outcome == "empty":
                 yield _step("query_empty", "%s / %s / %s：%s 无匹配" % (
                     match, source, log_file, term),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term, file=log_file,
-                            elapsed_ms=out.get("elapsed_ms"))
+                            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
             # Structured body -> the actual log-line fields. Splitting the JSON source counted 11
             # "lines" for a 2-line response (intranet, 2026-07-31), and every number downstream —
@@ -1849,14 +1862,14 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                                 match, source, log_file),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term, file=log_file,
-                            shape_error=True, elapsed_ms=out.get("elapsed_ms"))
+                            shape_error=True, elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
             if not lines:
                 yield _step("query_empty", "%s / %s / %s：%s 无匹配" % (
                     match, source, log_file, term),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term, file=log_file,
-                            elapsed_ms=out.get("elapsed_ms"))
+                            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
             # The file ACTUALLY read, not a hard-coded name: mislabelling `exception.log` as
             # `otx_trace.log` would misdirect whoever goes to check it.
@@ -1875,7 +1888,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                         app=match, source=source, keyword=term,
                         lines_seen=item["lines_seen"],
                         exception_classes=item["exception_classes"],
-                        elapsed_ms=out.get("elapsed_ms"),
+                        elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out),
                         truncated=bool(out.get("truncated")),
                         # Present only under raw retention. The browser fetches the original with
                         # it; nothing in the stream or the packet contains the text itself.

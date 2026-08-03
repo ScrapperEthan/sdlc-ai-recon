@@ -75,9 +75,11 @@ class RetentionTests(_Store):
         ref = store.put("uid-a", LINES)
         stale = (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat().replace(
             "+00:00", "Z")
-        data = json.load(open(self.path, encoding="utf-8"))
+        with open(self.path, encoding="utf-8") as handle:
+            data = json.load(handle)
         data["entries"][0]["stored_at"] = stale
-        json.dump(data, open(self.path, "w", encoding="utf-8"))
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
         self.assertIsNone(store.get(ref, "uid-a"))
 
     def test_the_oldest_entries_are_dropped_past_the_cap(self):

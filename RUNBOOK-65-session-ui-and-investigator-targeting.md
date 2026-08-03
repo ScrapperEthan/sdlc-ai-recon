@@ -77,7 +77,7 @@ This is the part most worth adversarial testing; the previous four rounds all fo
    **Expected**: it refuses with "nothing to query… or pass `repos` if you already know which
    service it is". Zero MCP calls.
 
-2. Now tell it the service in plain language ("是 mc-hk-hase-csl-sms-deli-job 这个服务").
+2. Now tell it the service in plain language ("是 &lt;一个真实的、你们用 list_repos 查出来的精确 repo id&gt; 这个服务").
 
    **Expected**: the model passes `repos`, the plan becomes runnable, and the investigation runs
    against that app. In the packet, `plan.targets[].source` must read **"supplied by the caller"**,

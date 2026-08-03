@@ -245,13 +245,41 @@ class CloudWatchLogsChainTests(unittest.TestCase):
         self.assertEqual(self._ops(), [])
 
     def test_the_operations_we_deliberately_left_unwired_are_never_called(self):
-        """Their §0 classification. `aws.resource_tags` needs an ARN we do not have; `parse_alert`
-        would let a remote parse override the user's explicit input; `log.browse` bypasses the
-        app/file confirmation chain; `log.investigate` has an unverified response shape. Silence
-        here is the design, not an omission — this test is what keeps it deliberate."""
+        """Three operations stay dark, each for a reason the intranet established LIVE. Silence
+        here is the design, not an omission, and this test is what keeps it deliberate — without it
+        the next person reads "3 of 15 unused" as a to-do list.
+
+        `aws.parse_alert` — permanently. Probed 2026-08-03 with three synthetic alerts: a top-level
+        JSON `AlarmName` was not recognised at all, and a multi-line alert had the following lines
+        swallowed into the name (120 chars, embedded newline). Our local extractor is strictly
+        better, needs no connection, and cannot let a remote parse override what the user said.
+
+        `log.browse` — it takes only `source` + `path`, so wiring it would bypass the chain that
+        makes log reads safe (app confirmed on that source -> real filename -> bounded read).
+        `log.search_files` already provides what the product needs, with a verified shape.
+
+        `log.investigate` — its INPUT schema is confirmed, its OUTPUT shape is not. The intranet
+        could not probe it: LogDream's port refuses TCP from the deploy server. Its documented
+        `findings / cause_chain / next_steps` are documented, not live-verified, and a tool's
+        "next steps" must never enter evidence as fact.
+        """
         self._run()
-        for operation in ("aws.parse_alert", "aws.resource_tags", "log.browse", "log.investigate"):
+        for operation in ("aws.parse_alert", "log.browse", "log.investigate"):
             self.assertNotIn(operation, self._ops())
+
+    def test_nothing_anywhere_in_the_engine_names_those_tools(self):
+        """A caller could also appear by someone hardcoding the REAL tool name and bypassing the
+        registry. These are the real names from their `tools/list`."""
+        import pathlib
+        root = pathlib.Path(inv.__file__).resolve().parent.parent
+        sources = list((root / "webapp").glob("*.py")) + list((root / "retriever").glob("*.py"))
+        for real_name in ("parse_cloudwatch_alert", "browse_logdream", "investigate_logdream"):
+            # Quoted, i.e. usable as a value. Prose about WHY a tool is unwired is the point of
+            # these comments, so only a string literal counts as naming it.
+            for quoted in ('"%s"' % real_name, "'%s'" % real_name):
+                for source in sources:
+                    with self.subTest(tool=quoted, file=source.name):
+                        self.assertNotIn(quoted, source.read_text(encoding="utf-8"))
 
 
 class LogGroupParsingTests(unittest.TestCase):

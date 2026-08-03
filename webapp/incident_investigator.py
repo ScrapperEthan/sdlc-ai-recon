@@ -1346,6 +1346,30 @@ def _tool_outcome(out):
     return ("hit", text) if text.strip() else ("empty", "")
 
 
+_TRANSPORT_ADVICE = {
+    "connection_refused": ("the address answered and REFUSED the connection — that points at the "
+                           "MCP service itself (not running, bound to loopback only, or a changed "
+                           "port), not at the network. Nothing was read."),
+    "dns_failure": ("the hostname could not be resolved. Nothing was read — this is a name/DNS "
+                    "problem, not a quiet log."),
+    "timeout": ("the request was sent and nothing came back in time. Whether it ran on their side "
+                "is unknown, so treat this as 'we did not get an answer', never as 'no results'."),
+    "connection_reset": "the connection was dropped mid-exchange. Nothing usable was read.",
+    "tls_failure": "the TLS handshake failed. Nothing was read.",
+}
+
+
+def _transport_note(exc):
+    """A short, address-free explanation of a transport failure, for `not_investigated`.
+
+    The category matters operationally: the intranet spent a full diagnostic cycle establishing that
+    LogDream's port was REFUSED rather than timing out, because those two go to different owners.
+    Writing the distinction into the packet means the next reader starts where they finished.
+    """
+    kind = getattr(exc, "kind", "") or "unreachable"
+    return _TRANSPORT_ADVICE.get(kind, "nothing was read.")
+
+
 def _transport_meta(out):
     """Retry facts worth carrying out of an MCP result, or {} for the normal single-attempt case.
 
@@ -1509,8 +1533,8 @@ def _portal_branch(query_plan, packet, counts):
         except mcp_client.TransportError as exc:
             _record("failed", operation, ["tracking_id"], error=str(exc)[:200])
             packet["not_investigated"].append(
-                f"{operation} did not respond ({str(exc)[:160]}). Portal was NOT read for this "
-                f"channel — that is not the same as no delivery record.")
+                f"{operation} did not respond ({str(exc)[:160]}): {_transport_note(exc)} Portal was NOT "
+                f"read for this channel — that is not the same as no delivery record.")
             yield _step("query_failed", f"{operation} 没有响应", server="portal",
                         operation=operation)
             continue
@@ -1648,6 +1672,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
     yield from _cloudwatch_metric(cw, identity, window, packet, counts)
     yield from _cloudwatch_context(cw, identity, window, packet, counts)
     yield from _cloudwatch_logs(cw, identity, window, query_plan, packet, counts)
+    yield from _cloudwatch_tags(identity, packet, counts)
 
 
 def _cloudwatch_metric(cw, identity, window, packet, counts):
@@ -1934,8 +1959,8 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
     except mcp_client.TransportError as exc:
         _record("failed", "aws.log_groups_for_resource", payload, error=str(exc)[:200])
         packet["not_investigated"].append(
-            f"aws.log_groups_for_resource did not respond ({str(exc)[:160]}). No CloudWatch log "
-            f"group was identified, so none was read.")
+            f"aws.log_groups_for_resource did not respond ({str(exc)[:160]}): {_transport_note(exc)} "
+            f"No CloudWatch log group was identified, so none was read.")
         yield _step("query_failed", "log group 查询没有响应", server="cloudwatch",
                     operation="aws.log_groups_for_resource")
         return
@@ -1992,8 +2017,8 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
         except mcp_client.TransportError as exc:
             _record("failed", "aws.query_logs", payload, error=str(exc)[:200])
             packet["not_investigated"].append(
-                f"aws.query_logs did not respond for {keyword!r} ({str(exc)[:160]}). That keyword "
-                f"was NOT searched.")
+                f"aws.query_logs did not respond for {keyword!r} ({str(exc)[:160]}): {_transport_note(exc)} "
+                f"That keyword was NOT searched.")
             yield _step("query_failed", f"{keyword} 查询没有响应", server="cloudwatch",
                         operation="aws.query_logs")
             continue
@@ -2052,6 +2077,117 @@ def _cloudwatch_logs(cw, identity, window, query_plan, packet, counts):
         packet["contains_production_data"] = True
 
 
+# Tag keys worth reporting the PRESENCE of. Values are never kept: a tag value carries person
+# names, emails, team abbreviations and internal system ids, and none of that is needed to answer
+# "is this resource owned/labelled". Their live probe: an ECS service sample had 10 keys including
+# `owner`, and no `application` or `support group`.
+_TAG_KEYS_OF_INTEREST = {
+    "owner": "owner_tag_present",
+    "application": "application_tag_present",
+    "support group": "support_group_tag_present",
+    "supportgroup": "support_group_tag_present",
+    "environment": "environment_tag_present",
+}
+
+
+def _tag_keys(body):
+    """Tag KEYS from their response, or None when the shape is not recognised.
+
+    Confirmed live shape (2026-08-03): `{resourceArn, tags{key: value}, rawTags[{Key, Value}]}`.
+    `tags` is preferred; `rawTags` is the fallback. `resourceArn` is used only to confirm we got the
+    scope we asked for and is then dropped — it never enters the packet.
+    """
+    if not isinstance(body, dict):
+        return None
+    tags = body.get("tags")
+    if isinstance(tags, dict):
+        return [str(key) for key in tags]
+    raw = body.get("rawTags")
+    if isinstance(raw, list):
+        return [str(item.get("Key")) for item in raw
+                if isinstance(item, dict) and item.get("Key") is not None]
+    return None
+
+
+def _cloudwatch_tags(identity, packet, counts):
+    """Ownership labels for the alarm's own resource — only ever from an ARN it actually carried.
+
+    Why this is conditional and usually silent: a tag lookup needs an ARN, and `get_alarm`'s
+    Dimensions almost always give a resource NAME. The intranet scanned 500 real alarms and found
+    ZERO explicit ARNs, so on today's data this branch makes no call at all. It exists because the
+    rule is what matters, not the current hit rate: an ARN that appears IN THE ALARM'S OWN dimension
+    is by construction the alarm's target, and anything else is a different resource wearing the
+    right-looking name. An ARN assembled from a resource name, or the alarm's own `AlarmArn`, would
+    return real tags for the WRONG thing — worse than returning none, because it looks like an answer.
+    """
+    ledger = packet["cloudwatch_tags"]
+    resource = _explicit_resource_identity(identity)
+    arn = resource.get("resource_arn") or ""
+    if not arn:
+        packet["not_investigated"].append(
+            "resource tags were not looked up: the alarm's dimensions carry a resource NAME, not an "
+            "ARN, and an ARN is never assembled from a name (account, region and resource type are "
+            "all missing) nor taken from the alarm's own AlarmArn. This says nothing about whether "
+            "the resource has tags or an owner.")
+        return
+
+    # The abstract arg is `resource`; the config maps it to their `resourceArn`. Passing
+    # `resource_arn` here would silently drop the only required parameter.
+    payload = _payload("aws.resource_tags", {"resource": arn})
+    yield _step("cw_tags", "查资源标签（告警维度里带的是明确 ARN）",
+                server="cloudwatch", operation="aws.resource_tags")
+    ledger["attempted"].append({"server": "cloudwatch", "operation": "aws.resource_tags",
+                                "args_sent": sorted(payload)})
+    try:
+        out = mcp_client.call("aws.resource_tags", payload)
+    except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+        ledger["failed"].append({"server": "cloudwatch", "operation": "aws.resource_tags",
+                                 "args_sent": sorted(payload), "refused_locally": True})
+        packet["not_investigated"].append(f"aws.resource_tags is not callable: {exc}.")
+        return
+    except mcp_client.TransportError as exc:
+        ledger["failed"].append({"server": "cloudwatch", "operation": "aws.resource_tags",
+                                 "args_sent": sorted(payload), "error": str(exc)[:200]})
+        packet["not_investigated"].append(
+            f"aws.resource_tags did not respond ({str(exc)[:160]}): {_transport_note(exc)} "
+            f"No ownership label was read.")
+        return
+
+    ledger["executed"].append({"server": "cloudwatch", "operation": "aws.resource_tags",
+                               "args_sent": sorted(payload), "elapsed_ms": out.get("elapsed_ms"),
+                               **_transport_meta(out)})
+    outcome, detail = _tool_outcome(out)
+    if outcome == "error":
+        packet["not_investigated"].append(
+            f"aws.resource_tags REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. Their tool "
+            f"refusing is not an absence of tags.")
+        return
+    body = _decode(out.get("text"), out.get("structured"))
+    if outcome == "empty" or body in (None, "", [], {}):
+        return
+    keys = _tag_keys(body)
+    if keys is None:
+        packet["not_investigated"].append(
+            f"aws.resource_tags SUCCEEDED but our parser could not read the response shape "
+            f"({describe_shape(body)}). OUR wiring gap, NOT an untagged resource.")
+        yield _step("query_unreadable", "资源标签返回体读不懂（我方映射缺口）",
+                    server="cloudwatch", operation="aws.resource_tags", shape_error=True)
+        return
+
+    lowered = {key.lower() for key in keys}
+    item = {"kind": "cloudwatch_resource_tags", "environment": "production", "source": "cloudwatch",
+            "tag_count": len(keys),
+            "note": ("presence of tag KEYS only. Tag values are never read out of the response — "
+                     "they carry person names, emails and internal ids. An `owner` tag does NOT "
+                     "establish which repository this resource belongs to; there is no confirmed "
+                     "mapping from any tag key to a repo.")}
+    for marker, field in _TAG_KEYS_OF_INTEREST.items():
+        item[field] = item.get(field, False) or marker in lowered
+    packet["evidence"].append(item)
+    yield _step("cw_tags_done", "资源标签：%d 个 key（只记有无，不记值）" % len(keys),
+                server="cloudwatch", operation="aws.resource_tags")
+
+
 def _relative_to_alarm(stamp_text, window):
     """`before_alarm` / `after_alarm` / `outside_window` / `unknown` — a CATEGORY, never a time."""
     start, end = (window or {}).get("start_utc") or "", (window or {}).get("end_utc") or ""
@@ -2092,8 +2228,8 @@ def _cloudwatch_context(cw, identity, window, packet, counts):
         except mcp_client.TransportError as exc:
             _record("failed", operation, payload, error=str(exc)[:200])
             packet["not_investigated"].append(
-                f"{operation} did not respond ({str(exc)[:160]}). This is CONTEXT that is missing, "
-                f"not a finding — the metric result above is unaffected.")
+                f"{operation} did not respond ({str(exc)[:160]}): {_transport_note(exc)} This is CONTEXT "
+                f"that is missing, not a finding — the metric result above is unaffected.")
             yield _step("query_failed", f"{operation} 没有响应", server="cloudwatch",
                         operation=operation)
             return
@@ -2242,6 +2378,8 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         # CloudWatch Logs is a SECOND log source, kept out of both `cloudwatch_queries` (a metric
         # ledger) and the LogDream ledger — otherwise "which log chain failed" is unanswerable.
         "cloudwatch_logs": {"attempted": [], "executed": [], "failed": []},
+        # Ownership labels. Usually empty — it only runs when the alarm itself carried an ARN.
+        "cloudwatch_tags": {"attempted": [], "executed": [], "failed": []},
         "not_investigated": [],
         "contains_production_data": False,
         "environments": {

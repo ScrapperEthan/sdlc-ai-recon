@@ -45,6 +45,7 @@ where the time goes.
   filled in, and reports drift. A tool appearing there gains nothing.
 """
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -80,11 +81,59 @@ class TransportError(RuntimeError):
     `retryable` marks the subset worth one more attempt: DNS/connect/reset/timeout, i.e. the network
     did not carry the request. An HTTP 4xx is NOT retryable — the server answered, and asking again
     changes nothing except how much we hammer it.
+
+    `kind` is the diagnosable category (`connection_refused`, `dns_failure`, `timeout`, `http_502`).
+    The intranet spent a whole cycle establishing that LogDream's 8092 was REFUSED rather than
+    timing out — refused means a listener problem, timeout means a network path problem, and they
+    go to different owners. Naming the category means the next person does not have to re-derive it.
+
+    The message never contains the endpoint URL. Addresses are deliberately kept out of git, but the
+    exception text is what lands in `not_investigated`, which is persisted to chat_sessions.json and
+    rendered in the browser — so the address has to stay out of the message too, not just out of the
+    repo. The SERVER NAME is already shown everywhere (the step badges say `logdream · log.read`),
+    and it is what an operator needs.
     """
 
-    def __init__(self, message, retryable=False):
+    def __init__(self, message, retryable=False, kind=""):
         super().__init__(message)
         self.retryable = retryable
+        self.kind = kind
+
+
+# Failure categories worth telling apart, longest-match first so `connection refused` is not
+# swallowed by a generic `refused`.
+_REASON_KINDS = (
+    ("connection refused", "connection_refused"),
+    ("actively refused", "connection_refused"),        # Windows wording
+    ("name or service not known", "dns_failure"),
+    ("getaddrinfo", "dns_failure"),
+    ("nodename nor servname", "dns_failure"),
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("connection reset", "connection_reset"),
+    ("certificate", "tls_failure"),
+    ("ssl", "tls_failure"),
+)
+
+
+def _reason_kind(reason):
+    """A socket error -> a short diagnosable category, never the address it failed to reach."""
+    text = str(reason or "").lower()
+    for marker, kind in _REASON_KINDS:
+        if marker in text:
+            return kind
+    return "unreachable"
+
+
+def _safe_detail(text):
+    """An upstream error body, bounded and stripped of anything URL-shaped.
+
+    Their error bodies are theirs: a proxy page, a stack trace, or an echo of the request can all
+    carry the endpoint. Bounded and de-URL'd before it can reach the packet.
+    """
+    cleaned = re.sub(r"https?://\S+", "<endpoint>", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:200]
 
 
 def _require_enabled():
@@ -123,7 +172,7 @@ def _read_capped(resp):
     return body, False
 
 
-def _post(url, payload, headers, timeout):
+def _post(url, payload, headers, timeout, server="mcp"):
     request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
     request.add_header("Content-Type", "application/json")
     for name, value in headers.items():
@@ -135,12 +184,14 @@ def _post(url, payload, headers, timeout):
         detail = exc.read().decode("utf-8", "replace")[:500]
         # 5xx is the server failing to serve a request it DID receive — worth one more try.
         # 4xx is an answer: wrong tool, no auth, bad argument. Retrying only hammers them.
-        raise TransportError(f"MCP HTTP {exc.code} from {url}: {detail}",
-                             retryable=exc.code >= 500)
+        raise TransportError(f"{server} MCP returned HTTP {exc.code}: {_safe_detail(detail)}",
+                             retryable=exc.code >= 500, kind=f"http_{exc.code}")
     except urllib.error.URLError as exc:
-        raise TransportError(f"MCP unreachable at {url}: {exc.reason}", retryable=True)
+        raise TransportError(f"{server} MCP unreachable: {_reason_kind(exc.reason)}",
+                             retryable=True, kind=_reason_kind(exc.reason))
     except (TimeoutError, OSError) as exc:
-        raise TransportError(f"MCP transport failure at {url}: {exc}", retryable=True)
+        raise TransportError(f"{server} MCP transport failure: {_reason_kind(exc)}",
+                             retryable=True, kind=_reason_kind(exc))
 
 
 def _iter_sse(stream):
@@ -189,9 +240,10 @@ class _StreamableHttp:
 
     transport = "streamable_http"
 
-    def __init__(self, url, timeout):
+    def __init__(self, url, timeout, server=""):
         self.url = url
         self.timeout = timeout
+        self.server = server or "mcp"
         self.session_id = ""
         self.protocol = config.MCP_PROTOCOL_STREAMABLE
         self.truncated = False
@@ -209,7 +261,7 @@ class _StreamableHttp:
         payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}
         if expect_reply:
             payload["id"] = message_id
-        resp = _post(self.url, payload, self._headers(), self.timeout)
+        resp = _post(self.url, payload, self._headers(), self.timeout, self.server)
         try:
             # The session id arrives on the initialize response and must be echoed from then on.
             found = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
@@ -281,9 +333,10 @@ class _LegacySse:
 
     transport = "sse"
 
-    def __init__(self, url, timeout):
+    def __init__(self, url, timeout, server=""):
         self.url = url
         self.timeout = timeout
+        self.server = server or "mcp"
         self.protocol = config.MCP_PROTOCOL_SSE
         self.truncated = False
         self.server_info = {}
@@ -298,13 +351,16 @@ class _LegacySse:
         try:
             self._stream = _urlopen(request, self.timeout)
         except urllib.error.HTTPError as exc:
-            raise TransportError(f"MCP SSE HTTP {exc.code} from {self.url}: "
-                                 f"{exc.read().decode('utf-8', 'replace')[:300]}",
-                                 retryable=exc.code >= 500)
+            raise TransportError(
+                f"{self.server} MCP SSE returned HTTP {exc.code}: "
+                f"{_safe_detail(exc.read().decode('utf-8', 'replace')[:300])}",
+                retryable=exc.code >= 500, kind=f"http_{exc.code}")
         except urllib.error.URLError as exc:
-            raise TransportError(f"MCP SSE unreachable at {self.url}: {exc.reason}", retryable=True)
+            raise TransportError(f"{self.server} MCP SSE unreachable: {_reason_kind(exc.reason)}",
+                                 retryable=True, kind=_reason_kind(exc.reason))
         except (TimeoutError, OSError) as exc:
-            raise TransportError(f"MCP SSE transport failure at {self.url}: {exc}", retryable=True)
+            raise TransportError(f"{self.server} MCP SSE transport failure: {_reason_kind(exc)}",
+                                 retryable=True, kind=_reason_kind(exc))
         self._events = _iter_sse(self._stream)
         for event, data in self._events:
             text = data.strip()
@@ -319,7 +375,7 @@ class _LegacySse:
                 break
         if not self._post_url:
             raise TransportError(
-                f"MCP SSE at {self.url} never announced an `endpoint` event, so there is nowhere to "
+                f"{self.server} MCP SSE never announced an `endpoint` event, so there is nowhere to "
                 f"POST requests. Either it is not an MCP SSE server or it closed the stream early.")
         result = self.request("initialize", {
             "protocolVersion": self.protocol,
@@ -374,9 +430,9 @@ def _session(server, timeout=None):
     url, transport = _endpoint(server)
     timeout = timeout or config.MCP_TIMEOUT
     if transport == "streamable_http":
-        return _StreamableHttp(url, timeout)
+        return _StreamableHttp(url, timeout, server)
     if transport == "sse":
-        return _LegacySse(url, timeout)
+        return _LegacySse(url, timeout, server)
     raise Disabled(
         f"MCP server {server!r} has transport {transport!r}; this client speaks "
         f"'streamable_http' and 'sse'. The intranet sets this in mcp_tools.json from what the "
@@ -440,7 +496,8 @@ def call(operation, args=None, timeout=None):
             if not getattr(exc, "retryable", False) or attempts >= max(1, config.MCP_RETRY_ATTEMPTS):
                 raise TransportError(
                     f"{exc} [after {attempts} attempt(s)]",
-                    retryable=getattr(exc, "retryable", False)) from None
+                    retryable=getattr(exc, "retryable", False),
+                    kind=getattr(exc, "kind", "")) from None
             time.sleep(config.MCP_RETRY_DELAY)
     text, blocks, other_kinds = _flatten_content(result)
     is_error = bool(result.get("isError"))

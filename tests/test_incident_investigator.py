@@ -1500,9 +1500,14 @@ class CloudWatchBranchTests(InvestigateTests):
 
     # ---- the chain ----------------------------------------------------------------------------
     def test_the_chain_runs_get_alarm_then_metric_window(self):
+        """Measure first, context second. `alarm_history`/`recent_changes` were added after this
+        test was written and must come STRICTLY after the metric read — they are context ABOUT the
+        alarm, and a failure in either must never be able to touch the measurement above them."""
         self._packet()
         order = [op for op, _ in self.calls if op.startswith("aws.")]
-        self.assertEqual(order, ["aws.get_alarm", "aws.metric_window"])
+        self.assertEqual(order[:2], ["aws.get_alarm", "aws.metric_window"])
+        self.assertEqual(order, ["aws.get_alarm", "aws.metric_window",
+                                 "aws.alarm_history", "aws.recent_changes"])
 
     def test_get_alarm_is_called_with_the_abstract_arg_name(self):
         """The registry maps it to `alarmName`; nothing in this module names a real parameter."""

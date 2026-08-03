@@ -20,14 +20,15 @@
     "ingress           : the entry service (mc-hk-hase-ingress-api has been verified on the box",
     "                    before, so it is pre-filled — correct it if that is wrong)",
     "known_use_case    : a use-case id that EXISTS in the active snapshot",
-    "unknown_use_case  : a use-case-shaped id that is NOT in the snapshot (leave as is unless it",
-    "                    happens to be real, in which case pick another)",
+    "unknown_use_case  : a use-case-shaped id CONFIRMED ABSENT from every active snapshot table.",
+    "                    RUNBOOK-66: the first shipped default (K9999) turned out to be REAL, which",
+    "                    is why this now ships blank — verify absence, do not assume it.",
     "vendor_repo       : a repo whose name contains a vendor token, for the do-not-infer-vendor case"
   ],
   "sms_delivery": "",
   "push_delivery": "",
   "ingress": "mc-hk-hase-ingress-api",
   "known_use_case": "",
-  "unknown_use_case": "K9999",
+  "unknown_use_case": "",
   "vendor_repo": ""
 }

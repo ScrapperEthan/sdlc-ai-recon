@@ -212,6 +212,62 @@ def valid_alarm_name(value):
     return value
 
 
+MAX_TRACKING_ID = 128
+MIN_TRACKING_ID = 6
+# LABELLED lines only. A "long token" regex would happily read a phone number, a message reference
+# or a payload UUID as a tracking id, and Portal would then be queried for the wrong customer's
+# record — the same class of mistake as guessing an alarm name, with PII attached.
+_TRACKING_LINE = re.compile(
+    r"(?im)^\s*\"?(?:trackId|trackingId|tracking_id|mdc_tracking_id)\"?"
+    r"\s*[:=]\s*\"?([A-Za-z0-9._:-]{%d,%d})\"?\s*,?\s*$" % (MIN_TRACKING_ID, MAX_TRACKING_ID))
+_TRACKING_KEYS = ("trackid", "trackingid", "tracking_id", "mdc_tracking_id")
+
+
+def valid_tracking_id(value):
+    """A candidate Portal tracking id, cleaned — or `""` if it cannot be one.
+
+    The character set and length are a SAFETY bound, not a business format assertion: nobody outside
+    the intranet has seen a real one. If a genuine id falls outside this, the intranet reports the
+    real shape from an authorised sample — the external side must not widen this to `.+` on a hunch.
+    """
+    value = (value or "").strip()
+    for quote in ('"', "'"):
+        if len(value) >= 2 and value.startswith(quote) and value.endswith(quote):
+            value = value[1:-1].strip()
+    if not (MIN_TRACKING_ID <= len(value) <= MAX_TRACKING_ID):
+        return ""
+    if any(char in value for char in "\r\n \t"):
+        return ""
+    return value if _TRACKING_CHARS.fullmatch(value) else ""
+
+
+_TRACKING_CHARS = re.compile(r"[A-Za-z0-9._:-]+")
+
+
+def extract_tracking_id(text):
+    """A raw alert -> its Portal tracking id, or `""` when it is not UNIQUELY determined.
+
+    Same discipline as `extract_alarm_name`: strict, local, and silent rather than speculative. Two
+    different ids in one text is a question for the user, not a coin flip.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        body = None
+    if isinstance(body, dict):
+        found = {valid_tracking_id(value) for key, value in body.items()
+                 if key.lower() in _TRACKING_KEYS and isinstance(value, str)}
+        found.discard("")
+        return found.pop() if len(found) == 1 else ""
+    if body is not None:
+        return ""
+    found = {name for name in (valid_tracking_id(m) for m in _TRACKING_LINE.findall(text)) if name}
+    return found.pop() if len(found) == 1 else ""
+
+
 def extract_alarm_name(text):
     """A raw alert -> its CloudWatch alarm name, or `""` when it is not UNIQUELY determined.
 

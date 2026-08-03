@@ -340,6 +340,32 @@ _METRIC_MINUTES_AFTER = int(os.environ.get("SDLC_INCIDENT_METRIC_MINUTES_AFTER",
 _METRIC_MAX_MINUTES = int(os.environ.get("SDLC_INCIDENT_METRIC_MAX_MINUTES", "180"))
 _METRIC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _MAX_DIMENSIONS = 10
+# How many history / change rows are read. Context, not a timeline — a bigger number would only add
+# material we deliberately throw away.
+_MAX_CONTEXT_ITEMS = int(os.environ.get("SDLC_INCIDENT_MAX_CONTEXT_ITEMS", "25"))
+# The ONLY dimension names that identify a resource well enough to scope a change lookup. Anything
+# else (and emphatically the alarm name or a repo id) is not a resource — see the intranet handoff
+# §3.4: a guessed resource returns another service's change history under this incident's heading.
+_RESOURCE_DIMENSIONS = ("ServiceName", "DBClusterIdentifier", "DBInstanceIdentifier", "QueueName",
+                        "FunctionName", "LoadBalancer", "TargetGroup", "ClusterName",
+                        "Cluster Name", "TableName", "StreamName")
+
+
+def _explicit_resource(identity):
+    """A resource name taken VERBATIM from an explicit alarm dimension, or "" — never assembled."""
+    dimensions = (identity or {}).get("dimensions") or []
+    if not isinstance(dimensions, list):
+        return ""
+    # `alarm_metric_identity` keeps dimensions as [{"Name": ..., "Value": ...}] in the alarm's own
+    # order. Preference follows _RESOURCE_DIMENSIONS, not that order, so the same alarm always
+    # scopes to the same resource.
+    by_name = {str(item.get("Name") or ""): str(item.get("Value") or "")
+               for item in dimensions if isinstance(item, dict)}
+    for name in _RESOURCE_DIMENSIONS:
+        value = by_name.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 # Zones with no DST, where a fixed offset is exact rather than an approximation. Hong Kong has not
 # observed DST since 1979, which covers every incident anyone will investigate here. This exists
@@ -822,7 +848,7 @@ def _format_alert_time(normalized, operation="log.read"):
 
 
 def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None,
-         alarm_name=None, target_repos=None):
+         alarm_name=None, target_repos=None, tracking_id=None, portal_channel="auto"):
     """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
 
     `keywords` and `sources` are the drill-down path: a follow-up question ("search for
@@ -857,6 +883,13 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         # unidentifiable repo must not block a metric lookup that only needs the alarm name.
         "cloudwatch": {"runnable": False, "alarm_name": "", "alarm_name_source": "",
                        "refusals": []},
+        # The Portal half. `MDC Alert - General SHP API Error` is one of the largest alert families
+        # here and it is NEITHER a CloudWatch alarm NOR resolvable to a LogDream app — its only
+        # investigation path is a tracking id against Portal's delivery record. Kept as a THIRD
+        # independent branch on purpose: it needs no repo and no time window, so the log branch's
+        # window gate must not be able to block it.
+        "portal": {"runnable": False, "tracking_id": "", "tracking_id_source": "",
+                   "channel": "auto", "refusals": []},
     }
     if out["sources"] != list(log_sources()):
         # Built from the configured source names, never a literal: the last time these were spelled
@@ -1049,6 +1082,41 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
             "the alarm name is known but no time window could be built, so no metric was queried. "
             "A metric window is never built from `now()` — it is built around the alert.")
 
+    # ---- the Portal half: a tracking id, and nothing else -------------------------------------
+    # Priority is the same shape as the alarm name: what the caller said, then what the alert text
+    # uniquely contains, then nothing. Never a guess — a wrong tracking id returns ANOTHER
+    # customer's delivery record, which is worse than returning none.
+    portal = out["portal"]
+    channel = (portal_channel or "auto").strip().lower()
+    if channel not in ("sms", "email", "auto"):
+        portal["refusals"].append(
+            f"portal_channel {channel!r} is not one of sms/email/auto, so the Portal branch was "
+            f"skipped rather than defaulting to something you did not ask for.")
+        channel = ""
+    portal["channel"] = channel or "auto"
+
+    supplied_tracking = incident.valid_tracking_id(tracking_id) if tracking_id else ""
+    if tracking_id and not supplied_tracking:
+        portal["refusals"].append(
+            "the supplied tracking_id is not usable (empty, multi-line, out of length bounds, or "
+            "contains characters a tracking id cannot have), so no Portal call was made.")
+    if supplied_tracking:
+        portal["tracking_id"] = supplied_tracking
+        portal["tracking_id_source"] = "supplied by the caller"
+    else:
+        extracted = incident.extract_tracking_id(alert_text)
+        if extracted:
+            portal["tracking_id"] = extracted
+            portal["tracking_id_source"] = (
+                "extracted from a labelled line in the alert text (trackId/trackingId/tracking_id)")
+        elif not tracking_id:
+            portal["refusals"].append(
+                "no single labelled tracking id could be read from this alert, so the Portal "
+                "delivery-record branch was skipped. Pass `tracking_id` if you have one. It is NOT "
+                "guessed from phone numbers, message references or payload UUIDs — a wrong id "
+                "returns a different customer's record.")
+    portal["runnable"] = bool(portal["tracking_id"] and channel)
+
     # Runnable, not merely "we understood the alert". Identifying the service is necessary and not
     # sufficient: this tool's real parameter is an ALERT TIME it backtracks from, so without a
     # window there is no honest query to send. The plan used to stay ok=True here and the
@@ -1056,9 +1124,11 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
     # calls were made anyway, which is the worst of both: production reads, and an answer nobody
     # can scope.
     out["ok"] = bool(out["targets"] or parsed["use_cases"]) and bool(out["window"])
-    # Either branch alone is enough to be worth running. A CloudWatch failure must not break a log
-    # investigation that works, and the reverse holds too.
-    out["any_runnable"] = bool(out["ok"] or cw["runnable"])
+    # ANY branch alone is enough to be worth running. A CloudWatch failure must not break a log
+    # investigation that works, the reverse holds too, and Portal must run on a tracking id ALONE —
+    # no repo, no alarm, no time window. That last case is the whole point of the branch: the alert
+    # family it serves carries none of the other three.
+    out["any_runnable"] = bool(out["ok"] or cw["runnable"] or portal["runnable"])
     return out
 
 
@@ -1311,6 +1381,187 @@ def investigate(alert_text, **kwargs):
     return packet
 
 
+# Portal's forward record is a DELIVERY record, so a hit is the most PII-dense thing this whole
+# module can touch: recipient, payload, template, message body. None of it is needed to answer "did
+# this message get delivered and if not, what kind of failure" — so the packet carries CATEGORIES
+# only and the raw JSON never leaves this function.
+_PORTAL_STATUSES = ("delivered", "failed", "pending", "unknown")
+_PORTAL_FAILURE_KINDS = ("policy", "provider", "template", "routing", "unknown")
+# Field names we are willing to READ out of their response. Anything not here is not looked at, so a
+# response that grows a `recipient` or `messageBody` field cannot leak by accident.
+_PORTAL_STATUS_KEYS = ("status", "deliverystatus", "delivery_status", "state", "result")
+_PORTAL_REASON_KEYS = ("failurereason", "failure_reason", "reason", "errorcategory",
+                       "error_category", "rejectedreason", "rejected_reason")
+
+
+def _portal_status(value):
+    """Their status text -> one of `_PORTAL_STATUSES`. Unknown maps to `unknown`, never to a guess."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    for status in ("delivered", "failed", "pending"):
+        if status in text:
+            return status
+    if text in ("success", "ok", "sent", "complete", "completed"):
+        return "delivered"
+    if text in ("reject", "rejected", "error", "bounce", "bounced"):
+        return "failed"
+    return "unknown"
+
+
+def _portal_failure_kind(value):
+    """Their reason text -> a coarse category. Deliberately lossy: a reason string can carry a
+    template name or a customer identifier, and the category is what an incident answer needs."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    for kind, markers in (("policy", ("consent", "optout", "opt-out", "blacklist", "policy",
+                                      "suppress")),
+                          ("provider", ("vendor", "provider", "gateway", "carrier", "smsc",
+                                        "mmsc", "upstream", "timeout", "connection")),
+                          ("template", ("template", "content", "render", "payload", "format")),
+                          ("routing", ("route", "routing", "router", "topic", "channel"))):
+        if any(marker in text for marker in markers):
+            return kind
+    return "unknown"
+
+
+def _portal_evidence(body, channel, operation, tracking_ref):
+    """Their record -> a category-only evidence item, or None when the shape is not recognised.
+
+    Fails CLOSED. A forward record has only ever been exercised against a synthetic id that returns
+    not-found (their §2.6), so an unrecognised shape is a wiring problem to fix in
+    `config/mcp_tools.json` — it is emphatically NOT an empty record, and must never be reported as
+    "nothing was delivered".
+    """
+    rows = body if isinstance(body, list) else [body]
+    row = next((item for item in rows if isinstance(item, dict)), None)
+    if row is None:
+        return None
+    lowered = {str(key).lower(): value for key, value in row.items()}
+    status_value = next((lowered[key] for key in _PORTAL_STATUS_KEYS if key in lowered), None)
+    if status_value is None:
+        return None                        # shape not recognised -> caller reports a parser failure
+    reason_value = next((lowered[key] for key in _PORTAL_REASON_KEYS if key in lowered), "")
+    status = _portal_status(status_value)
+    return {
+        "kind": "portal_delivery",
+        "environment": "production",
+        "source": "portal",
+        "channel": channel,
+        "operation": operation,
+        "record_found": True,
+        "delivery_status": status,
+        "failure_category": _portal_failure_kind(reason_value) if status == "failed" else "unknown",
+        # Presence only — a timestamp is a fact about the record, its VALUE is not needed here.
+        "timestamps_present": any("time" in key or "date" in key for key in lowered),
+        "tracking_ref": tracking_ref,
+        "note": ("category-only evidence; the raw Portal record was read in memory and not "
+                 "persisted. Recipient, payload and message content are never extracted."),
+    }
+
+
+def _portal_branch(query_plan, packet, counts):
+    """The delivery-record half: a tracking id -> Portal's SMS/Email record -> a category.
+
+    A generator, like `_cloudwatch_branch`. It NEVER raises and never returns early out of the whole
+    investigation — Portal failing has to leave the log and metric branches alone.
+    """
+    portal = query_plan.get("portal") or {}
+    ledger = packet["portal_queries"]
+    tracking_id = portal.get("tracking_id") or ""
+    # The real id goes ONLY into the outbound request. Everything that can be shown, streamed or
+    # stored gets the fingerprint — same rule as the alarm name (RUNBOOK-64) and the PII gate.
+    tracking_ref = f"<tracking:{_digest(tracking_id)}>" if tracking_id else ""
+
+    def _record(bucket, operation, args_sent, **extra):
+        ledger[bucket].append({"server": "portal", "operation": operation,
+                               "args_sent": sorted(args_sent), **extra})
+
+    if portal.get("refusals"):
+        packet["not_investigated"].extend(portal["refusals"])
+    if not portal.get("runnable"):
+        if portal.get("refusals"):
+            yield _step("portal_skipped", "Portal 投递记录分支跳过（没有唯一的 tracking id），不猜",
+                        resolved=False)
+        return
+
+    channel = portal.get("channel") or "auto"
+    operations = {"sms": ["portal.sms_by_tracking_id"],
+                  "email": ["portal.email_by_tracking_id"],
+                  "auto": ["portal.sms_by_tracking_id", "portal.email_by_tracking_id"]}[channel]
+
+    yield _step("portal_resolve", "Portal 分支：按 tracking id 查投递记录（%s）" % channel,
+                source=portal.get("tracking_id_source"), tracking_ref=tracking_ref)
+
+    for operation in operations:
+        # Each operation is independent: SMS failing must not cost the Email lookup and vice versa.
+        yield _step("portal_query", "查 %s" % operation, server="portal", operation=operation)
+        _record("attempted", operation, ["tracking_id"])
+        try:
+            out = mcp_client.call(operation, {"tracking_id": tracking_id})
+        except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+            _record("failed", operation, ["tracking_id"], refused_locally=True)
+            packet["not_investigated"].append(f"{operation} is not callable: {exc}.")
+            yield _step("unwired", f"{operation} 未接线，未发出请求", server="portal",
+                        operation=operation, refused_locally=True)
+            continue
+        except mcp_client.TransportError as exc:
+            _record("failed", operation, ["tracking_id"], error=str(exc)[:200])
+            packet["not_investigated"].append(
+                f"{operation} did not respond ({str(exc)[:160]}). Portal was NOT read for this "
+                f"channel — that is not the same as no delivery record.")
+            yield _step("query_failed", f"{operation} 没有响应", server="portal",
+                        operation=operation)
+            continue
+
+        _record("executed", operation, ["tracking_id"], elapsed_ms=out.get("elapsed_ms"),
+                **_transport_meta(out))
+        outcome, detail = _tool_outcome(out)
+        if outcome == "error":
+            packet["not_investigated"].append(
+                f"{operation} REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. That is the "
+                f"tool refusing, not a delivery record — never read it as 'not delivered'.")
+            yield _step("query_rejected", f"{operation} 被拒绝", server="portal",
+                        operation=operation)
+            continue
+
+        body = _decode(out.get("text"), out.get("structured"))
+        if outcome == "empty" or body in (None, [], {}):
+            # A genuine not-found. It IS a result — and it is NOT proof the message was delivered,
+            # nor proof there was no business impact.
+            packet["evidence"].append({
+                "kind": "portal_delivery", "environment": "production", "source": "portal",
+                "channel": channel, "operation": operation, "record_found": False,
+                "delivery_status": "unknown", "failure_category": "unknown",
+                "tracking_ref": tracking_ref,
+                "note": ("Portal has NO delivery record for this tracking id on this channel. That "
+                         "is a query result, not evidence of successful delivery and not evidence "
+                         "of no business impact — the id may belong to the other channel, to a "
+                         "different environment, or be outside retention."),
+            })
+            yield _step("portal_empty", f"{operation}：无该 tracking id 的投递记录",
+                        server="portal", operation=operation)
+            continue
+
+        item = _portal_evidence(body, channel, operation, tracking_ref)
+        if item is None:
+            shape = describe_shape(body)
+            packet["not_investigated"].append(
+                f"{operation} SUCCEEDED but our parser could not read the response shape "
+                f"({shape}). This is OUR wiring gap — a `response` mapping in "
+                f"config/mcp_tools.json — NOT an empty record. Do not report it as 'no delivery'.")
+            yield _step("query_unreadable", f"{operation} 返回体读不懂（我方映射缺口）",
+                        server="portal", operation=operation, shape_error=True)
+            continue
+
+        packet["evidence"].append(item)
+        packet["contains_production_data"] = True
+        yield _step("portal_evidence",
+                    "命中投递记录：%s / %s" % (item["delivery_status"], item["failure_category"]),
+                    server="portal", operation=operation)
+
+
 def _cloudwatch_branch(query_plan, packet, counts):
     """The metric half: alarm -> its own metric identity -> a bounded UTC window -> categories.
 
@@ -1483,10 +1734,154 @@ def _cloudwatch_branch(query_plan, packet, counts):
         points_seen=item["points_seen"], summary=item["summary"],
         elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
 
+    # ---- 3. context around the alarm, strictly AFTER the measurement ---------------------------
+    # Alarm history and recent infrastructure changes answer "did this just start, and did anything
+    # change just before it" — the two questions an operator asks next. Deliberately last and
+    # deliberately in their own ledger: a failure here must leave the metric evidence above
+    # untouched, and neither is ever allowed to become a stated root cause.
+    for event in _cloudwatch_context(cw, identity, window, packet, counts):
+        yield event
+
+
+def _relative_to_alarm(stamp_text, window):
+    """`before_alarm` / `after_alarm` / `outside_window` / `unknown` — a CATEGORY, never a time."""
+    start, end = (window or {}).get("start_utc") or "", (window or {}).get("end_utc") or ""
+    text = str(stamp_text or "").strip()
+    if not text or not start or not end:
+        return "unknown"
+    # String comparison is valid here: every stamp on this path is the same normalised UTC format.
+    marker = text[:len(start)]
+    if marker < start or marker > end:
+        return "outside_window"
+    alert = (window or {}).get("alert_utc") or ""
+    if not alert:
+        return "unknown"
+    return "before_alarm" if marker <= alert[:len(marker)] else "after_alarm"
+
+
+def _cloudwatch_context(cw, identity, window, packet, counts):
+    """`aws.alarm_history` + `aws.recent_changes`. Categories only; never a root cause."""
+    ledger = packet["cloudwatch_history"]
+
+    def _record(bucket, operation, args_sent, **extra):
+        ledger[bucket].append({"server": "cloudwatch", "operation": operation,
+                               "args_sent": sorted(args_sent), **extra})
+
+    def _run(operation, wanted, label):
+        """Attempt one context call. Returns the decoded body or None; records every outcome."""
+        payload = _payload(operation, wanted)
+        _record("attempted", operation, payload)
+        yield _step("cw_context", label, server="cloudwatch", operation=operation)
+        try:
+            out = mcp_client.call(operation, payload)
+        except (mcp_registry.NotWired, mcp_registry.NotAllowed) as exc:
+            _record("failed", operation, payload, refused_locally=True)
+            packet["not_investigated"].append(f"{operation} is not callable: {exc}.")
+            yield _step("unwired", f"{operation} 未接线，未发出请求", server="cloudwatch",
+                        operation=operation, refused_locally=True)
+            return
+        except mcp_client.TransportError as exc:
+            _record("failed", operation, payload, error=str(exc)[:200])
+            packet["not_investigated"].append(
+                f"{operation} did not respond ({str(exc)[:160]}). This is CONTEXT that is missing, "
+                f"not a finding — the metric result above is unaffected.")
+            yield _step("query_failed", f"{operation} 没有响应", server="cloudwatch",
+                        operation=operation)
+            return
+        _record("executed", operation, payload, elapsed_ms=out.get("elapsed_ms"),
+                **_transport_meta(out))
+        outcome, detail = _tool_outcome(out)
+        if outcome == "error":
+            packet["not_investigated"].append(
+                f"{operation} REPORTED AN ERROR: {redact(str(detail)[:200], counts)}. Their tool "
+                f"refusing is not an absence of history or changes.")
+            yield _step("query_rejected", f"{operation} 被拒绝", server="cloudwatch",
+                        operation=operation)
+            return
+        yield ("body", _decode(out.get("text"), out.get("structured")), out)
+
+    # --- alarm history: has this alarm been flapping, or did it just start? ---------------------
+    body = None
+    for event in _run("aws.alarm_history",
+                      {"alarm_name": cw.get("alarm_name"),
+                       "from_time": (window or {}).get("start_utc"),
+                       "to_time": (window or {}).get("end_utc"),
+                       "history_item_type": "StateUpdate",
+                       "max_results": _MAX_CONTEXT_ITEMS},
+                      "取告警历史：这次是刚开始还是一直在抖"):
+        if isinstance(event, tuple) and event[0] == "body":
+            body = event[1]
+        else:
+            yield event
+    if body not in (None, [], {}):
+        rows = body if isinstance(body, list) else _rows(body, ("items", "history", "entries")) or []
+        rows = [row for row in rows if isinstance(row, dict)][:_MAX_CONTEXT_ITEMS]
+        stamps = [next((str(v) for k, v in row.items() if "time" in str(k).lower()), "")
+                  for row in rows]
+        transitions = sum(1 for row in rows
+                          if "state" in " ".join(str(k).lower() for k in row))
+        packet["evidence"].append({
+            "kind": "cloudwatch_alarm_history", "environment": "production", "source": "cloudwatch",
+            "history_items_seen": len(rows),
+            "state_transition_count": transitions,
+            "first_event_relation": _relative_to_alarm(stamps[0] if stamps else "", window),
+            "last_event_relation": _relative_to_alarm(stamps[-1] if stamps else "", window),
+            "note": ("counts and relative position only; no history text, ARN, action target or "
+                     "raw timeline is kept. Flapping is a shape, not a cause."),
+        })
+        yield _step("cw_history", "告警历史：%d 条，%d 次状态变化" % (len(rows), transitions),
+                    server="cloudwatch", operation="aws.alarm_history")
+
+    # --- recent changes: did anything change just before this fired? ---------------------------
+    # `resource` is attached ONLY when get_alarm's own Dimensions carried an explicit resource
+    # dimension. Never assembled from the alarm name or a repo id — a wrong resource silently
+    # returns another service's change history under this incident's heading.
+    wanted = {"alarm_name": cw.get("alarm_name"),
+              "from_time": (window or {}).get("start_utc"),
+              "to_time": (window or {}).get("end_utc"),
+              "max_results": _MAX_CONTEXT_ITEMS}
+    resource = _explicit_resource(identity)
+    if resource:
+        wanted["resource"] = resource
+    body = None
+    for event in _run("aws.recent_changes", wanted,
+                      "查告警前后的变更（部署/配置）" + ("" if resource else "：无明确资源维度，只按告警名")):
+        if isinstance(event, tuple) and event[0] == "body":
+            body = event[1]
+        else:
+            yield event
+    if body not in (None, [], {}):
+        rows = body if isinstance(body, list) else _rows(body, ("items", "events", "changes")) or []
+        rows = [row for row in rows if isinstance(row, dict)][:_MAX_CONTEXT_ITEMS]
+        kinds = sorted({str(next((v for k, v in row.items()
+                                  if str(k).lower() in ("eventname", "event_name", "kind", "type")),
+                                 "unknown"))[:60] for row in rows})
+        stamps = [next((str(v) for k, v in row.items() if "time" in str(k).lower()), "")
+                  for row in rows]
+        relations = [_relative_to_alarm(stamp, window) for stamp in stamps]
+        packet["evidence"].append({
+            "kind": "cloudwatch_recent_changes", "environment": "production", "source": "cloudwatch",
+            "change_seen": bool(rows),
+            "change_count": len(rows),
+            "change_kinds": kinds[:_MAX_CONTEXT_ITEMS],
+            "resource_scoped": bool(resource),
+            "nearest_change_relation": ("before_alarm" if "before_alarm" in relations
+                                        else (relations[0] if relations else "unknown")),
+            "note": ("A change before an alarm is a CO-OCCURRENCE, not a cause. Say a change was "
+                     "seen in the window; do not write it up as the reason."
+                     + ("" if resource else " No explicit resource dimension was available, so this "
+                                            "is scoped by alarm name only and may be broader than "
+                                            "this service.")),
+        })
+        yield _step("cw_changes", "变更记录：%d 条（%s）" % (
+            len(rows), "按资源" if resource else "仅按告警名"),
+            server="cloudwatch", operation="aws.recent_changes")
+
 
 def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
                         sources=None, max_queries=None, owner="", alert_time=None,
-                        alarm_name=None, target_repos=None):
+                        alarm_name=None, target_repos=None, tracking_id=None,
+                        portal_channel="auto"):
     """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
 
     A generator rather than a callback so the caller can relay progress to a browser without threads
@@ -1502,7 +1897,8 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
     query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
                                     keywords=keywords, sources=sources, alert_time=alert_time,
-                                    alarm_name=alarm_name, target_repos=target_repos)
+                                    alarm_name=alarm_name, target_repos=target_repos,
+                                    tracking_id=tracking_id, portal_channel=portal_channel)
     if query_plan.get("targets") or query_plan.get("keywords"):
         yield _step(
             "plan_done",
@@ -1529,6 +1925,11 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         # app/source/file/keyword tuple is meaningless for a metric, and a fake one would make the
         # two branches impossible to tell apart when reading what was actually spent.
         "cloudwatch_queries": {"attempted": [], "executed": [], "failed": []},
+        # Alarm history / recent changes are accounted apart from the metric read: they are context
+        # about the alarm, not a measurement, and one failing must not make the metric look failed.
+        "cloudwatch_history": {"attempted": [], "executed": [], "failed": []},
+        # The Portal delivery-record branch, same three-way accounting for the same reason.
+        "portal_queries": {"attempted": [], "executed": [], "failed": []},
         "not_investigated": [],
         "contains_production_data": False,
         "environments": {
@@ -1543,8 +1944,9 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     if not query_plan.get("any_runnable", query_plan.get("ok")):
         # Neither branch is runnable. Zero MCP calls from here — the refusals ARE the answer, and
         # every one of them is a question for the user rather than something to work around.
-        packet["not_investigated"] = list(query_plan.get("refusals") or []) + list(
-            (query_plan.get("cloudwatch") or {}).get("refusals") or [])
+        packet["not_investigated"] = (list(query_plan.get("refusals") or [])
+                                      + list((query_plan.get("cloudwatch") or {}).get("refusals") or [])
+                                      + list((query_plan.get("portal") or {}).get("refusals") or []))
         packet["caveats"].append("nothing was queried; see not_investigated")
         yield _step("refused",
                     "拒绝调查：时间窗建不出来（缺日期或时区），一条日志都没查"
@@ -1564,8 +1966,13 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
         yield {"type": "result", "packet": _finish(packet, counts)}
         return
 
-    # ---- CloudWatch first: it is 2 calls, it needs no app-name mapping, and it must not be
-    # skipped when the log branch stops early on an unwired read or an unresolvable app name.
+    # ---- Portal first, then CloudWatch, then LogDream. THREE independent branches, in ascending
+    # order of how much they need to know: Portal needs only a tracking id, CloudWatch needs an
+    # alarm name and a window, LogDream needs a resolved app name on top of that. Running the
+    # cheapest-to-qualify first means an alert that carries only a tracking id — the largest family
+    # here — still gets an answer instead of a refusal. None of the three may block another.
+    for event in _portal_branch(query_plan, packet, counts):
+        yield event
     for event in _cloudwatch_branch(query_plan, packet, counts):
         yield event
     # Everything the metric branch could not do is already recorded. The log branch's own "we ran

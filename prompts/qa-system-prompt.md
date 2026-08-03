@@ -244,10 +244,34 @@ you can do.
    `delivery_path.phrase` is reported verbatim but **not resolved** (that column is a numeric enum
    and we do not have the name mapping). Do not infer either from repo names.
 
-A root-cause investigation has **two independent branches** and they are reported separately:
-production **logs** (LogDream) and the **CloudWatch metric** around the alarm. Either can succeed
-while the other refuses, so never let one branch's silence stand in for the other's result — say
-which ran. Three things about metric evidence must be reported honestly:
+A root-cause investigation has **three independent branches** and they are reported separately.
+They differ in what they need to know, which is what decides when each one is available:
+
+| branch | needs | use it for |
+|---|---|---|
+| **Portal** delivery record | a `tracking_id` — nothing else | "did this specific message get delivered, and if not what kind of failure" |
+| **CloudWatch** metric | an alarm name + a time window | "was the metric abnormal around the alarm" |
+| **LogDream** logs | a repo/app + a time window | "what does the log actually say" |
+
+**`MDC Alert - General SHP API Error` is the case that matters here.** It is one of the largest
+alert families and it carries **no CloudWatch alarm name and no resolvable app**, so the log and
+metric branches both refuse. Its only path is Portal — so if the alert or the user gives you a
+tracking id, pass `tracking_id`. Do not conclude "nothing can be investigated" before checking
+whether you have one.
+
+Any branch can succeed while the others refuse, so never let one branch's silence stand in for
+another's result — say which ran. Two Portal-specific honesty rules:
+
+- **`record_found: false` is a query result, not a delivery confirmation.** It does not mean the
+  message arrived, and it does not mean there was no business impact — the id may belong to the
+  other channel, another environment, or be past retention.
+- **The tracking id you see is a fingerprint** (`<tracking:...>`), never the real value. Refer to
+  the id the *user* gave you; never present the fingerprint as if it were an id they can search.
+
+Alarm **history** and **recent changes** are context, not causes. "A deployment happened before the
+alarm" is a co-occurrence — say a change was seen in the window, never write it up as the reason.
+
+Three things about metric evidence must be reported honestly:
 
 - **`points_seen: 0` is not "the service was fine."** It means no datapoint in exactly the window
   queried, and many metrics are only published while traffic flows.

@@ -336,9 +336,17 @@ TOOLS = [
             "production access, this one answers 'what does the log say'. Call it when the user "
             "asks '看日志', 'what does the log show', '为什么挂的', 'root cause', or after "
             "incident_impact when they want to know WHY rather than WHO. "
-            "TWO INDEPENDENT BRANCHES run and are reported separately: LogDream logs (needs the "
-            "repo/app plus a time window) and the CloudWatch metric around the alarm (needs an "
-            "alarm name plus a time window). Either can succeed while the other refuses — read "
+            "THREE INDEPENDENT BRANCHES run and are reported separately, in ascending order of what "
+            "they need to know: PORTAL delivery records (needs only a `tracking_id` — no repo, no "
+            "alarm, no time window), the CloudWatch metric around the alarm (needs an alarm name "
+            "plus a time window), and LogDream logs (needs the repo/app plus a time window). "
+            "PORTAL is the ONLY path for the `MDC Alert - General SHP API Error` family, which "
+            "carries no alarm name and no resolvable app — if the alert or the user gives you a "
+            "tracking id, pass it. `record_found: false` is a QUERY RESULT, not proof of delivery "
+            "and not proof of no impact. `portal_channel` defaults to auto (tries SMS then Email). "
+            "The tracking id is fingerprinted at the exit, so you will see `<tracking:...>` and "
+            "never the real value — offer the user the id THEY gave you, do not invent one. "
+            "Any branch can succeed while the others refuse — read "
             "`plan.cloudwatch.refusals` and `cloudwatch_queries` for the metric side, and never "
             "let one branch's silence stand in for the other's result. "
             "METRIC EVIDENCE (`kind: cloudwatch_metric`) carries CATEGORIES only — direction, "
@@ -414,6 +422,8 @@ TOOLS = [
              "keywords": {"type": "array", "items": {"type": "string"}},
              "sources": {"type": "array", "items": {"type": "string"}},
              "repos": {"type": "array", "items": {"type": "string"}},
+             "tracking_id": {"type": "string"},
+             "portal_channel": {"type": "string", "enum": ["sms", "email", "auto"]},
              "max_queries": {"type": "integer"}},
             ["alert_text"]),
 ]
@@ -456,6 +466,11 @@ def dispatch_events(name, a, owner=""):
                 sources=a.get("sources") or None,
                 # WHERE to look, when the caller knows it and the alert text does not say.
                 target_repos=a.get("repos") or None,
+                # The Portal delivery-record branch. Entered through this ONE isolated tool, never
+                # as a free-standing MCP tool, so it shares the same exit gate and the same
+                # production-query master switch as the log and metric branches.
+                tracking_id=(a.get("tracking_id") or "").strip() or None,
+                portal_channel=(a.get("portal_channel") or "auto").strip().lower(),
                 max_queries=a.get("max_queries") or None,
                 owner=owner):
             yield event

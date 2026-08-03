@@ -14,8 +14,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import (agent, config, session_store, llm_routes, llm_credentials, llm, mcp_client,
-                incident_raw_store)
+from . import (agent, config, session_store, session_title, llm_routes, llm_credentials, llm,
+                mcp_client, incident_raw_store)
 from retriever import code as rcode, config as rconfig
 
 HERE = os.path.dirname(__file__)
@@ -288,7 +288,13 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self._send_json(404, {"error": "not found"})
         elif path == "/api/sessions":
-            self._send_json(200, {"sessions": session_store.list_sessions(self._uid)})
+            # `?q=` searches the caller's OWN sessions (titles + message text, substring, no index).
+            # Same route and same response shape as the plain listing, so the sidebar renders either
+            # one; a hit additionally carries `match` (where it matched + the surrounding text).
+            query = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+            sessions = (session_store.search_sessions(self._uid, query) if query.strip()
+                        else session_store.list_sessions(self._uid))
+            self._send_json(200, {"sessions": sessions, "query": query})
         elif path == "/api/index-status":
             status_path = os.path.join(rconfig.INDEX_DIR, "last_indexed.json")
             try:
@@ -650,6 +656,11 @@ class Handler(BaseHTTPRequestHandler):
             otoken = config.set_llm_override(override)
             try:
                 result = agent.answer(question, history)
+                # Inside the override block on purpose: the title is one more model call and must go
+                # to the SAME endpoint the answer did (`finally` below resets the binding). Only on
+                # the first exchange -- an empty history is what makes this session new.
+                new_title = None if history else session_title.summarize(
+                    question, result.get("answer") or "")
             except (llm.LlmAuthError, llm.LlmForbiddenError) as e:
                 # Revoked/expired mid-session (or forbidden) -- disconnect so the credential stops
                 # claiming "Connected" while every real chat would keep silently failing.
@@ -672,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
                 result.get("citations"),
                 result.get("views"),
                 owner=self._uid,
+                subagent_steps=result.get("subagent_steps"),
+                title=new_title,
             )
             result["session"] = {
                 "id": session["id"],
@@ -706,6 +719,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             for event in agent.answer_events(question, history, owner=uid):
                 if event.get("type") == "done":
+                    # First exchange only, and the answer has already streamed out by now, so the
+                    # extra model call delays the terminal event -- not a single visible token.
+                    new_title = None if history else session_title.summarize(
+                        question, event.get("answer") or "")
                     session = session_store.append_exchange(
                         session_id,
                         question,
@@ -715,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
                         event.get("citations"),
                         event.get("views"),
                         owner=uid,
+                        subagent_steps=event.get("subagent_steps"),
+                        title=new_title,
                     )
                     event["session"] = {
                         "id": session["id"],

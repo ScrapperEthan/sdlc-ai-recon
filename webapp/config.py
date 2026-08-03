@@ -146,6 +146,10 @@ TOOL_STRING_CAP = int(os.environ.get("SDLC_TOOL_STRING_CAP", "4000"))
 SESSION_STORE = os.environ.get(
     "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
 )
+# Ask the model for a short session title on the FIRST exchange of a session (webapp/session_title.py).
+# One extra short model call per session, not per turn. Off => the sidebar keeps the truncated
+# question, which is what it showed before this existed.
+SESSION_TITLE_LLM = os.environ.get("SDLC_SESSION_TITLE_LLM", "1") not in ("", "0", "false", "False")
 # Per-user LLM route registry (token -> their loopback endpoint). Gitignored like the session store.
 LLM_ROUTES_STORE = os.environ.get(
     "SDLC_LLM_ROUTES", os.path.join(os.getcwd(), "webapp_data", "llm_routes.json")

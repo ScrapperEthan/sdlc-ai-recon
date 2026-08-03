@@ -9,19 +9,21 @@ from datetime import datetime, timezone
 from . import atomic_json
 from . import config
 from . import llm_usage
+from . import session_title
 
 _LOCK = threading.Lock()
+
+# Upper bound on the investigator progress steps kept with an assistant message. Replay is what the
+# steps are for, not an audit log — an investigation that somehow produced thousands of steps must
+# not be able to grow chat_sessions.json without limit.
+MAX_SUBAGENT_STEPS = 300
+
+# Characters of surrounding message text returned either side of a search hit.
+_SNIPPET_PAD = 60
 
 
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _title_from_question(question, limit=48):
-    compact = " ".join((question or "").split())
-    if not compact:
-        return "New session"
-    return compact if len(compact) <= limit else compact[: limit - 1].rstrip() + "..."
 
 
 def _ensure_parent_dir():
@@ -81,6 +83,14 @@ def _session_detail(session):
             "usage": deepcopy(message.get("usage")) if message.get("usage") else None,
             "citations": deepcopy(message.get("citations")) if message.get("citations") else None,
             "views": deepcopy(message.get("views") or []),
+            # Progress steps of the incident investigator sub-agent. They were live-streamed only, so
+            # reloading the page erased the one part of the answer that shows WHERE the evidence came
+            # from. They are already through the investigator's exit gate (sanitized, fingerprinted),
+            # and `history_for_agent` sends the model role+content only — so replaying them to the
+            # BROWSER never replays anything to the MODEL. Raw log text still lives solely in the
+            # separate owner-scoped side store (webapp/incident_raw_store.py); what is kept here is at
+            # most an opaque ref to it, exactly as the live stream carried.
+            "subagent_steps": deepcopy(message.get("subagent_steps") or []),
             "feedback": deepcopy(message.get("feedback")) if message.get("feedback") else None,
         }
         for message in session.get("messages") or []
@@ -105,6 +115,57 @@ def list_sessions(owner):
             reverse=True,
         )
         return [_session_summary(session) for session in sessions]
+
+
+def _snippet(content, position, needle_length):
+    """A one-line excerpt of `content` around the hit, with ellipses where it was cut."""
+    start = max(0, position - _SNIPPET_PAD)
+    end = min(len(content), position + needle_length + _SNIPPET_PAD)
+    text = " ".join(content[start:end].split())
+    return ("..." if start > 0 else "") + text + ("..." if end < len(content) else "")
+
+
+def search_sessions(owner, query, limit=50):
+    """The caller's own sessions whose title or message text contains `query`.
+
+    Deliberately a plain case-insensitive substring scan over the JSON store — no index, no ranking,
+    no model. That is enough to answer "which session was the 3HK SMSC one", which is the thing the
+    truncated-title sidebar could not do, and it stays honest about what it matched: each hit reports
+    where the match was (title / user turn / assistant turn) and the surrounding text.
+    """
+    needle = " ".join((query or "").split()).lower()
+    if not needle:
+        return []
+
+    with _LOCK:
+        data = _load_unlocked()
+
+    hits = []
+    for session in data.get("sessions") or []:
+        if not _owned(session, owner):
+            continue
+        matched_in = []
+        snippet = ""
+        if needle in (session.get("title") or "").lower():
+            matched_in.append("title")
+        for message in session.get("messages") or []:
+            content = message.get("content") or ""
+            position = content.lower().find(needle)
+            if position < 0:
+                continue
+            role = message.get("role") or "message"
+            if role not in matched_in:
+                matched_in.append(role)
+            if not snippet:
+                snippet = _snippet(content, position, len(needle))
+        if not matched_in:
+            continue
+        summary = _session_summary(session)
+        summary["match"] = {"in": matched_in, "snippet": snippet}
+        hits.append(summary)
+
+    hits.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return hits[:limit]
 
 
 def create_session(title="New session", owner=""):
@@ -142,13 +203,20 @@ def history_for_agent(session_id, owner):
 
 
 def append_exchange(session_id, question, answer, tool_trace=None, usage=None, citations=None,
-                     views=None, owner=""):
+                     views=None, owner="", subagent_steps=None, title=None):
+    """Append one user/assistant turn.
+
+    `title` is the caller's model-written label for the session (see webapp/session_title.py). It is
+    only honoured on the FIRST exchange — renaming a session mid-conversation would move it under the
+    user in the sidebar — and a blank/absent one falls back to the truncated question, so a caller
+    that does not do titles at all behaves exactly as before."""
     question = (question or "").strip()
     if not question:
         raise ValueError("Question is required")
 
     assistant_content = answer or ""
     trace = deepcopy(tool_trace or [])
+    steps = deepcopy(list(subagent_steps or [])[:MAX_SUBAGENT_STEPS])
 
     with _LOCK:
         data = _load_unlocked()
@@ -157,7 +225,7 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
             raise KeyError(session_id)
 
         if not session.get("messages"):
-            session["title"] = _title_from_question(question)
+            session["title"] = (title or "").strip() or session_title.fallback_title(question)
 
         user_time = _now()
         assistant_time = _now()
@@ -174,6 +242,7 @@ def append_exchange(session_id, question, answer, tool_trace=None, usage=None, c
                 "usage": deepcopy(usage) if usage else None,
                 "citations": deepcopy(citations) if citations else None,
                 "views": deepcopy(views or []),
+                "subagent_steps": steps,
             }
         )
         session["updated_at"] = assistant_time

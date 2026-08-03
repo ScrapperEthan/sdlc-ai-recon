@@ -167,16 +167,37 @@
   }
   .sidebar-new-session:disabled { opacity: .5; cursor: progress; }
 
-  .sessions-section {
+  /* The sidebar is one flex column. Everything EXCEPT the sessions block keeps its natural height
+     (flex-shrink:0) — without that, a long session list squeezed the sections below it until their
+     content spilled out of the box it was allotted and drew on top of the Retrieval Tools list. The
+     sessions block is the only elastic one, and it scrolls internally instead of pushing. */
+  .sidebar > .brand,
+  .sidebar > .sidebar-section:not(.sessions-section) { flex: 0 0 auto; }
+
+  .sidebar > .sessions-section {
     display: flex;
     flex-direction: column;
-    min-height: 0;
+    flex: 1 1 auto;
+    /* Not `auto` (which refuses to shrink below the list's own height — that is the bug: the box
+       stayed as tall as its content and the content drew over the sections below) and not 0 (which
+       would let a long Retrieval Tools list crush the sessions to nothing): a ~3-row floor. */
+    min-height: 148px;
   }
 
   .session-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;   /* keeps the scrollbar off the row's rounded corner */
+  }
+  .session-list::-webkit-scrollbar { width: 8px; }
+  .session-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, .18);
+    border-radius: 999px;
   }
   .session-list.is-busy { pointer-events: none; opacity: .6; }
 
@@ -222,6 +243,62 @@
     font-size: 11.5px;
     color: var(--sidebar-muted);
   }
+
+  /* The matched text of a search hit. Two lines max — enough to recognise the session, not enough
+     to turn the sidebar into a transcript. */
+  .session-item-snippet {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--sidebar-muted);
+    max-width: 100%;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .session-item-snippet mark {
+    background: rgba(250, 204, 21, .28);
+    color: #fef9c3;
+    border-radius: 3px;
+    padding: 0 1px;
+  }
+
+  .session-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 8px;
+    padding: 5px 9px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, .07);
+    border: 1px solid rgba(255, 255, 255, .14);
+  }
+  .session-search:focus-within {
+    border-color: rgba(255, 255, 255, .34);
+    background: rgba(255, 255, 255, .12);
+  }
+  .session-search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--sidebar-ink);
+    font-size: 12.5px;
+    outline: 0;
+  }
+  .session-search input::placeholder { color: var(--sidebar-muted); }
+  .session-search-icon { color: var(--sidebar-muted); font-size: 12px; }
+  .session-search-clear {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: var(--sidebar-muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .session-search-clear:hover { color: var(--sidebar-ink); }
 
   .sidebar-session-meta {
     margin: 10px 2px 0;
@@ -1166,6 +1243,13 @@
           <p class="sidebar-title">Sessions</p>
           <button id="new-session" class="sidebar-new-session" type="button">+ New</button>
         </div>
+        <div class="session-search">
+          <span class="session-search-icon" aria-hidden="true">⌕</span>
+          <input id="session-search" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="搜索会话（标题 / 对话内容）" aria-label="Search sessions">
+          <button id="session-search-clear" class="session-search-clear" type="button"
+                  title="清除搜索" aria-label="Clear search" hidden>×</button>
+        </div>
         <div id="session-list" class="session-list" role="list"></div>
         <p id="session-meta" class="sidebar-session-meta">Sessions are saved locally in JSON for internal testing.</p>
       </section>
@@ -1364,6 +1448,8 @@
 const log = document.getElementById('log'), q = document.getElementById('q'),
       f = document.getElementById('f'), send = document.getElementById('send'),
       sessionListEl = document.getElementById('session-list'),
+      sessionSearchEl = document.getElementById('session-search'),
+      sessionSearchClearEl = document.getElementById('session-search-clear'),
       newSessionButton = document.getElementById('new-session'),
       sessionMeta = document.getElementById('session-meta'),
       indexStatus = document.getElementById('index-status'),
@@ -1374,6 +1460,10 @@ const log = document.getElementById('log'), q = document.getElementById('q'),
 const history = [];
 let currentSessionId = null;
 let sessions = [];
+// Search is a VIEW over the sidebar, never over `sessions` itself: `sessions` stays the full list so
+// currentSessionId resolution (refreshSessions) is unaffected by whatever is typed in the box.
+let sessionQuery = '';
+let sessionSearchResults = null;   // null = not searching; [] = searched, nothing matched
 
 function hideEmptyState() {
   if (empty) empty.hidden = true;
@@ -1396,18 +1486,42 @@ function setBusy(isBusy) {
   f.setAttribute('aria-busy', String(isBusy));
 }
 
+// Highlight every occurrence of the search term inside a snippet, without ever putting server text
+// through innerHTML — each fragment is appended as a text node, only the <mark> is created by us.
+function appendHighlighted(target, text, needle) {
+  const haystack = text || '';
+  const term = (needle || '').trim();
+  if (!term) { target.appendChild(document.createTextNode(haystack)); return; }
+  const lower = haystack.toLowerCase(), lowerTerm = term.toLowerCase();
+  let from = 0, at;
+  while ((at = lower.indexOf(lowerTerm, from)) >= 0) {
+    if (at > from) target.appendChild(document.createTextNode(haystack.slice(from, at)));
+    const hit = document.createElement('mark');
+    hit.textContent = haystack.slice(at, at + term.length);
+    target.appendChild(hit);
+    from = at + term.length;
+  }
+  if (from < haystack.length) target.appendChild(document.createTextNode(haystack.slice(from)));
+}
+
+const MATCH_LABELS = {title: '标题', user: '我的提问', assistant: '回答'};
+
 function renderSessionList(selectedId = '') {
   sessionListEl.innerHTML = '';
+  const searching = sessionSearchResults !== null;
+  const rows = searching ? sessionSearchResults : sessions;
 
-  if (!sessions.length) {
+  if (!rows.length) {
     const emptyNote = document.createElement('p');
     emptyNote.className = 'session-list-empty';
-    emptyNote.textContent = 'No saved sessions yet';
+    emptyNote.textContent = searching
+      ? `No session matches "${sessionQuery}"`
+      : 'No saved sessions yet';
     sessionListEl.appendChild(emptyNote);
     return;
   }
 
-  sessions.forEach((session) => {
+  rows.forEach((session) => {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'session-item' + (session.id === selectedId ? ' active' : '');
@@ -1418,17 +1532,72 @@ function renderSessionList(selectedId = '') {
     const title = document.createElement('span');
     title.className = 'session-item-title';
     title.textContent = session.title || 'New session';
+    title.title = session.title || 'New session';   // the row ellipsises; the tooltip does not
 
     const count = Number(session.message_count || 0);
     const meta = document.createElement('span');
     meta.className = 'session-item-meta';
-    meta.textContent = count ? `${count} message${count === 1 ? '' : 's'}` : 'empty';
+    const where = ((session.match && session.match.in) || [])
+      .map((k) => MATCH_LABELS[k] || k).join(' · ');
+    meta.textContent = (count ? `${count} message${count === 1 ? '' : 's'}` : 'empty')
+      + (where ? ` · 命中：${where}` : '');
 
     item.appendChild(title);
     item.appendChild(meta);
+    if (session.match && session.match.snippet) {
+      const snippet = document.createElement('span');
+      snippet.className = 'session-item-snippet';
+      appendHighlighted(snippet, session.match.snippet, sessionQuery);
+      item.appendChild(snippet);
+    }
     sessionListEl.appendChild(item);
   });
 }
+
+// Debounced so typing doesn't fire one scan of the store per keystroke, and revision-guarded so a
+// slower earlier query can never overwrite the results of a newer one.
+let sessionSearchTimer = null;
+let sessionSearchRevision = 0;
+
+async function runSessionSearch(query) {
+  const revision = ++sessionSearchRevision;
+  sessionQuery = query.trim();
+  sessionSearchClearEl.hidden = !sessionQuery;
+  if (!sessionQuery) {
+    sessionSearchResults = null;
+    renderSessionList(currentSessionId);
+    return;
+  }
+  try {
+    const data = await fetchJson('/api/sessions?q=' + encodeURIComponent(sessionQuery));
+    if (revision !== sessionSearchRevision) return;
+    sessionSearchResults = data.sessions || [];
+  } catch (error) {
+    if (revision !== sessionSearchRevision) return;
+    sessionSearchResults = [];
+  }
+  renderSessionList(currentSessionId);
+}
+
+function clearSessionSearch() {
+  clearTimeout(sessionSearchTimer);
+  sessionSearchEl.value = '';
+  sessionSearchRevision++;   // abandon anything in flight
+  sessionQuery = '';
+  sessionSearchResults = null;
+  sessionSearchClearEl.hidden = true;
+  renderSessionList(currentSessionId);
+}
+
+sessionSearchEl.addEventListener('input', () => {
+  clearTimeout(sessionSearchTimer);
+  const value = sessionSearchEl.value;
+  sessionSearchTimer = setTimeout(() => runSessionSearch(value), 180);
+});
+sessionSearchEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') clearSessionSearch();
+});
+sessionSearchClearEl.addEventListener('click', clearSessionSearch);
 
 function syncHistory(messages) {
   history.length = 0;
@@ -1452,6 +1621,12 @@ function renderSessionMessages(messages) {
     const container = add(message.role, message.content || '', who);
     if (message.role === 'assistant' && message.tool_trace && message.tool_trace.length) {
       addToolTrace(container, message.tool_trace);
+    }
+    // The investigator panel is part of the answer, not a progress spinner: it is the only place
+    // that says which production system was contacted and what came back. It used to exist only in
+    // the live stream, so a page reload silently deleted it. Replayed here as completed.
+    if (message.role === 'assistant' && message.subagent_steps && message.subagent_steps.length) {
+      showSubagent(container, message.subagent_steps, true);
     }
     if (message.role === 'assistant' && message.views && message.views.length) {
       message.views.forEach((v) => renderInlineView(container, v));
@@ -1520,8 +1695,11 @@ async function refreshSessions(preferredId = currentSessionId) {
     : (sessions[0] && sessions[0].id) || '';
 
   currentSessionId = nextId || null;
-  renderSessionList(currentSessionId);
   updateSessionMetaFromSession(sessions.find((session) => session.id === currentSessionId));
+  // A search view goes stale the moment a new answer lands (new title, new message text), so re-run
+  // it rather than leaving the sidebar showing results that no longer describe the store.
+  if (sessionQuery) await runSessionSearch(sessionQuery);
+  else renderSessionList(currentSessionId);
   return sessions;
 }
 
@@ -1556,6 +1734,12 @@ async function createSession() {
 
 async function initializeSessions() {
   setBusy(true);
+  // The browser restores an <input type="search"> value across a reload, so the state behind the box
+  // has to be READ from it, not assumed empty — otherwise the sidebar can list every session under a
+  // search term that is still visibly typed in. Seeding it here makes the two agree either way:
+  // refreshSessions re-runs the search whenever sessionQuery is set.
+  sessionQuery = sessionSearchEl.value.trim();
+  sessionSearchClearEl.hidden = !sessionQuery;
   try {
     const storedSessions = await refreshSessions();
     if (storedSessions.length) {

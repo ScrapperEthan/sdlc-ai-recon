@@ -49,6 +49,19 @@ developers just open the URL. Nobody installs opencode or anything.
 - It only reads `mirror/`, `recon_out/`, `index/`. No DB, no credentials.
 - Chat sessions are stored locally in JSON at `webapp_data/chat_sessions.json` by default.
 - Override the session file path with `SDLC_SESSION_STORE=/path/to/chat_sessions.json`.
+- **Session titles** are written by the model (`webapp/session_title.py`) on the FIRST exchange of a
+  session — one short extra model call per session, never per turn — so the sidebar says
+  "3HK SMSC 投递失败" instead of the first 48 characters of a question that starts the same way as
+  every other one. Any failure (model down, mock mode, junk reply) falls back to that truncation.
+  `SDLC_SESSION_TITLE_LLM=0` turns the model call off and keeps the truncation.
+- **Session search**: `GET /api/sessions?q=<text>` scans the caller's own sessions (titles + message
+  text, case-insensitive substring — no index, no model) and returns the same shape as the plain
+  listing plus a `match` field saying where it hit and the surrounding text. The sidebar search box
+  drives it.
+- Incident-investigator progress steps are saved with the assistant message (`subagent_steps`) and
+  re-rendered on reload. They are the already-sanitized stream events, and `history_for_agent` sends
+  the model role+content only — so replaying them reaches the browser, never the model. Raw log text
+  still lives solely in the separate owner-scoped store (`SDLC_INCIDENT_RAW_LOGS`).
 - `call_graph` shells out to the `codegraph` CLI if present (synchronous
   who-calls-whom); everything else is pure retrieval-layer.
 - Tune with env: `SDLC_MAX_TOOL_ITERS`, `SDLC_TOOL_RESULT_CAP`, `SDLC_PORT`, `SDLC_HOST`.

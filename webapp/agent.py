@@ -107,6 +107,7 @@ def answer(question, history=None):
     usage = llm_usage.empty_usage()
     citation_report = citations.verify("")
     views = []
+    subagent_steps = []
     for event in answer_events(question, history):
         if event.get("type") == "view" and event.get("view"):
             views.append(event["view"])
@@ -115,12 +116,14 @@ def answer(question, history=None):
             trace = event.get("tool_trace") or []
             usage = event.get("usage") or usage
             citation_report = event.get("citations") or citations.verify(answer_text)
+            subagent_steps = event.get("subagent_steps") or []
     return {
         "answer": answer_text,
         "tool_trace": trace,
         "usage": usage,
         "citations": citation_report,
         "views": views,
+        "subagent_steps": subagent_steps,
     }
 
 
@@ -149,6 +152,11 @@ def answer_events(question, history=None, owner=""):
 
     trace = []
     emitted_views = []
+    # Sub-agent progress steps are collected as well as relayed, so the terminal `done` event can
+    # carry them into the session store. Streaming them alone meant the investigator panel existed
+    # only until the page was reloaded — the one part of an incident answer that shows which system
+    # was contacted, and it was the first thing to disappear.
+    emitted_subagent_steps = []
     usage = llm_usage.empty_usage()
     for iteration in range(config.MAX_TOOL_ITERS):
         message = None
@@ -179,6 +187,7 @@ def answer_events(question, history=None, owner=""):
                 "usage": usage,
                 "citations": citations.verify(answer_text),
                 "views": emitted_views,
+                "subagent_steps": emitted_subagent_steps,
                 "context": budget.report(),
             }
             return
@@ -201,7 +210,10 @@ def answer_events(question, history=None, owner=""):
                         if event.get("type") == "result":
                             result = event.get("packet") or {}
                         else:
-                            yield {"agent": name, **event}
+                            relayed = {"agent": name, **event}
+                            if relayed.get("type") == "subagent_step":
+                                emitted_subagent_steps.append(relayed)
+                            yield relayed
                 except Exception as e:  # noqa: BLE001
                     result = {"error": str(e)}
             else:
@@ -263,5 +275,6 @@ def answer_events(question, history=None, owner=""):
         "usage": usage,
         "citations": citations.verify(answer_text),
         "views": emitted_views,
+        "subagent_steps": emitted_subagent_steps,
         "context": budget.report(),
     }

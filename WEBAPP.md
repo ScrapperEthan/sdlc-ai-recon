@@ -58,6 +58,19 @@ developers just open the URL. Nobody installs opencode or anything.
   text, case-insensitive substring — no index, no model) and returns the same shape as the plain
   listing plus a `match` field saying where it hit and the surrounding text. The sidebar search box
   drives it.
+- **查看原文** (retained raw log lines) opens the full-height `#rawlog-panel` drawer — same geometry
+  and Escape-to-close as the citation source viewer — with line numbers and a wrap toggle. It used
+  to be an inline pane nested inside the 260px step list, i.e. a scroll box inside a scroll box
+  showing a handful of an up-to-500-line log. No copy button, deliberately: the text is selectable,
+  and one-click "production log lines to clipboard" is not something this UAT-only path should add.
+- **Telling the investigator where to look**: `incident_investigate` takes `repos`. Targets were
+  otherwise derived only from repo ids appearing in the alert TEXT, so an alert that names no
+  service (the largest family here) refused even when the agent already knew the repo from
+  `incident_impact`. Supplied ids are validated against the same repo universe the text scan uses —
+  an unknown id refuses rather than aiming production reads at the wrong service — and carry
+  `plan.targets[].source: "supplied by the caller"` so a nil result keeps its weaker provenance.
+  The tool is re-callable within one turn; the schema and system prompt name the signals that mean
+  "sweep again" and the one refusal (blocking window) that only the user can clear.
 - Incident-investigator progress steps are saved with the assistant message (`subagent_steps`) and
   re-rendered on reload. They are the already-sanitized stream events, and `history_for_agent` sends
   the model role+content only — so replaying them reaches the browser, never the model. Raw log text

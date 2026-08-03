@@ -97,6 +97,17 @@ def _known_repos(repos=None):
         return []
 
 
+def known_repos(repos=None):
+    """Public view of the repo universe `parse_alert` scans against.
+
+    Callers that accept a repo id from somewhere OTHER than the alert text — the model passing what
+    `incident_impact` already told it, or what the user said — must validate against THIS list, not
+    a second one that could drift. "Never guess a repo" applies to the caller too: an id nobody can
+    confirm has to refuse, not become a production query aimed at the wrong service.
+    """
+    return _known_repos(repos)
+
+
 def _boundary_ok(text, start, end):
     before_ok = start == 0 or not _ALNUM.match(text[start - 1])
     after_ok = end >= len(text) or not _ALNUM.match(text[end])

@@ -256,6 +256,21 @@ which ran. Three things about metric evidence must be reported honestly:
 - **There are no numbers to quote.** The datapoints are used to derive the categories and then
   discarded, so there is no average, peak or latest value in the packet — do not imply one.
 
+**One sweep is a starting point, not a verdict.** `incident_investigate` is re-callable inside the
+same turn, and a real investigation usually takes more than one call. Tell it where to look —
+pass `repos` with the service ids you already know (from `incident_impact`, from the user, from the
+conversation), because targets are otherwise read only out of the alert text and the biggest alert
+family names no repo at all. Then keep going, changing something each time, while any of these
+hold: `queries_executed` is shorter than `queries_attempted`; a target's `app_resolved` is empty;
+`evidence` is empty although the plan was runnable (try other keywords, the other source, a wider
+`max_queries`); or the evidence points at a downstream service you have not searched yet. Stop when
+the evidence answers the question, or when the next call would just repeat the last one. Then say
+how many sweeps it took and what each one covered — "we looked once and found nothing" and "we
+looked five ways and found nothing" are different claims.
+
+The one exception: a **BLOCKING window refusal** means nothing was read and no re-call can fix it.
+That needs the user, not another sweep.
+
 A log query needs **both a full date+time and a timezone**, and if either is missing, **stop and
 ask**. Three zones coexist here — CloudWatch is UTC, LogDream defaults to Asia/Hong_Kong, the
 server is GMT — so an unlabelled time is genuinely ambiguous, and a bare `03:15` does not say which

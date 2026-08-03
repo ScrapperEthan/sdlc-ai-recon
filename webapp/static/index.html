@@ -846,25 +846,10 @@
 
   .subagent-raw-btn:hover { background: rgba(176, 106, 106, .2); }
 
-  .subagent-raw {
-    margin: 2px 0 6px 18px;
-    padding: 8px 10px;
-    border-left: 2px solid #b06a6a;
-    background: rgba(176, 106, 106, .06);
-    font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    color: #3a2f2f;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 320px;
-    overflow-y: auto;
-  }
-
-  .subagent-raw .warn {
-    display: block;
-    margin-bottom: 6px;
-    color: #8c3b3b;
-    font-weight: 650;
-  }
+  /* Raw production log lines open in the full-height drawer below (#rawlog-panel), NOT inline. The
+     inline pane used to sit inside `.subagent-steps`, which is itself a 260px scroller — a scroll
+     box inside a scroll box, showing maybe eight lines of an up-to-500-line log. Unreadable, and
+     the whole point of retention is that a tester can actually check the evidence. */
 
   /* Loud on purpose: unredacted production log text is being kept on disk. A tester must not have
      to check a config file to know that. */
@@ -1143,6 +1128,103 @@
       height: 40px;
     }
   }
+  /* Raw log viewer. Same geometry/interaction as #source-panel above (full-height right drawer,
+     Escape to close) so the two click-throughs in this app behave identically — but wider, because
+     log lines are long, and in the red retention livery, because this one is showing UNREDACTED
+     production text and must never be mistaken for our own source. */
+  #rawlog-panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    z-index: 22;
+    width: min(1100px, 96vw);
+    max-width: 100vw;
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    background: #1a1214;
+    color: #f1e4e4;
+    border-left: 1px solid rgba(255, 255, 255, .16);
+    box-shadow: -24px 0 60px rgba(15, 23, 42, .3);
+  }
+  .rawlog-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(241, 228, 228, .14);
+  }
+  .rawlog-title {
+    min-width: 0;
+    overflow: hidden;
+    color: #fff5f5;
+    font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rawlog-wrap-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #e7cfcf;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+  .rawlog-close {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    color: #f1e4e4;
+    background: rgba(255, 255, 255, .08);
+    border: 1px solid rgba(255, 255, 255, .14);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .rawlog-close:hover,
+  .rawlog-close:focus-visible { background: rgba(255, 255, 255, .18); outline: 0; }
+  .rawlog-warn {
+    padding: 8px 16px;
+    background: rgba(176, 106, 106, .26);
+    border-bottom: 1px solid rgba(217, 165, 165, .35);
+    color: #ffd9d9;
+    font-size: 12.5px;
+    font-weight: 650;
+  }
+  .rawlog-body {
+    overflow: auto;
+    padding: 10px 0 20px;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .rawlog-line {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 16px;
+    white-space: pre;
+  }
+  .rawlog-line:hover { background: rgba(255, 255, 255, .05); }
+  /* Log lines run long; horizontal scrolling is the honest default (a wrapped line hides where the
+     record actually ends). The toggle in the header turns wrapping on for narrow screens. */
+  .rawlog-body.is-wrapped .rawlog-line { white-space: pre-wrap; word-break: break-word; }
+  .rawlog-n {
+    color: #b99a9a;
+    text-align: right;
+    user-select: none;
+  }
+  .rawlog-t { min-width: 0; }
+  .rawlog-note {
+    padding: 14px 16px;
+    color: #e7cfcf;
+    font: 13px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  @media (max-width: 640px) {
+    #rawlog-panel { inset: 0; width: auto; max-width: none; }
+    .rawlog-line { grid-template-columns: 44px minmax(0, 1fr); gap: 8px; padding: 0 10px; }
+  }
+
   #usage-panel, #llm-panel {
     position: fixed;
     right: 24px;
@@ -1368,6 +1450,19 @@
         onclick="closeSourcePanel()">&times;</button>
     </div>
     <div class="src-body"></div>
+  </aside>
+
+  <aside id="rawlog-panel" hidden aria-label="Raw production log viewer">
+    <div class="rawlog-head">
+      <span class="rawlog-title"></span>
+      <label class="rawlog-wrap-toggle">
+        <input id="rawlog-wrap" type="checkbox"> 自动换行
+      </label>
+      <button class="rawlog-close" type="button" aria-label="Close raw log viewer"
+        onclick="closeRawLogPanel()">&times;</button>
+    </div>
+    <div class="rawlog-warn"></div>
+    <div class="rawlog-body"></div>
   </aside>
 
   <aside id="usage-panel" hidden aria-label="Usage dashboard">
@@ -2108,8 +2203,84 @@ function closeSourcePanel() {
   document.getElementById('source-panel').hidden = true;
 }
 
+function closeRawLogPanel() {
+  document.getElementById('rawlog-panel').hidden = true;
+}
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeSourcePanel();
+  if (event.key !== 'Escape') return;
+  // Both drawers occupy the same edge of the screen, so only ever one is open. Close the top one.
+  const rawlog = document.getElementById('rawlog-panel');
+  if (!rawlog.hidden) closeRawLogPanel();
+  else closeSourcePanel();
+});
+
+// Unredacted production log text, in the full-height drawer rather than the old inline pane (which
+// lived inside the 260px step list — a scroll box inside a scroll box). Deliberately NOT given a
+// "copy" button: the text is selectable, and a one-click "put production log lines on the clipboard"
+// affordance is not something this UAT-only feature should add.
+const rawLogWrapToggle = document.getElementById('rawlog-wrap');
+
+async function openRawLog(ref, stepLabel) {
+  if (!ref) return;
+  const panel = document.getElementById('rawlog-panel');
+  const title = panel.querySelector('.rawlog-title');
+  const warn = panel.querySelector('.rawlog-warn');
+  const body = panel.querySelector('.rawlog-body');
+
+  closeSourcePanel();                       // one drawer at a time — they share the same edge
+  panel.hidden = false;
+  title.textContent = stepLabel || '生产日志原文';
+  warn.textContent = '⚠ 未脱敏生产日志原文（UAT 内测）';
+  body.className = 'rawlog-body' + (rawLogWrapToggle.checked ? ' is-wrapped' : '');
+  body.innerHTML = '';
+  const loading = document.createElement('div');
+  loading.className = 'rawlog-note';
+  loading.textContent = '读取中...';
+  body.appendChild(loading);
+
+  let data;
+  try {
+    const response = await fetch('/api/incident/raw?ref=' + encodeURIComponent(ref),
+                                 {headers: authHeaders()});
+    data = await response.json();
+    if (!response.ok) {
+      warn.textContent = '⚠ 取不到原文';
+      loading.textContent = data.hint || data.error || `Request failed (${response.status})`;
+      return;
+    }
+  } catch (error) {
+    warn.textContent = '⚠ 取不到原文';
+    loading.textContent = error.message;
+    return;
+  }
+
+  warn.textContent = `⚠ 未脱敏生产日志原文 · 共 ${data.line_count} 行`
+    + (data.truncated ? '（已截断）' : '') + ` · 存于 ${data.stored_at}`;
+  body.innerHTML = '';
+  (data.lines || []).forEach((line, index) => {
+    const row = document.createElement('div');
+    row.className = 'rawlog-line';
+    const num = document.createElement('span');
+    num.className = 'rawlog-n';
+    num.textContent = index + 1;
+    const text = document.createElement('span');
+    text.className = 'rawlog-t';
+    text.textContent = line;
+    row.append(num, text);
+    body.appendChild(row);
+  });
+  if (!(data.lines || []).length) {
+    const note = document.createElement('div');
+    note.className = 'rawlog-note';
+    note.textContent = '这条证据没有留存任何原文行。';
+    body.appendChild(note);
+  }
+}
+
+rawLogWrapToggle.addEventListener('change', () => {
+  document.querySelector('.rawlog-body')
+    .classList.toggle('is-wrapped', rawLogWrapToggle.checked);
 });
 
 async function openSource(ref) {
@@ -2119,6 +2290,7 @@ async function openSource(ref) {
   const panel = document.getElementById('source-panel');
   const title = panel.querySelector('.src-title');
   const body = panel.querySelector('.src-body');
+  closeRawLogPanel();                       // one drawer at a time — they share the same edge
   panel.hidden = false;
   title.textContent = ref;
   body.textContent = 'Loading...';
@@ -2334,44 +2506,15 @@ function showSubagent(container, steps, completed = false) {
 
     // Click-through to the original lines. Only present under raw retention; the ref is opaque and
     // the fetch is owner-scoped server-side, so the button cannot reach another session's logs.
+    // Opens the full-height drawer — see openRawLog.
     if (detail.raw_ref) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'subagent-raw-btn';
       btn.textContent = '查看原文';
       btn.title = '未脱敏的生产日志原文（UAT 内测）';
-      const pane = document.createElement('div');
-      pane.className = 'subagent-raw';
-      pane.hidden = true;
-      btn.addEventListener('click', async () => {
-        if (!pane.hidden) { pane.hidden = true; btn.textContent = '查看原文'; return; }
-        pane.hidden = false;
-        btn.textContent = '收起原文';
-        if (pane.dataset.loaded) return;
-        pane.textContent = '读取中...';
-        try {
-          const res = await fetch('/api/incident/raw?ref=' + encodeURIComponent(detail.raw_ref),
-                                  {headers: authHeaders()});
-          const data = await res.json();
-          pane.textContent = '';
-          const warn = document.createElement('span');
-          warn.className = 'warn';
-          if (!res.ok) {
-            warn.textContent = '取不到原文：' + (data.hint || data.error || res.status);
-            pane.appendChild(warn);
-            return;
-          }
-          warn.textContent = `⚠ 未脱敏生产日志原文 · 共 ${data.line_count} 行`
-            + (data.truncated ? '（已截断）' : '') + ` · 存于 ${data.stored_at}`;
-          pane.appendChild(warn);
-          pane.appendChild(document.createTextNode(data.lines.join('\n')));
-          pane.dataset.loaded = '1';
-        } catch (error) {
-          pane.textContent = '取不到原文：' + error.message;
-        }
-      });
+      btn.addEventListener('click', () => openRawLog(detail.raw_ref, item.label || ''));
       row.appendChild(btn);
-      list.appendChild(pane);
     }
   });
 

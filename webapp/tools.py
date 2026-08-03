@@ -363,6 +363,21 @@ TOOLS = [
             "LogDream defaults to Asia/Hong_Kong and the servers are GMT, so the same clock time can "
             "be three moments 8 hours apart; searching the wrong one returns nothing, and nothing "
             "reads as 'no problem'. "
+            "WHERE TO LOOK — pass `repos` with repo ids you already know are involved (from "
+            "`incident_impact`, from the user, from the conversation). Targets are otherwise taken "
+            "ONLY from repo ids appearing in the alert text, and the largest alert family here "
+            "names no repo at all. Ids are validated against the repo universe: an unknown id is "
+            "refused, never queried, so pass the exact id and never invent one. Caller-supplied "
+            "targets are marked in `plan.targets[].source` — report that, since a nil result on a "
+            "repo YOU named is weaker than one on a repo the alert identified. "
+            "RE-CALLABLE WITHIN THE SAME TURN, and one sweep is a starting point, not a verdict. "
+            "Go again, changing something, when: `queries_executed` is shorter than "
+            "`queries_attempted`; a target's `app_resolved` is empty; `evidence` is empty though "
+            "the plan WAS runnable (other `keywords`, the other `sources`, a wider `max_queries`); "
+            "or the evidence names a downstream service you have not searched (add it to `repos`). "
+            "Stop when the evidence answers the question, or the next call would repeat the last. "
+            "Re-calling is pointless for exactly one refusal: a BLOCKING window refusal means "
+            "nothing was read and only the user can fix it — ask, do not retry. "
             "DRILL-DOWN — for a follow-up like '再宽一点时间窗', '换 ConnectException 再查', "
             "'只看 hkp3', '多查几个关键词': call this again with `keywords` (REPLACES the "
             "graph-derived list — spend the budget on what they asked for), `sources` (subset of "
@@ -398,6 +413,7 @@ TOOLS = [
              "alert_time": {"type": "string"}, "alarm_name": {"type": "string"},
              "keywords": {"type": "array", "items": {"type": "string"}},
              "sources": {"type": "array", "items": {"type": "string"}},
+             "repos": {"type": "array", "items": {"type": "string"}},
              "max_queries": {"type": "integer"}},
             ["alert_text"]),
 ]
@@ -438,6 +454,8 @@ def dispatch_events(name, a, owner=""):
                 alarm_name=(a.get("alarm_name") or "").strip() or None,
                 keywords=a.get("keywords") or None,
                 sources=a.get("sources") or None,
+                # WHERE to look, when the caller knows it and the alert text does not say.
+                target_repos=a.get("repos") or None,
                 max_queries=a.get("max_queries") or None,
                 owner=owner):
             yield event

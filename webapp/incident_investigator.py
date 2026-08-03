@@ -822,13 +822,24 @@ def _format_alert_time(normalized, operation="log.read"):
 
 
 def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, alert_time=None,
-         alarm_name=None):
+         alarm_name=None, target_repos=None):
     """Alert text -> a read-only query plan. Opens no sockets; fully testable offline.
 
     `keywords` and `sources` are the drill-down path: a follow-up question ("search for
     ConnectException instead", "only hkp3") re-runs with them instead of the derived list, so
     narrowing does not mean starting over. Caller-supplied keywords are marked as such, because the
     provenance of a keyword is what separates our query plan from "grep for ERROR".
+
+    `target_repos` is WHERE to look, and it exists because the alert text is not the only place that
+    knowledge lives. The caller has usually already run `incident_impact`, or the user simply named
+    the service — and the largest alert family here ("MDC Alert - General SHP API Error") names no
+    repo at all, so without this the investigator refuses and asks a question the caller could
+    already answer. Supplied ids are validated against the same repo universe the text scan uses and
+    carry `source: "supplied by the caller"` into the packet: a nil result on a repo somebody named
+    means less than a nil result on one the alert itself identified.
+
+    `repos` is a different thing entirely — the repo UNIVERSE to scan the text against (injectable
+    because index/repo_tags.json is gitignored). Do not confuse the two.
     """
     parsed = incident.parse_alert(alert_text, repos=repos)
     out = {
@@ -855,10 +866,40 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
             "single-source result covers less than the default — say which one was searched."
             % " and ".join(log_sources()))
     identified = bool(parsed["identified"])
-    if not identified:
+
+    # Repos the CALLER already knows are involved. Checked against the universe the text scan uses:
+    # only reject when there IS a universe to check against — when index/repo_tags.json is missing
+    # the caller is a better source than our absent index, so the id is accepted and marked
+    # unvalidated rather than refused for a gap on our side.
+    universe = set(incident.known_repos(repos))
+    supplied_repos, unknown_repos = [], []
+    for name in target_repos or []:
+        name = str(name).strip()
+        if not name:
+            continue
+        if universe and name not in universe:
+            unknown_repos.append(name)
+        elif name not in supplied_repos:
+            supplied_repos.append(name)
+
+    text_repos = [entry["repo"] for entry in parsed["repos"]] if identified else []
+    target_ids = text_repos + [name for name in supplied_repos if name not in text_repos]
+
+    if unknown_repos:
         out["refusals"].append(
-            "no repo and no known use-case id could be read from this alert, so there is nothing to "
-            "query. Ask for the service name or the use-case id; do not guess an app.")
+            "these repo ids were supplied by the caller but are not in the repo universe, so they "
+            "were NOT queried: %s. Check the id (they look like `mc-hk-hase-...`) — this is a "
+            "wrong name, not an empty log." % ", ".join(sorted(unknown_repos)))
+    if not target_ids and not parsed["use_cases"]:
+        out["refusals"].append(
+            "no repo and no known use-case id could be read from this alert, and none was supplied, "
+            "so there is nothing to query. Ask for the service name or the use-case id, or pass "
+            "`repos` if you already know which service it is; do not guess an app.")
+    if supplied_repos:
+        out["targets_note"] = (
+            "%d of these targets were supplied by the caller rather than read from the alert text. "
+            "A nil result on a caller-named repo only says that repo's logs were clean for these "
+            "terms — it does not confirm the caller named the right service." % len(supplied_repos))
 
     seen_keywords = {}
 
@@ -867,10 +908,18 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         if term and term.lower() not in seen_keywords:
             seen_keywords[term.lower()] = {"term": term, "why": why}
 
-    for entry in parsed["repos"] if identified else []:
-        repo = entry["repo"]
-        target = {"repo": repo, "app_candidates": app_candidates(repo),
+    for repo in target_ids:
+        target = {"repo": repo,
+                  "source": ("named in the alert text" if repo in text_repos
+                             else "supplied by the caller"),
+                  "app_candidates": app_candidates(repo),
                   "app_resolved": "", "app_note": ""}
+        if universe and repo in supplied_repos:
+            target["validated"] = True
+        elif repo in supplied_repos:
+            target["validated"] = False
+            target["app_note"] = ("repo universe unavailable (index/repo_tags.json missing), so "
+                                  "this caller-supplied id could not be confirmed to exist")
         if not target["app_candidates"]:
             target["app_note"] = ("no LogDream app name could be derived from this repo id; "
                                   "an intranet mapping is needed (config/logdream_apps.json)")
@@ -1424,7 +1473,7 @@ def _cloudwatch_branch(query_plan, packet, counts):
 
 def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, keywords=None,
                         sources=None, max_queries=None, owner="", alert_time=None,
-                        alarm_name=None):
+                        alarm_name=None, target_repos=None):
     """Run the plan against the log MCP, narrating each step, then yield the evidence packet.
 
     A generator rather than a callback so the caller can relay progress to a browser without threads
@@ -1440,7 +1489,7 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     yield _step("plan", "读告警：识别服务 / 用例，推导查询计划")
     query_plan = query_plan or plan(alert_text, repos=repos, timezone=timezone,
                                     keywords=keywords, sources=sources, alert_time=alert_time,
-                                    alarm_name=alarm_name)
+                                    alarm_name=alarm_name, target_repos=target_repos)
     if query_plan.get("targets") or query_plan.get("keywords"):
         yield _step(
             "plan_done",

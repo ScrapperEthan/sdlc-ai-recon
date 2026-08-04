@@ -47,17 +47,43 @@ class NotAllowed(RuntimeError):
     """Unknown, disabled, out of the caller's reach, or a statement the gate refuses."""
 
 
+TEMPLATE_NAME = "db_queries.json"
+LOCAL_NAME = "db_queries.local.json"
+
+
+def template_path():
+    return os.path.join(retriever_config.ROOT, "config", TEMPLATE_NAME)
+
+
+def config_source():
+    """`(path, kind)` for the config actually in effect — `env`, `local` or `template`.
+
+    The middle step is the whole point. The intranet CANNOT PUSH, so a config they edit in place
+    has to be a file git never touches: otherwise their edit sits as an uncommitted change to a
+    tracked file, and the next `git pull` that also updates that file is refused outright — one
+    config file blocking every unrelated fix in the same pull.
+
+    Requiring an env var as well would be one more thing to forget on a box that gets rebuilt, so
+    the conventional filename is enough on its own. `SDLC_DB_QUERIES` still wins when set, for a
+    deployment that keeps its config somewhere else entirely.
+
+    Replacement, not merge: the file in effect is the whole config. That is why every default lives
+    in code — RUNBOOK-58 is what happens when a replacement file silently drops a safety list.
+    """
+    explicit = (os.environ.get("SDLC_DB_QUERIES") or "").strip()
+    if explicit:
+        return explicit, "env"
+    local = os.path.join(retriever_config.ROOT, "config", LOCAL_NAME)
+    if os.path.isfile(local):
+        return local, "local"
+    return template_path(), "template"
+
+
 def _config_path():
-    return os.environ.get("SDLC_DB_QUERIES") or os.path.join(
-        retriever_config.ROOT, "config", "db_queries.json")
+    return config_source()[0]
 
 
-def load():
-    """Unreadable config degrades to nothing callable — but carries the reason.
-
-    Same lesson as `mcp_registry.load`: a typo in the env var override used to be indistinguishable
-    from "no queries exist", which costs someone a round trip to find out."""
-    path = _config_path()
+def _read(path):
     try:
         with open(path, encoding="utf-8-sig") as handle:
             payload = json.load(handle)
@@ -67,6 +93,46 @@ def load():
         return {"runner": {}, "queries": {},
                 "_load_error": f"{path}: expected a JSON object at the top level"}
     return payload
+
+
+def load():
+    """Unreadable config degrades to nothing callable — but carries the reason.
+
+    Same lesson as `mcp_registry.load`: a typo in the env var override used to be indistinguishable
+    from "no queries exist", which costs someone a round trip to find out."""
+    return _read(_config_path())
+
+
+def wired_names(cfg):
+    """Query names that have a real statement rather than a placeholder."""
+    return sorted(name for name, spec in queries(cfg).items()
+                  if isinstance(spec, dict) and spec.get("sql", UNSET) != UNSET)
+
+
+def config_health(cfg=None):
+    """Is the config in a state that will survive the next `git pull`, and does it still match the
+    template? Both are invisible failures otherwise — one shows up as a blocked pull weeks later,
+    the other as a query the box has simply never heard of.
+    """
+    path, kind = config_source()
+    cfg = cfg if cfg is not None else _read(path)
+    out = {"path": path, "source": kind, "warnings": []}
+    wired = wired_names(cfg)
+    if kind == "template" and wired:
+        out["warnings"].append(
+            f"{path} is the git-TRACKED template and it has been wired ({', '.join(wired)}). Copy "
+            f"it to config/{LOCAL_NAME} (gitignored) and edit that instead — an uncommitted change "
+            f"to the tracked file makes the next `git pull` refuse to update it, which blocks the "
+            f"whole pull, and this side cannot push a fix back.")
+    if kind != "template":
+        template = _read(template_path())
+        missing = sorted(set(queries(template)) - set(queries(cfg)))
+        if missing:
+            out["warnings"].append(
+                f"named queries added to the template since this config was copied are absent "
+                f"here: {', '.join(missing)}. They cannot be called until they are added.")
+        out["template_only"] = missing
+    return out
 
 
 def _clean(mapping):

@@ -313,6 +313,7 @@ def catalog(probe=False):
     from the config alone, or every catalog listing costs a connection.
     """
     cfg = db_registry.load()
+    health = db_registry.config_health(cfg)
     out = {
         "ok": True,
         "state": "catalog",
@@ -321,7 +322,12 @@ def catalog(probe=False):
         "calling_enabled": bool(config.DB_ENABLED),
         "skill_configured": _skill_configured(cfg),
         "queries": db_registry.readiness(cfg),
-        "config_path": db_registry._config_path(),
+        "config_path": health["path"],
+        "config_source": health["source"],
+        # Named here rather than left to a runbook: a config that will block the next `git pull`,
+        # or one that predates the queries the template now offers, is invisible until it costs
+        # somebody a day.
+        "config_warnings": health["warnings"],
         "config_error": cfg.get("_load_error", ""),
         "caveat": _caveat(_label(cfg)),
     }

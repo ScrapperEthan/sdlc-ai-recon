@@ -1,6 +1,6 @@
 # RUNBOOK-74 — 契约已吸收 + 你们那条测试断言我改了 + 一个会咬人的坑
 
-回应 `RUNBOOK-73-SEND-BACK.md`。基线 `86bc32b` → 本轮，**1355 tests**（`test_db_readonly.py` 66 条）。
+回应 `RUNBOOK-73-SEND-BACK.md`。基线 `86bc32b` → 本轮，**1362 tests**（`test_db_readonly.py` 73 条）。
 
 **引擎侧到此为止：不需要你们名字的部分，全部做完了。** 剩下的全是 Proxy 和你们的表清单。
 
@@ -128,20 +128,34 @@ CLI 那个 `{"ok": false, "error_type": ..., "message": ...}` + exit code 2 的�
 
 ## 7. ⚠️ 一个你们没提、但下次 `git pull` 就会咬人的坑
 
-`config/db_queries.json` 是**被 git 跟踪的**。你们在盒子上直接改它，
-下次 `git pull` 就是冲突或者被覆盖 —— 而**你们推不了代码**，所以修不回来。
-这正是 `index/*.json` 被 gitignore 掉、导致每个 knob 编辑都死在盒子上的同一个陷阱。
+`config/db_queries.json` 是**被 git 跟踪的**，而**你们推不了代码**。
+这和 `index/*.json` 被 gitignore 掉、导致每个 knob 编辑都死在盒子上，是同一个陷阱的两面。
 
-做法和 `config/mcp_tools.json` 完全一样：
+**准确的风险形状不是"冲突"，是整个 `git pull` 被挡住**：git 合并时如果发现一个被跟踪的文件
+既有未提交的本地改动、上游又要更新它，会**直接拒绝这次拉取**。挡住的不只是这个配置文件，
+是那次 pull 里的**所有**东西 —— 而这边推不回来，你们也修不了。
+
+做法（**一条命令，不需要环境变量**）：
 
 ```bash
-# 盒子上：复制一份，改这一份，用环境变量指过去
-cp config/db_queries.json config/db_queries.local.json
-export SDLC_DB_QUERIES=<绝对路径>/config/db_queries.local.json
+cp config/db_queries.json config/db_queries.local.json     # 然后只改这一份
 ```
 
-`config/db_queries.local.json` **已加进 `.gitignore`**。仓库里那一份永远是模板：
-全是 `?`，没有任何真实表名、列名、schema。
+`config/db_queries.local.json` 已加进 `.gitignore`，程序**自动优先读它** ——
+我没有把它做成"要记得设一个环境变量"，因为盒子重建一次就会忘一次。
+优先级：`SDLC_DB_QUERIES`（显式，最高）> `config/db_queries.local.json`（约定）>
+`config/db_queries.json`（跟踪的模板，兜底）。
+
+**并且这个坑现在会自己喊出来。** `db_query` 无参数调用返回的 `config_warnings` 里：
+
+- 你在**被跟踪的模板**里填了真 SQL → 明确告诉你搬到 `.local.json`，并说明为什么；
+- 你的本地副本**缺少模板后来新增的命名查询** → 列出缺哪几条。
+  （是**替换不是合并**：本地文件就是全部配置。所以新增的查询不会自己长出来，
+  但也不会有"哪一边赢"的模糊语义。）
+
+另外 `tests/test_db_readonly.py::ShippedConfigTests` 那条断言的失败信息也改了：
+如果有人在盒子上改了跟踪的那份，测试会红，而红的那句话直接告诉他怎么办 ——
+不是一个看起来莫名其妙的失败。
 
 **并且：本地文件不会削弱任何闸门。** 所有默认值都在代码里，配置只能收紧不能放松 ——
 你们的本地文件哪怕整段漏掉 `not_ready_exceptions`、`allowed_environments`、`max_rows_hard_cap`、
@@ -165,8 +179,8 @@ export SDLC_DB_QUERIES=<绝对路径>/config/db_queries.local.json
 
 ```bash
 git pull
-python -m pytest tests -q                      # 期望 1355 passed
-python -m pytest tests/test_db_readonly.py -q  # 66 passed
+python -m pytest tests -q                      # 期望 1362 passed
+python -m pytest tests/test_db_readonly.py -q  # 73 passed
 ```
 
 你们上轮那条失败（`.github/skills` 存在）现在应该过了 —— **在盒子上跑，那台机器上

@@ -27,6 +27,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from retriever import config as retriever_config    # noqa: E402
 from webapp import config as webapp_config          # noqa: E402
 from webapp import db_readonly, db_registry, tools  # noqa: E402
 
@@ -650,14 +651,93 @@ class ToolSurfaceTests(_Harness):
         self.assertIn("cannot write SQL", description)
 
 
+class ConfigSourceTests(unittest.TestCase):
+    """Which config file is in effect, and whether that choice will survive the next `git pull`.
+
+    The intranet cannot push. So the file they edit must be one git never touches — otherwise their
+    edit sits as an uncommitted change to a tracked file and the next pull that also touches it is
+    refused, blocking every unrelated fix in the same pull. Making the safe path automatic beats
+    documenting it, and making the unsafe state loud beats discovering it weeks later.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sdlc-db-src-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, "config"))
+        env = mock.patch.dict(os.environ, {"SDLC_ROOT": self.tmp})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("SDLC_DB_QUERIES", None)
+        root = mock.patch.object(retriever_config, "ROOT", self.tmp)
+        root.start()
+        self.addCleanup(root.stop)
+
+    def write(self, name, payload):
+        path = os.path.join(self.tmp, "config", name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return path
+
+    def test_the_local_file_is_picked_up_without_an_env_var(self):
+        self.write("db_queries.json", {"queries": {"a": {}}})
+        local = self.write("db_queries.local.json", {"queries": {"b": {}}})
+        path, kind = db_registry.config_source()
+        self.assertEqual((path, kind), (local, "local"))
+        self.assertEqual(sorted(db_registry.queries()), ["b"])
+
+    def test_an_explicit_env_var_still_wins(self):
+        self.write("db_queries.json", {"queries": {"a": {}}})
+        self.write("db_queries.local.json", {"queries": {"b": {}}})
+        other = self.write("elsewhere.json", {"queries": {"c": {}}})
+        with mock.patch.dict(os.environ, {"SDLC_DB_QUERIES": other}):
+            self.assertEqual(db_registry.config_source(), (other, "env"))
+
+    def test_the_tracked_template_is_the_fallback(self):
+        template = self.write("db_queries.json", {"queries": {"a": {}}})
+        self.assertEqual(db_registry.config_source(), (template, "template"))
+
+    def test_wiring_the_tracked_template_is_reported_loudly(self):
+        self.write("db_queries.json",
+                   {"queries": {"a": {"sql": "SELECT x FROM s.t", "columns": ["x"]}}})
+        warnings = db_registry.config_health()["warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("db_queries.local.json", warnings[0])
+        self.assertIn("git pull", warnings[0])
+
+    def test_an_all_placeholder_template_is_not_a_warning(self):
+        self.write("db_queries.json", {"queries": {"a": {"sql": "?", "columns": ["?"]}}})
+        self.assertEqual(db_registry.config_health()["warnings"], [])
+
+    def test_a_local_copy_missing_a_newer_template_query_is_reported(self):
+        # Replacement, not merge: a query added to the template later is simply absent on the box.
+        # Silent absence is how "the assistant can't do that" becomes a mystery.
+        self.write("db_queries.json", {"queries": {"a": {}, "newer": {}}})
+        self.write("db_queries.local.json", {"queries": {"a": {}}})
+        health = db_registry.config_health()
+        self.assertEqual(health["template_only"], ["newer"])
+        self.assertIn("newer", health["warnings"][0])
+
+    def test_the_catalog_surfaces_which_file_is_in_effect(self):
+        self.write("db_queries.json", {"queries": {}})
+        self.write("db_queries.local.json",
+                   {"queries": {"a": {"sql": "SELECT x FROM s.t", "columns": ["x"]}}})
+        out = db_readonly.catalog()
+        self.assertEqual(out["config_source"], "local")
+        self.assertTrue(out["config_path"].endswith("db_queries.local.json"))
+        self.assertEqual(out["config_warnings"], [])
+
+
 class ShippedConfigTests(unittest.TestCase):
     """What a fresh clone actually does — the shipped config, not a fixture."""
 
     def setUp(self):
-        clean = mock.patch.dict(os.environ, {}, clear=False)
-        clean.start()
-        self.addCleanup(clean.stop)
-        os.environ.pop("SDLC_DB_QUERIES", None)
+        # Point explicitly at the TRACKED template. The subject of these tests is what this repo
+        # ships, and on the box a `config/db_queries.local.json` exists and would otherwise be
+        # picked up — which would turn "what does a fresh clone do" into "what does their box do".
+        env = mock.patch.dict(os.environ,
+                              {"SDLC_DB_QUERIES": db_registry.template_path()})
+        env.start()
+        self.addCleanup(env.stop)
         self.cfg = db_registry.load()
 
     def test_the_shipped_config_parses(self):
@@ -671,7 +751,12 @@ class ShippedConfigTests(unittest.TestCase):
 
     def test_no_real_table_or_column_name_ships_in_this_repo(self):
         for name, spec in db_registry.queries(self.cfg).items():
-            self.assertEqual(spec.get("sql"), "?", name)
+            self.assertEqual(
+                spec.get("sql"), "?",
+                f"query {name!r} has a real statement in the git-TRACKED template. If this is the "
+                f"box: move your edits to config/db_queries.local.json (gitignored, picked up "
+                f"automatically) — an uncommitted change to the tracked file makes the next "
+                f"`git pull` refuse to update it and blocks the whole pull.")
             self.assertEqual(spec.get("columns"), ["?"], name)
 
     def test_the_shipped_environment_is_uat(self):

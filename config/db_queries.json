@@ -33,10 +33,24 @@
     "  SDLC_DB_SKILL。skill 目录本身【永远不要提交】—— 它叫什么、放在哪,这个仓库里一个字都不写。",
     "",
     "【⚠️ 这个文件本身:请用本地副本,不要直接改这一份】",
-    "  内网【推不了代码】,所以你们在盒子上改了这一份,下次 git pull 就会冲突或被覆盖。",
-    "  做法和 config/mcp_tools.json 完全一样:把真实配置放在一个【被 gitignore 的本地文件】里,",
-    "  用环境变量 SDLC_DB_QUERIES 指过去(例如 config/db_queries.local.json,已在 .gitignore 里)。",
-    "  仓库里这一份永远是【模板】:全是 \"?\",不含任何真实表名、列名、schema。"
+    "  这一份是【被 git 跟踪的模板】,永远全是 \"?\",不含任何真实表名、列名、schema。",
+    "",
+    "  盒子上请这样做,一条命令,不需要环境变量:",
+    "      cp config/db_queries.json config/db_queries.local.json      # 然后改这一份",
+    "  `config/db_queries.local.json` 已在 .gitignore 里,程序【自动优先读它】。",
+    "  (要放到别处也行:设 SDLC_DB_QUERIES 指过去,它优先级最高。)",
+    "",
+    "  为什么不能直接改这一份:内网【推不了代码】。改了它 = 一个被跟踪文件上的未提交改动,",
+    "  下一次 git pull 只要也要更新这个文件就会【整个拒绝拉取】—— 挡住的不只是这个配置,",
+    "  是那次 pull 里的所有修复,而且这边推不回来。",
+    "",
+    "  两件会被自动提醒的事(`db_query` 无参数调用时的 config_warnings 里):",
+    "    - 你在跟踪的模板里填了真 SQL → 明确告诉你搬到 .local.json 去;",
+    "    - 你的本地副本缺少模板后来新增的命名查询 → 列出缺哪几条(是替换不是合并)。",
+    "",
+    "  【本地副本不会削弱任何闸门】所有默认值都在代码里,配置只能收紧不能放松:",
+    "  哪怕整段漏掉 not_ready_exceptions / allowed_environments / max_rows_hard_cap / verify,",
+    "  行为也和填了一样。(RUNBOOK-58 的教训:SDLC_MCP_TOOLS 替换配置时悄悄作废了 deny list。)"
   ],
 
   "runner": {

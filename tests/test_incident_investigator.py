@@ -104,7 +104,12 @@ class AppNameTests(unittest.TestCase):
                                  "confidence": "confirmed"}])
 
     def test_a_missing_mapping_file_is_normal_not_an_error(self):
-        self.assertEqual(incident_plan._app_map(), {})
+        """An absent intranet-owned config directory must be a normal offline state."""
+        import os as _os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(_os, "getcwd", lambda: tmp):
+                self.assertEqual(incident_plan._app_map(), {})
 
     def test_either_filename_and_either_shape_is_accepted(self):
         """config/ is intranet-owned on a box that cannot push, and their gap analysis names this

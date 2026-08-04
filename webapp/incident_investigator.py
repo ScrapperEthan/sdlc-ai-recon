@@ -1157,11 +1157,27 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     # saying nothing about the logs must not silently suppress it.
     cloudwatch_notes = len(packet["not_investigated"])
 
-    if not query_plan.get("ok"):
-        # The metric branch ran (or recorded why it did not); the log branch cannot.
-        packet["not_investigated"].extend(query_plan.get("refusals") or [])
-        yield _step("refused", "日志分支不可运行（服务或时间窗不确定），只跑了指标分支",
-                    reasons=list(query_plan.get("refusals") or []))
+    # Recomputed here, not taken on trust. `query_plan` is a PARAMETER — a caller can hand in a
+    # plan this module did not build — so "the planner said ok" is not a guarantee about what is in
+    # `targets`. Same predicate as the planner uses, imported rather than re-implemented, because
+    # two copies of it are two things that can drift apart.
+    log_targets = incident_plan.runnable_log_targets(query_plan)
+    if not query_plan.get("ok") or not log_targets:
+        # The metric and Portal branches have already run (or recorded why they did not) and their
+        # results stay. What ends here is the LOG branch — and it ends before `log.list_apps`, which
+        # is the point: a repo the scope gate excluded must cost ZERO calls to production, not one
+        # metadata call and then a per-target discovery that there was nothing to ask for.
+        reasons = list(query_plan.get("refusals") or [])
+        if log_targets == [] and query_plan.get("targets"):
+            reasons.append(
+                "none of the identified targets resolves to a LogDream app that may be queried, so "
+                "the log branch made NO calls at all — not even an app listing. Read each target's "
+                "`app_note` for whether it was out of scope or simply unmapped; neither means the "
+                "logs were clean, because nothing was read.")
+        packet["not_investigated"].extend(reasons)
+        yield _step("refused", "日志分支不可运行（没有可查询的目标，或时间窗不确定），"
+                               "一次 LogDream 调用都没发",
+                    reasons=reasons, logdream_calls=0)
         yield {"type": "result", "packet": _finish(packet, counts)}
         return
 
@@ -1229,7 +1245,10 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
     # Only search sources that actually answered.
     query_plan["sources_searched"] = sorted(apps_by_source)
 
-    for target in query_plan["targets"]:
+    # `log_targets`, not `query_plan["targets"]`: a mixed input (one in-scope repo, one out) queries
+    # the in-scope one and does not try to resolve the other. The refused ones keep their `app_note`
+    # in the plan, so the answer can still say why they were left out.
+    for target in log_targets:
         # An app exists per SOURCE, not globally: the two sources hold different apps, so resolve the
         # candidate against each list and only query the sources that actually have it.
         match, on_sources = "", []

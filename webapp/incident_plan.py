@@ -295,6 +295,23 @@ def app_candidates(repo):
     return _in_scope(out)
 
 
+def runnable_log_targets(query_plan):
+    """The targets the LogDream branch can actually query: those with at least one app candidate.
+
+    ONE definition, used by the planner to decide `ok` and by the investigator to decide whether to
+    open a socket. Two copies of this predicate would be two things that can drift, and the shape of
+    that drift is the defect this exists to close: the planner says the branch is runnable, the
+    investigator agrees just long enough to make one metadata call, and then discovers per target
+    that there was never anything to query.
+
+    Takes a plan rather than reading module state on purpose — `investigate_events` accepts a
+    caller-supplied `query_plan`, so the investigator has to be able to run this on a plan it did
+    not build and does not trust.
+    """
+    return [target for target in (query_plan or {}).get("targets") or []
+            if isinstance(target, dict) and target.get("app_candidates")]
+
+
 def scope_refusal(repo):
     """Why `app_candidates` came back empty, in words a reader can act on — or "" if it did not.
 
@@ -702,7 +719,20 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
     # investigation went ahead untimed (intranet, 2026-07-31) — the refusal was reported while the
     # calls were made anyway, which is the worst of both: production reads, and an answer nobody
     # can scope.
-    out["ok"] = bool(out["targets"] or parsed["use_cases"]) and bool(out["window"])
+    #
+    # `targets` is NOT the test, and neither is `use_cases` (intranet, 2026-08-04). An out-of-scope
+    # repo still produces a target — kept deliberately, so the UI and the audit trail can show WHY
+    # it was refused — but its `app_candidates` are empty and there is nothing to query. Reading a
+    # non-empty `targets` as "runnable" meant `log.list_apps` fired against production for a repo
+    # the scope gate had already excluded: the gate stopped the file search and the log read, and
+    # then leaked one metadata call in front of them.
+    #
+    # `use_cases` was worse: nothing in this planner ever converts a use case into a repo/app
+    # target, so a use-case-only alert opened the log branch with literally nothing for it to do.
+    # If use-case -> repo/app resolution is built later, it belongs in `targets` with real
+    # candidates, and this line then picks it up for free.
+    out["log_targets"] = [target["repo"] for target in runnable_log_targets(out)]
+    out["ok"] = bool(out["log_targets"]) and bool(out["window"])
     # ANY branch alone is enough to be worth running. A CloudWatch failure must not break a log
     # investigation that works, the reverse holds too, and Portal must run on a tracking id ALONE —
     # no repo, no alarm, no time window. That last case is the whole point of the branch: the alert

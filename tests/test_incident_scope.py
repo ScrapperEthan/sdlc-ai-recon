@@ -15,6 +15,7 @@ out this repo's app name" both produce zero candidates, and they are not the sam
 is the system working; the second is a gap to close. Reporting them identically would make a
 deliberate restriction look like a defect, and a defect look like a decision.
 """
+import json
 import os
 import sys
 import unittest
@@ -22,7 +23,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from webapp import incident_plan  # noqa: E402
+from retriever import code as rcode, incident                       # noqa: E402
+from webapp import incident_investigator as inv, incident_plan, mcp_client  # noqa: E402
 
 PORTAL_REPO = "mc-hk-hase-portal-web"
 OTHER_REPO = "mc-hk-hase-csl-sms-deli-job"
@@ -171,6 +173,112 @@ class LogFileScopeTests(_ScopeCase):
     def test_an_empty_config_falls_back_rather_than_planning_nothing_to_read(self):
         self._apply(log_files={})
         self.assertEqual(incident_plan.preferred_log_files(), incident_plan.DEFAULT_LOG_FILES)
+
+
+class StrictZeroCallTests(_ScopeCase):
+    """Out of scope must cost ZERO calls to production — not one metadata call and then a discovery.
+
+    Intranet, 2026-08-04: the scope gate stopped `search_files` and `read` but leaked one
+    `log.list_apps` in front of them, because `plan.ok` was true whenever `targets` was non-empty
+    and an out-of-scope repo still produces a target (deliberately — the UI needs to show WHY it
+    was refused). `list_apps` runs before any per-target check, so the leak was structural rather
+    than a missing condition.
+
+    These are their three required regressions, plus the mixed case they asked to be sure about.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._apply(allowed_apps=["portal"], app_resolution_policy="explicit_mapping_only")
+        self.calls = []
+        patchers = [
+            mock.patch.object(inv.config, "MCP_ENABLED", True),
+            mock.patch.object(mcp_client, "call", self._record),
+            mock.patch.object(rcode, "search_code", lambda *a, **k: []),
+            # Every abstract arg mapped to a real parameter name, as the box's config has them.
+            # The shipped template still carries "?" placeholders, and an unwired arg is dropped —
+            # which would make this test assert on the arguments of calls that never carried any.
+            mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
+                "log.list_apps": {"args": {"source": "source"}},
+                "log.search_files": {"args": {"app": "app", "source": "source",
+                                              "keyword": "keyword"}},
+                "log.read": {"args": {"app": "app", "source": "source", "file": "file_name",
+                                      "mode": "read_mode", "keyword": "keyword",
+                                      "alert_time": "alert_time", "timezone": "timezone"}}}),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _record(self, operation, args=None, **_kw):
+        self.calls.append((operation, dict(args or {})))
+        if operation == "log.list_apps":
+            return {"ok": True, "text": json.dumps(
+                {"entries": [{"name": "portal", "entry_type": "dir"},
+                             {"name": "cslSmsDeli", "entry_type": "dir"}]})}
+        if operation == "log.search_files":
+            return {"ok": True, "text": json.dumps(["/apps/portal/log/exception.log"])}
+        return {"ok": True, "text": json.dumps(
+            {"lines": ["2026-07-30 03:15:01 ERROR CPUUtilization breach"],
+             "retrieval_method": "keyword", "line_count": 1})}
+
+    def _investigate(self, repos, use_cases=()):
+        parsed = {"identified": True,
+                  "repos": [{"repo": name, "confidence": "confirmed"} for name in repos],
+                  "use_cases": [{"use_case": uc} for uc in use_cases],
+                  "metric": "CPUUtilization", "notes": [], "environment": "prod",
+                  "times": [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
+                             "ambiguous": False, "normalized": "2026-07-30 03:15:00"}]}
+        with mock.patch.object(incident, "parse_alert", lambda *a, **k: parsed):
+            return inv.investigate("an alert at 2026-07-30 03:15 HKT")
+
+    def _ops(self):
+        return [operation for operation, _args in self.calls]
+
+    def test_1_an_out_of_scope_repo_with_a_valid_window_makes_no_calls_at_all(self):
+        packet = self._investigate([OTHER_REPO])
+        self.assertEqual(self._ops(), [], "an out-of-scope repo must not reach production")
+        self.assertEqual(packet["evidence"], [])
+        joined = " ".join(packet["not_investigated"])
+        self.assertTrue("explicit_mapping_only" in joined or "OUTSIDE the configured scope" in joined)
+
+    def test_2_a_use_case_alone_does_not_open_the_log_branch(self):
+        """`parsed["use_cases"]` used to make the plan runnable, but nothing converts a use case
+        into a repo/app target — so the branch opened with nothing to query and called `list_apps`
+        to find that out."""
+        packet = self._investigate([], use_cases=["M2101"])
+        self.assertEqual([op for op in self._ops() if op.startswith("log.")], [])
+        self.assertFalse(packet["plan"]["ok"])
+
+    def test_3_a_mixed_input_queries_the_in_scope_target_only(self):
+        packet = self._investigate([PORTAL_REPO, OTHER_REPO])
+        apps = {args.get("app") for operation, args in self.calls
+                if operation in ("log.search_files", "log.read")}
+        self.assertEqual(apps, {"portal"})
+        self.assertIn("log.list_apps", self._ops())        # legitimate now: there IS a target
+        self.assertTrue(packet["evidence"])
+        # The refused one still explains itself rather than vanishing.
+        notes = {t["repo"]: t.get("app_note", "") for t in packet["plan"]["targets"]}
+        self.assertIn(OTHER_REPO, notes)
+        self.assertTrue(notes[OTHER_REPO])
+
+    def test_the_plan_publishes_which_targets_are_runnable(self):
+        packet = self._investigate([PORTAL_REPO, OTHER_REPO])
+        self.assertEqual(packet["plan"]["log_targets"], [PORTAL_REPO])
+        self.assertEqual([t["repo"] for t in packet["plan"]["targets"]],
+                         [PORTAL_REPO, OTHER_REPO])       # both kept for the audit trail
+
+    def test_the_investigator_does_not_trust_a_supplied_plan(self):
+        """`query_plan` is a parameter — a caller can hand in a plan this module did not build.
+        `ok: true` with no runnable target must still make no calls."""
+        forged = {"ok": True, "any_runnable": True, "sources": ["hkp3"],
+                  "log_files": ["exception.log"], "refusals": [], "keywords": [{"term": "x"}],
+                  "window": {"alert_time": "2026-07-30 03:15:00", "timezone": "Asia/Hong_Kong"},
+                  "targets": [{"repo": OTHER_REPO, "app_candidates": [], "app_note": "out"}],
+                  "cloudwatch": {"runnable": False, "refusals": []},
+                  "portal": {"runnable": False, "refusals": []}}
+        list(inv.investigate_events("alert", query_plan=forged))
+        self.assertEqual(self._ops(), [])
 
 
 class ShippedScopeTests(unittest.TestCase):

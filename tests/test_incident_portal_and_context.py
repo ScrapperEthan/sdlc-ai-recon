@@ -256,6 +256,14 @@ class BranchIndependenceTests(unittest.TestCase):
         self.enabled = mock.patch.object(inv.config, "MCP_ENABLED", True)
         self.enabled.start()
         self.addCleanup(self.enabled.stop)
+        # Branch INDEPENDENCE, not scope. The shipped config is narrowed to one app, so without
+        # this the log branch here would correctly make zero calls and the test would be measuring
+        # the scope gate instead of the property it is named after. Scope has its own file.
+        scope = mock.patch.object(incident_plan, "logdream_scope", lambda: {
+            "allowed_apps": (), "allowed_sources": incident_plan.DEFAULT_LOG_SOURCES,
+            "policy": incident_plan.SCOPE_MAPPING_THEN_RULES})
+        scope.start()
+        self.addCleanup(scope.stop)
 
     def test_a_portal_explosion_leaves_the_log_branch_alone(self):
         calls = []

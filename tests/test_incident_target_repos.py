@@ -28,7 +28,19 @@ def _parsed(identified=False, repos=None, use_cases=None):
     return _fake
 
 
+# Pinned OPEN: these describe target RESOLUTION, not the deployment's scope, which is narrowed to
+# one app in the shipped config and has its own file (tests/test_incident_scope.py).
+def _open_scope():
+    return {"allowed_apps": (), "allowed_sources": incident_plan.DEFAULT_LOG_SOURCES,
+            "policy": incident_plan.SCOPE_MAPPING_THEN_RULES}
+
+
 class TargetRepoTests(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(incident_plan, "logdream_scope", _open_scope)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def _plan(self, parsed, **kwargs):
         with mock.patch.object(incident, "parse_alert", parsed), \
              mock.patch.object(incident, "known_repos", lambda repos=None: list(KNOWN)):

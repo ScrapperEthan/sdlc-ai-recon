@@ -49,6 +49,16 @@ def _body(lines, retrieval_method=None, count=None):
     return {"ok": True, "text": json.dumps(payload)}
 
 
+# These tests describe the CODE, not the deployment's scope. The shipped config is deliberately
+# narrowed to one app (`portal` on `hkp3`, intranet audit 2026-08-04), and grading behaviour against
+# whatever scope happens to be on disk would mean a config edit silently rewrites what the tests
+# claim. Pinned OPEN here, the same way sources and retention already are; the scope gate has its
+# own file, tests/test_incident_scope.py.
+def _open_scope():
+    return {"allowed_apps": (), "allowed_sources": incident_plan.DEFAULT_LOG_SOURCES,
+            "policy": incident_plan.SCOPE_MAPPING_THEN_RULES}
+
+
 class ValidatorTests(unittest.TestCase):
     """The gate itself, in isolation. `incident_parse` owns it so the console and the investigator
     cannot drift — the console showing `retrieval_method=tail` while the product caller still
@@ -154,6 +164,7 @@ class InvestigationTests(unittest.TestCase):
             mock.patch.object(config, "MCP_ENABLED", True),
             mock.patch.object(config, "INCIDENT_RAW_LOGS", False),
             mock.patch.object(incident_plan, "log_sources", lambda: ("hkl",)),
+            mock.patch.object(incident_plan, "logdream_scope", _open_scope),
             mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.list_apps": {"args": {"source": "source"}},
                 "log.search_files": {"args": {"app": "app", "source": "source",

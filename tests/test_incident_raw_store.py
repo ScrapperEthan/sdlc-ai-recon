@@ -27,6 +27,16 @@ LINES = ["2026-07-30 03:15:01 ERROR SmsDeliveryException CPUUtilization alice.wo
          "2026-07-30 03:15:02 WARN  CPUUtilization retry for 9123 4567"]
 
 
+# These tests describe the CODE, not the deployment's scope. The shipped config is deliberately
+# narrowed to one app (`portal` on `hkp3`, intranet audit 2026-08-04), and grading behaviour against
+# whatever scope happens to be on disk would mean a config edit silently rewrites what the tests
+# claim. Pinned OPEN here, the same way sources and retention already are; the scope gate has its
+# own file, tests/test_incident_scope.py.
+def _open_scope():
+    return {"allowed_apps": (), "allowed_sources": incident_plan.DEFAULT_LOG_SOURCES,
+            "policy": incident_plan.SCOPE_MAPPING_THEN_RULES}
+
+
 class _Store(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -137,6 +147,7 @@ class ModelStillNeverSeesRawTextTests(_Store):
         self._extra = [
             mock.patch.object(config, "MCP_ENABLED", True),
             mock.patch.object(incident_plan, "log_sources", lambda: incident_plan.DEFAULT_LOG_SOURCES),
+            mock.patch.object(incident_plan, "logdream_scope", _open_scope),
             mock.patch.object(inv.mcp_registry, "operations", lambda cfg=None: {
                 "log.list_apps": {"args": {"source": "source"}},
                 "log.search_files": {"args": {"app": "app", "source": "source"}},

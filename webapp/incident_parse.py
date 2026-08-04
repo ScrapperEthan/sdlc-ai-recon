@@ -580,6 +580,26 @@ _MAX_FILES_PER_SOURCE = int(os.environ.get("SDLC_INCIDENT_MAX_FILES", "2"))
 # Real names confirmed in RUNBOOK-55. Used only to RANK candidates that the server returned — never
 # to invent a file name, which is what hard-coding `otx_trace.log` amounted to.
 _PREFERRED_LOG_FILES = ("otx_trace.log", "exception.log", "sftp.log")
+
+
+def _ranking_preference():
+    """File names in preference order, from the intranet's config, else the built-in.
+
+    Read here rather than imported from `incident_plan`: these two are sibling leaves and neither
+    should acquire a dependency on the other over four lines of config lookup. Ranking-only, so a
+    name that no longer exists costs nothing — but following the config means the box can reorder
+    without a push, like every other name on their side.
+    """
+    declared = (mcp_registry.servers().get("logdream") or {}).get("log_files")
+    if not isinstance(declared, dict):
+        return _PREFERRED_LOG_FILES
+    names = [declared.get(key) for key in ("trace", "exception")]
+    other = declared.get("other")
+    if isinstance(other, (list, tuple)):
+        names.extend(other)
+    ordered = [str(name).strip() for name in names
+               if isinstance(name, str) and str(name).strip() not in ("", "?")]
+    return tuple(ordered) or _PREFERRED_LOG_FILES
 _FILE_TOKEN = re.compile(r"[\w./\\-]*\.log(?:[._-]?\d{6,8})?")
 
 
@@ -627,7 +647,7 @@ def select_log_files(text, alert_date="", limit=None, structured=None):
         # Same-day files first when the alert date is known, then the known log types, then shortest
         # (a bare `otx_trace.log` beats a rotated `otx_trace.log.20260701`).
         return (0 if alert_date and alert_date.replace("-", "") in base else 1,
-                next((i for i, known in enumerate(_PREFERRED_LOG_FILES) if known in base), 99),
+                next((i for i, known in enumerate(_ranking_preference()) if known in base), 99),
                 len(base))
 
     return sorted(cleaned, key=_rank)[:max(1, limit)]

@@ -37,24 +37,51 @@
           "description 由内网 2026-08-04 真机 probe 后填入。"
         ],
         "hkl": {
-          "query_by_default": true,
-          "description": "生产日志源;真机已见 exception / otx_trace / sftp 及日期轮转文件。97 个 app 目录。"
+          "query_by_default": false,
+          "description": "生产日志源;真机已见 exception / otx_trace / sftp 及日期轮转文件。97 个 app 目录。2026-08-04 审计:当前范围只用 hkp3,所以这个 source 暂时关掉(不是删除 —— 保留是为了让正确拼写留在记录里:是 hkl 字母 L,不是 hk1 数字一)。"
         },
         "hkp3": {
           "query_by_default": true,
-          "description": "生产日志源;与 hkl 内容不同,真机已见 exception / otx_trace 及日期轮转文件。92 个 app 目录。"
+          "description": "生产日志源;与 hkl 内容不同,真机已见 exception / otx_trace 及日期轮转文件。92 个 app 目录。⭐当前唯一在用的 source,范围内的 app 是 portal(/apps/portal/log)。"
         }
       },
       "log_files": {
-        "_note": "RUNBOOK-55 实测。注意真名是 otx_trace.log,不是同事 SKILL 里写的 trace.log。",
+        "_note": "RUNBOOK-55 实测。注意真名是 otx_trace.log,不是同事 SKILL 里写的 trace.log。2026-08-04:范围内的 portal 只有 exception 和 trace 两个,所以 other 清空 —— 查一个不存在的文件会白花一次查询预算,而它返回的拒绝会被读成『没日志』。",
         "trace": "otx_trace.log",
         "exception": "exception.log",
-        "other": [
-          "sftp.log"
-        ],
+        "other": [],
         "history_suffix": "_YYYYMMDD",
         "path_pattern": "/apps/<app>/log"
-      }
+      },
+      "_scope_README": [
+        "【范围闸门 —— 2026-08-04 内网审计 P0】",
+        "审计发现:候选 app 名过了 live app 列表的检查,不等于在范围内 ——",
+        "  列表只说明这个 app【存在】,不说明我们【被允许读它】。",
+        "  当时 hkp3 的 92 个 app 里,有 35 个不相关的 repo 能靠命名规则匹配上。",
+        "",
+        "所以范围是一道【单独的、先跑的】闸门,两个开关:",
+        "",
+        "  allowed_apps            : 只允许这些 app。留空 / 删掉 = 不限制(旧行为)",
+        "  app_resolution_policy   : explicit_mapping_only | mapping_then_rules",
+        "     explicit_mapping_only = 只认 config/logdream_app_map.json 里的显式映射,",
+        "                             没映射的 repo 直接 0 候选,【不按命名规则猜】",
+        "     mapping_then_rules    = 旧行为:先查映射,没有就按命名规则猜(默认)",
+        "",
+        "⭐【以后要加一个 app 怎么做】—— 两步,都在配置里,不用改代码、不用等外部推送:",
+        "  1. 把 repo→app 写进 config/logdream_app_map.json,例如",
+        "       {\"repo_to_app\": {\"mc-hk-hase-portal-web\": \"portal\",",
+        "                          \"mc-hk-hase-xxx-job\":    \"xxxApp\"}}",
+        "  2. 把新 app 名加进下面的 allowed_apps",
+        "  两步都做完才生效 —— 这是故意的:映射说『这个 repo 对应哪个 app』,",
+        "  白名单说『这个 app 我们现在允许读』,两件事分开才能一步步放开。",
+        "",
+        "拒绝时助手会明说是『范围之外』还是『映射缺失』—— 这两件事都产生 0 候选,",
+        "但一个是系统在正常工作,另一个是缺口,不能混为一谈。"
+      ],
+      "allowed_apps": [
+        "portal"
+      ],
+      "app_resolution_policy": "explicit_mapping_only"
     },
     "cloudwatch": {
       "url_env": "SDLC_MCP_CLOUDWATCH_URL",

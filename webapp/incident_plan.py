@@ -173,20 +173,107 @@ _MAX_KEYWORDS = 8
 
 # ---- the query plan -------------------------------------------------------------------------
 
+# ---- how far LogDream may be reached at all -----------------------------------------------------
+# The intranet's 2026-08-04 audit: today only ONE app is in scope (`portal` on `hkp3`), but the
+# candidate rule still let 35 unrelated repos match a name in that source's 92-app listing. Passing
+# the live-listing check is not the same as being in scope — the listing says an app EXISTS, not
+# that we are allowed to read it — so scope is now a separate gate that runs first.
+#
+# Both knobs live in `servers.logdream` in the intranet's config, and both DEFAULT TO OPEN: an
+# absent knob must behave exactly as before it existed, or pulling this change would silently narrow
+# a deployment nobody meant to narrow.
+SCOPE_MAPPING_ONLY = "explicit_mapping_only"
+SCOPE_MAPPING_THEN_RULES = "mapping_then_rules"
+
+# Which files are worth reading, in preference order. Config-first for the same reason every other
+# name here is: it is THEIR filesystem. `sftp.log` was in the built-in list from RUNBOOK-55 and the
+# app now in scope does not have one (owner, 2026-08-04) — a file that does not exist costs a query
+# out of the budget and comes back as a rejection, and a rejection read as "no lines" reads as
+# "no problem".
+DEFAULT_LOG_FILES = ("otx_trace.log", "exception.log")
+
+
+def preferred_log_files():
+    """Log file names to try, from `servers.logdream.log_files` in the intranet config.
+
+    Reads the named roles (`trace`, `exception`) plus anything under `other`, so the box can add a
+    file without this side knowing what it is called.
+    """
+    declared = (mcp_registry.servers().get("logdream") or {}).get("log_files")
+    if not isinstance(declared, dict):
+        return DEFAULT_LOG_FILES
+    names = []
+    for key in ("trace", "exception"):
+        value = declared.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() != "?":
+            names.append(value.strip())
+    other = declared.get("other")
+    if isinstance(other, (list, tuple)):
+        names.extend(str(name).strip() for name in other
+                     if str(name).strip() and str(name).strip() != "?")
+    # Order preserved, duplicates dropped. An empty/unfilled config falls back rather than
+    # producing a plan with nothing to read.
+    seen, unique = set(), []
+    for name in names:
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            unique.append(name)
+    return tuple(unique) or DEFAULT_LOG_FILES
+
+
+def logdream_scope():
+    """`{allowed_apps, allowed_sources, policy}` — the hard scope, from the intranet's config.
+
+    `allowed_apps` empty means no app restriction. `policy` of `explicit_mapping_only` means a repo
+    with no entry in the intranet's app map yields NOTHING: the naming rule is a good guess and a
+    good guess is exactly what must not reach production when the scope is one named app.
+    """
+    spec = mcp_registry.servers().get("logdream") or {}
+    declared = spec.get("allowed_apps")
+    allowed = tuple(str(name).strip() for name in declared
+                    if str(name).strip()) if isinstance(declared, (list, tuple)) else ()
+    policy = str(spec.get("app_resolution_policy") or "").strip().lower()
+    return {
+        "allowed_apps": allowed,
+        # Which sources may be touched AT ALL, as opposed to which are queried by default. A
+        # drill-down (`sources=[...]`) is a caller-supplied value and must not be able to reach a
+        # source the intranet switched off.
+        "allowed_sources": tuple(log_sources()),
+        "policy": policy if policy in (SCOPE_MAPPING_ONLY, SCOPE_MAPPING_THEN_RULES)
+        else SCOPE_MAPPING_THEN_RULES,
+    }
+
+
 def app_candidates(repo):
     """Repo id -> candidate LogDream app names, with how each was derived.
 
     RUNBOOK-55: 0% are identical, ~36% resolve by rule. So these are candidates to be checked
     against the server's own app list, never answers. An intranet-owned mapping wins when present;
     absent, the built-in rule applies — the box owns that file and cannot push it here.
+
+    Scope is applied HERE rather than at the query, so a repo outside it produces no candidates at
+    all and the plan says so, instead of producing a candidate that then quietly fails a check
+    further down where the reason is harder to read.
     """
     repo = (repo or "").strip()
     if not repo:
         return []
+    scope = logdream_scope()
+    allowed = {name.lower() for name in scope["allowed_apps"]}
+
+    def _in_scope(entries):
+        return [entry for entry in entries if not allowed or entry["app"].lower() in allowed]
+
     mapped = _app_map().get(repo.lower())
     if mapped:
-        return [{"app": mapped, "how": "config/logdream_apps.json (intranet-owned mapping)",
-                 "confidence": "confirmed"}]
+        return _in_scope([{"app": mapped,
+                           "how": "config/logdream_apps.json (intranet-owned mapping)",
+                           "confidence": "confirmed"}])
+    if scope["policy"] == SCOPE_MAPPING_ONLY:
+        # No mapping, and the intranet has said mappings are the only way in. The naming rule is
+        # not consulted: its whole job is to guess, and a guess that happens to name a real app in
+        # the listing would read as a confirmed target.
+        return []
     stem = repo
     for prefix in ("mc-hk-hase-", "amet-mdc-", "mc-hk-"):
         if stem.startswith(prefix):
@@ -205,7 +292,32 @@ def app_candidates(repo):
     if stem != camel:
         out.append({"app": stem, "how": "rule: drop org prefix + role suffix only",
                     "confidence": "candidate"})
-    return out
+    return _in_scope(out)
+
+
+def scope_refusal(repo):
+    """Why `app_candidates` came back empty, in words a reader can act on — or "" if it did not.
+
+    The distinction that has to survive: "we could not work out this repo's app name" and "this repo
+    is outside the scope somebody deliberately set" are different situations. The first is a gap to
+    close; the second is the system working. Both produce zero candidates.
+    """
+    repo = (repo or "").strip()
+    if not repo or app_candidates(repo):
+        return ""
+    scope = logdream_scope()
+    mapped = _app_map().get(repo.lower())
+    if mapped and scope["allowed_apps"]:
+        return (f"{repo} maps to LogDream app {mapped!r}, which is OUTSIDE the configured scope "
+                f"({', '.join(scope['allowed_apps'])}). It was not queried. This is a deliberate "
+                f"restriction in the intranet's config, NOT a missing mapping and NOT an empty log.")
+    if scope["policy"] == SCOPE_MAPPING_ONLY:
+        return (f"{repo} has no entry in the intranet's LogDream app map, and the configured policy "
+                f"is {SCOPE_MAPPING_ONLY!r} — so no app name was guessed from the repo name and "
+                f"nothing was queried. Add the mapping to config/logdream_app_map.json to include "
+                f"it. A guessed name that happens to exist on the server would read as a confirmed "
+                f"target, which is why it is refused instead.")
+    return ""
 
 
 # Both spellings are accepted. The intranet's own gap analysis calls this file
@@ -317,9 +429,8 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         "targets": [],
         "keywords": [],
         "window": None,
-        "sources": [str(s).strip() for s in (sources or ()) if str(s).strip()]
-                   or list(log_sources()),
-        "log_files": ["otx_trace.log", "exception.log"],
+        "sources": [],       # filled in below, after the caller's request meets the scope gate
+        "log_files": list(preferred_log_files()),
         "refusals": [],
         # The CloudWatch half. Kept separate so either branch can run when the other cannot: an
         # unresolvable alarm name must not block a log investigation that is ready to go, and an
@@ -334,13 +445,26 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
         "portal": {"runnable": False, "tracking_id": "", "tracking_id_source": "",
                    "channel": "auto", "refusals": []},
     }
-    if out["sources"] != list(log_sources()):
+    # A caller-supplied `sources` is a drill-down, not an override. It may NARROW the configured set
+    # and nothing else: a source the intranet switched off (`query_by_default: false`) is off, and a
+    # name the model invented is not a source at all. Before this, both went straight to the wire.
+    allowed_sources = list(log_sources())
+    asked = [str(name).strip() for name in (sources or ()) if str(name).strip()]
+    out_of_scope = [name for name in asked if name not in allowed_sources]
+    out["sources"] = [name for name in asked if name in allowed_sources] or allowed_sources
+    if out_of_scope:
+        out["refusals"].append(
+            "these log sources were requested but are not in the configured set, so they were NOT "
+            "queried: %s. The configured sources are %s. A source that is switched off or "
+            "misspelled returns a rejection, and a rejection read as 'no lines' reads as "
+            "'no problem'." % (", ".join(sorted(out_of_scope)), ", ".join(allowed_sources)))
+    if out["sources"] != allowed_sources:
         # Built from the configured source names, never a literal: the last time these were spelled
         # out by hand the text said `hk1` where the server accepts `hkl`.
         out["sources_note"] = (
             "sources narrowed by the caller. %s are ALL production with different content, so a "
             "single-source result covers less than the default — say which one was searched."
-            % " and ".join(log_sources()))
+            % " and ".join(allowed_sources))
     identified = bool(parsed["identified"])
 
     # Repos the CALLER already knows are involved. Checked against the universe the text scan uses:
@@ -397,8 +521,20 @@ def plan(alert_text, repos=None, timezone=None, keywords=None, sources=None, ale
             target["app_note"] = ("repo universe unavailable (index/repo_tags.json missing), so "
                                   "this caller-supplied id could not be confirmed to exist")
         if not target["app_candidates"]:
-            target["app_note"] = ("no LogDream app name could be derived from this repo id; "
-                                  "an intranet mapping is needed (config/logdream_apps.json)")
+            # "outside a scope somebody set" and "we could not work out the name" are different
+            # situations that both produce zero candidates. The first is the system working; the
+            # second is a gap to close. Reporting them as one would make a deliberate restriction
+            # look like a defect, and a defect look like a decision.
+            refusal = scope_refusal(repo)
+            note = refusal or ("no LogDream app name could be derived from this repo id; "
+                               "an intranet mapping is needed (config/logdream_apps.json)")
+            # APPENDED, not assigned. `app_note` may already say the repo universe was unavailable
+            # so this id could not be confirmed to exist — a different fact from the scope one, and
+            # overwriting it would drop the reason the caller most needs to hear.
+            target["app_note"] = f"{target['app_note']}; {note}" if target["app_note"] else note
+            target["out_of_scope"] = bool(refusal)
+            if refusal:
+                out["refusals"].append(refusal)
         out["targets"].append(target)
 
         for topic in (msg.routes_for_repo(repo) or [])[:4]:

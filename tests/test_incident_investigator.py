@@ -37,6 +37,16 @@ SECRETS = ("alice.wong@example.com", "9123 4567", "4123456789012345", "A1234567"
            "MDCTRACK-9F2K-88H1")
 
 
+# These tests describe the CODE, not the deployment's scope. The shipped config is deliberately
+# narrowed to one app (`portal` on `hkp3`, intranet audit 2026-08-04), and grading behaviour against
+# whatever scope happens to be on disk would mean a config edit silently rewrites what the tests
+# claim. Pinned OPEN here, the same way sources and retention already are; the scope gate has its
+# own file, tests/test_incident_scope.py.
+def _open_scope():
+    return {"allowed_apps": (), "allowed_sources": incident_plan.DEFAULT_LOG_SOURCES,
+            "policy": incident_plan.SCOPE_MAPPING_THEN_RULES}
+
+
 class RedactionTests(unittest.TestCase):
     def test_every_pii_shape_is_replaced_by_a_marker(self):
         counts = {}
@@ -94,6 +104,14 @@ class RedactionTests(unittest.TestCase):
 
 
 class AppNameTests(unittest.TestCase):
+    """Name DERIVATION, with the scope gate held open. What the scope gate does to these candidates
+    is a separate question with its own file (tests/test_incident_scope.py)."""
+
+    def setUp(self):
+        patch = mock.patch.object(incident_plan, "logdream_scope", _open_scope)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_a_rule_derived_name_is_a_candidate_never_an_answer(self):
         """RUNBOOK-55 measured repo->app at 0% identical and ~36% by rule."""
         got = incident_plan.app_candidates("mc-hk-hase-csl-sms-deli-job")
@@ -228,6 +246,8 @@ class InvestigateTests(unittest.TestCase):
         # these tests describe the CODE, and must not be graded against whatever config is on disk.
         self._sources = mock.patch.object(incident_plan, "log_sources", lambda: incident_plan.DEFAULT_LOG_SOURCES)
         self._sources.start()
+        self._scope = mock.patch.object(incident_plan, "logdream_scope", _open_scope)
+        self._scope.start()
         # Mirrors what the intranet will fill in: every abstract arg mapped to a real parameter name.
         self._ops = mock.patch.object(
             inv.mcp_registry, "operations",
@@ -267,7 +287,7 @@ class InvestigateTests(unittest.TestCase):
 
     def tearDown(self):
         for patcher in (self._search, self._parse, self._mcp, self._ops, self._sources,
-                        self._raw, self._flag):
+                        self._scope, self._raw, self._flag):
             patcher.stop()
 
     def test_no_planted_secret_appears_anywhere_in_the_packet(self):

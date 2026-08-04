@@ -191,14 +191,21 @@ python -c "import json;d=json.load(open('evals/last_run.json',encoding='utf-8'))
 上面四条送回来的**真实回答原文**已经作为 fixture 固化在
 `tests/test_evals_runner.py::QuotedDenialIsNotAClaimTests` —— 这个 checker 再也退不回去。
 
-### 那个数：45 → 50
+### 那个数：45 → 50，以及一次二次修正
 
 我**没有**把 50 硬写进 case。那个数会漂（业务表在长），把它钉死等于下次再红一次。
-换成断言那条不会漂的性质：**MDC 成员资格是业务表 / MDC-Common 标记确认的，不是按仓库名匹配的**——
-这也正是那个数字之所以站得住的原因。
 
-> ⚠️ 仍待确认：RUNBOOK-47 Part C 那 **+2 个图邻接候选**（tracking-job 强、portal-backend 弱）
-> 现在算不算进了这 50？如果算进去了，"业务确认"这个说法就需要重新措辞。**这条只有你们能答。**
+**但我第一版的措辞也不对。** 内网 2026-08-04 指出："全部经业务确认"对这 50 个来说**仍然过宽**——
+其中 **24 个是靠名称族进来的**（`via=amet-mdc-prefix`），不是业务表标记的。两半的来源不一样，
+用一句话盖住等于把其中一半的出处说错了。
+
+现在的措辞（case 也已改名为 `scope-mdc-membership-is-explicitly-sourced`）：
+
+> 当前 primary MDC scope 是**显式来源的并集**：24 个 `amet-mdc-*` 名称族成员
+> （`via=amet-mdc-prefix`）+ 26 个业务表 `mdc_common` 标记成员。
+> **RUNBOOK-47 那 2 个 graph-adjacent 候选没有计入这 50。**
+
+断言的是那条不会漂的性质：**每一个成员都说得出是哪个来源把它放进来的**。数字不断言。
 
 ### 下次跑的期望值
 

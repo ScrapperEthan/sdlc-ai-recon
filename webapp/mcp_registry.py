@@ -211,6 +211,38 @@ PAYLOAD_OPERATIONS = frozenset({
     "portal.sms_by_tracking_id", "portal.email_by_tracking_id",
 })
 
+# WHO may call an operation, as opposed to whether it is wired. The intranet's 2026-08-04 handoff
+# asked for this and attached the condition that makes it worth having: "these fields must actually
+# be enforced by the engine, not just used for UI text." So this is a gate in `build_call`, and the
+# panel reads the same values it enforces.
+#
+#   enabled      the product caller (the investigator) may use it, and so may the console
+#   manual_only  console/human diagnosis ONLY. Mapped, callable by hand, never in an evidence chain
+#   disabled     mapped so the name stays cross-checkable, but nothing may call it
+#
+# The defaults below encode decisions already made and paid for, not preferences:
+#   * `log.investigate` — its `candidate_files` is a hint, not an allow-list: pass one file and it
+#     reads four, and an impossible keyword returns byte-identical output to no keyword at all. It
+#     cannot be held to a query budget or a file boundary, so it stays out of the evidence chain.
+#   * `log.browse`      — takes a raw path, which is a way around the app/file verification the
+#     list_apps -> search_files -> read chain exists to enforce.
+#   * `aws.parse_alert` — their parser will hand back a whole paragraph as an alarm name; the alarm
+#     name is extracted locally instead (RUNBOOK-64).
+CALLER_ENABLED, CALLER_MANUAL, CALLER_DISABLED = "enabled", "manual_only", "disabled"
+CALLER_POLICIES = (CALLER_ENABLED, CALLER_MANUAL, CALLER_DISABLED)
+_CALLER_POLICY = {
+    "log.browse": CALLER_MANUAL,
+    "log.investigate": CALLER_MANUAL,
+    "aws.parse_alert": CALLER_MANUAL,
+}
+
+# Known ways a remote tool answers a different question than the one asked. Surfaced in the panel
+# and carried on the operation, so "wired" is never mistaken for "safe to believe".
+_SEMANTIC_WARNINGS = {
+    "log.read": ["keyword_falls_back_to_tail"],
+    "log.investigate": ["candidate_files_is_a_hint_not_an_allow_list", "keyword_not_applied"],
+}
+
 _SERVER_PURPOSE = {
     "logdream": "同事的应用日志服务：按 app / source 浏览、搜索、读取生产日志文件。",
     "cloudwatch": "AWS 侧：告警定义与历史、指标窗口、CloudTrail 变更、日志组查询、资源 tag。",
@@ -266,11 +298,37 @@ def catalog(cfg=None):
             "const_keys": sorted(_clean(spec.get("const"))),
             "note": _prose(spec.get("_note")),
             "callable": state.get("state") == "ready" or state.get("state") == "partial",
+            # Three separate questions, deliberately not one number. "15/15" only ever meant the
+            # names and arguments are mapped; it never meant the remote implementation honours the
+            # parameters, nor that a caller is wired to it (intranet, 2026-08-04).
+            "caller_policy": caller_policy(name, cfg),
+            "semantic_warnings": semantic_warnings(name, cfg),
         }
 
+    wired = sum(1 for entry in ops.values() if entry["state"] == "ready")
     out = {
         "servers": {},
         "operations": ops,
+        # The three layers the panel shows instead of one ratio. `evidence_safe` counts operations
+        # that are wired, product-callable, AND carry no known semantic warning — `log.read` is
+        # deliberately NOT in it while its keyword search can silently answer with the file's tail,
+        # even though the investigator now refuses those reads.
+        "layers": {
+            "wired": wired,
+            "caller": sum(1 for name, entry in ops.items()
+                          if entry["state"] == "ready"
+                          and entry["caller_policy"] == CALLER_ENABLED),
+            "evidence_safe": sum(1 for name, entry in ops.items()
+                                 if entry["state"] == "ready"
+                                 and entry["caller_policy"] == CALLER_ENABLED
+                                 and not entry["semantic_warnings"]),
+            "manual_only": sum(1 for entry in ops.values()
+                               if entry["caller_policy"] == CALLER_MANUAL),
+            "disabled": sum(1 for entry in ops.values()
+                            if entry["caller_policy"] == CALLER_DISABLED),
+            "with_warnings": sum(1 for entry in ops.values() if entry["semantic_warnings"]),
+            "total": len(ops),
+        },
         "calling_enabled": bool(webapp_config.MCP_ENABLED),
         "config_error": cfg.get("_load_error", ""),
         "config_path": _config_path(),
@@ -300,17 +358,53 @@ def catalog(cfg=None):
     return out
 
 
-def build_call(operation, args=None, cfg=None):
+def caller_policy(operation, cfg=None):
+    """`enabled` / `manual_only` / `disabled` for one operation. Config first, built-in fallback."""
+    spec = operations(cfg).get(operation) or {}
+    declared = str(spec.get("caller_policy") or "").strip().lower()
+    if declared in CALLER_POLICIES:
+        return declared
+    return _CALLER_POLICY.get(operation, CALLER_ENABLED)
+
+
+def semantic_warnings(operation, cfg=None):
+    """Known ways this tool answers a different question than the one asked."""
+    spec = operations(cfg).get(operation) or {}
+    declared = spec.get("semantic_warnings")
+    if isinstance(declared, (list, tuple)):
+        return [str(item) for item in declared]
+    return list(_SEMANTIC_WARNINGS.get(operation, ()))
+
+
+def build_call(operation, args=None, cfg=None, caller="product"):
     """Translate one abstract call into (server, tool, their_params).
 
     Raises rather than improvising: an incident answer built on a wrongly-named parameter is worse
-    than an answer that says the integration is not ready."""
+    than an answer that says the integration is not ready.
+
+    `caller` is which surface is asking — `product` (the investigator, whose results become evidence
+    a model reads) or `console` (a human clicking a button and reading the answer themselves). It is
+    what makes `manual_only` mean something: an operation whose result cannot be trusted as evidence
+    can still be genuinely useful for diagnosis, and the two need different answers.
+    """
     cfg = cfg or load()
     spec = operations(cfg).get(operation)
     if not isinstance(spec, dict):
         raise NotAllowed(
             f"unknown MCP operation: {operation!r}. Only operations declared in "
             f"config/mcp_tools.json may be called; discovery via tools/list grants no access.")
+
+    policy = caller_policy(operation, cfg)
+    if policy == CALLER_DISABLED:
+        raise NotAllowed(
+            f"operation {operation!r} has caller_policy 'disabled': it is mapped so its name stays "
+            f"cross-checkable against tools/list, but nothing may call it.")
+    if policy == CALLER_MANUAL and caller != "console":
+        warnings = semantic_warnings(operation, cfg)
+        raise NotAllowed(
+            f"operation {operation!r} is 'manual_only': available for human diagnosis in the MCP "
+            f"console, never in an evidence chain"
+            + (f" ({', '.join(warnings)})" if warnings else "") + ".")
 
     tool = spec.get("tool") or ""
     if _denied(tool, cfg):

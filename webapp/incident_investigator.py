@@ -1432,13 +1432,28 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, keyword=term, file=log_file,
                             elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
-            # Structured body -> the actual log-line fields. Splitting the JSON source counted 11
-            # "lines" for a 2-line response (intranet, 2026-07-31), and every number downstream —
-            # lines_seen, exception classes, excerpts, the retained raw — was computed off that.
-            lines, reported, shape_error = incident_parse.extract_log_lines(text, out.get("structured"))
-            if lines is None:
+            # Structured body -> the actual log-line fields, THEN the semantic gate. Splitting the
+            # JSON source counted 11 "lines" for a 2-line response (intranet, 2026-07-31), and every
+            # number downstream was computed off that; asking for a keyword and being handed the
+            # tail of the file (intranet, 2026-08-04) is the same class of defect one level up —
+            # a real response answering a different question than the one we asked.
+            verdict = incident_parse.validate_log_read_semantics(
+                out, requested_mode=READ_MODE_BACKTRACK if alert_at else "",
+                requested_keyword=term)
+            # Their own count only. The LINES deliberately do not get a local name here: the only
+            # ones allowed past this point are `verdict["literal_matches"]`, and a stray `lines`
+            # in scope is how the unverified set finds its way back into an evidence call.
+            reported = verdict["reported_count"]
+            # Recorded on the attempt itself: the call SUCCEEDED, and separately, whether anything
+            # it returned was allowed to become evidence. Those are different facts and the intranet
+            # asked for both (`evidence_accepted=false` alongside a successful query).
+            attempt["read_outcome"] = verdict["outcome"]
+            attempt["evidence_accepted"] = verdict["evidence_accepted"]
+            if verdict["actual_method"]:
+                attempt["retrieval_method"] = verdict["actual_method"]
+            if verdict["outcome"] == "unreadable":
                 packet["not_investigated"].append(
-                    f"{match}/{source}:{log_file} keyword {term!r}: {shape_error} The query "
+                    f"{match}/{source}:{log_file} keyword {term!r}: {verdict['error']} The query "
                     f"SUCCEEDED — this is our parser, not an empty log, so do not report it as "
                     f"'nothing found'.")
                 yield _step("query_unreadable",
@@ -1448,17 +1463,60 @@ def investigate_events(alert_text, repos=None, timezone=None, query_plan=None, k
                             app=match, source=source, keyword=term, file=log_file,
                             shape_error=True, elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
-            if not lines:
+            if verdict["outcome"] == "semantic_downgrade":
+                # They ran a keyword search, found nothing, and returned the tail of the file
+                # instead of an empty result. Accepting those lines would rename a fallback into a
+                # hit. Loud, because it is a wiring/contract problem worth someone fixing — and
+                # explicitly NOT "no anomaly", which is what silence here would read as.
+                packet["not_investigated"].append(
+                    f"{match}/{source}:{log_file} keyword {term!r}: the log service DOWNGRADED the "
+                    f"keyword read to `{verdict['actual_method']}` and returned "
+                    f"{len(verdict['context_lines'])} unrelated line(s). Those are not keyword "
+                    f"evidence and were discarded. This is a tool-contract problem, NOT a finding, "
+                    f"and NOT 'no errors in the log' — nothing was searched for {term!r}.")
+                packet["caveats"].append(
+                    "the log tool answers a keyword search it cannot satisfy with the tail of the "
+                    "file; those reads were refused rather than reported as hits")
+                yield _step("query_downgraded",
+                            "%s / %s / %s：%s 没命中，服务端改成了 %s 回了尾部内容 —— 不作为证据" % (
+                                match, source, log_file, term, verdict["actual_method"] or "tail"),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term, file=log_file,
+                            retrieval_method=verdict["actual_method"], semantic_downgrade=True,
+                            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
+                continue
+            if verdict["outcome"] in ("time_context", "tail_context"):
+                # Real lines around the alert, but none of them contains the term. Useful to a human
+                # reading the file; not a match, and never counted as one.
+                packet["not_investigated"].append(
+                    f"{match}/{source}:{log_file} keyword {term!r}: the read returned "
+                    f"{len(verdict['context_lines'])} line(s) of "
+                    f"{'time-window' if verdict['outcome'] == 'time_context' else 'tail'} context, "
+                    f"none of which contains {term!r}. Context is not a hit — this keyword has NOT "
+                    f"been confirmed present in this file.")
+                yield _step("query_context_only",
+                            "%s / %s / %s：拿到 %d 行时间/尾部上下文，但没有一行含 %s" % (
+                                match, source, log_file, len(verdict["context_lines"]), term),
+                            server="logdream", operation="log.read",
+                            app=match, source=source, keyword=term, file=log_file,
+                            retrieval_method=verdict["actual_method"], context_only=True,
+                            elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
+                continue
+            if verdict["outcome"] == "no_match":
                 yield _step("query_empty", "%s / %s / %s：%s 无匹配" % (
                     match, source, log_file, term),
                             server="logdream", operation="log.read",
                             app=match, source=source, keyword=term, file=log_file,
+                            retrieval_method=verdict["actual_method"],
                             elapsed_ms=out.get("elapsed_ms"), **_transport_meta(out))
                 continue
+            # Only the LOCALLY CONFIRMED lines become evidence — not everything the read returned.
+            # A response that is half matches and half surrounding context must not have the context
+            # counted into `lines_seen` or scanned for exception classes.
             # The file ACTUALLY read, not a hard-coded name: mislabelling `exception.log` as
             # `otx_trace.log` would misdirect whoever goes to check it.
-            item = _evidence_from_lines(lines, term, source, match, log_file, counts,
-                                        owner=owner, window=query_plan.get("window"),
+            item = _evidence_from_lines(verdict["literal_matches"], term, source, match, log_file,
+                                        counts, owner=owner, window=query_plan.get("window"),
                                         reported_count=reported)
             packet["evidence"].append(item)
             packet["contains_production_data"] = True

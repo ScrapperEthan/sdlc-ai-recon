@@ -103,7 +103,10 @@ def run(operation, args=None, owner=""):
     args = {key: value for key, value in (args or {}).items() if value not in (None, "")}
 
     try:
-        out = mcp_client.call(operation, args)
+        # `caller="console"` is what makes `manual_only` a real policy rather than a label: an
+        # operation whose result cannot be trusted as evidence can still be genuinely useful to a
+        # human reading it directly, and this is the surface where that is true.
+        out = mcp_client.call(operation, args, caller="console")
     except (mcp_registry.NotAllowed, mcp_registry.NotWired, mcp_client.Disabled) as exc:
         # A refusal by our own rules. Nothing was sent; say which rule and stop.
         return {"ok": False, "operation": operation, "called": False,
@@ -154,6 +157,25 @@ def run(operation, args=None, owner=""):
         "shape": incident_parse.describe_response(out, operation),
         "timezone_warning": out.get("timezone_warning") or "",
     }
+
+    # The SAME semantic gate the investigator applies, run here too and reported as a verdict rather
+    # than as raw lines. A console that displayed `retrieval_method: tail` while the product caller
+    # went on consuming those lines as a keyword hit is the exact split the intranet flagged on
+    # 2026-08-04; one rule, one place, both callers.
+    if operation == "log.read":
+        verdict = incident_parse.validate_log_read_semantics(
+            out, requested_mode=str(args.get("mode") or ""),
+            requested_keyword=str(args.get("keyword") or ""))
+        result["read_semantics"] = {
+            "outcome": verdict["outcome"],
+            "actual_method": verdict["actual_method"],
+            "evidence_accepted": verdict["evidence_accepted"],
+            "semantic_downgrade": verdict["semantic_downgrade"],
+            # Counts only. The lines themselves are already in `text` above, redacted; repeating
+            # them here would just be a second copy to keep in step.
+            "lines_returned": len(verdict["lines"] or []),
+            "literal_matches": len(verdict["literal_matches"]),
+        }
 
     # Click-through to the unredacted original, on exactly the terms the investigator's already has:
     # only when SDLC_INCIDENT_RAW_LOGS is on, only into the owner-scoped store, TTL'd and purgeable.

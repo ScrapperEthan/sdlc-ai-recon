@@ -205,6 +205,146 @@ class InvocationGateTests(ConsoleTestCase):
         self.assertFalse(result.get("transport_failure"))
 
 
+class CallerPolicyTests(ConsoleTestCase):
+    """`caller_policy` is a gate, not a label.
+
+    The intranet attached a condition to asking for these fields (2026-08-04): "they must actually
+    be enforced by the engine, not just used for UI text." A `manual_only` badge over an operation
+    the investigator can still call would be worse than no badge — it would document a guarantee
+    that does not exist.
+    """
+
+    POLICY_CONFIG = dict(CONFIG, operations=dict(
+        CONFIG["operations"],
+        **{"log.browse": {"server": "logdream", "tool": "browse_logdream",
+                          "args": {"path": "path"}, "caller_policy": "manual_only"},
+           "log.frozen": {"server": "logdream", "tool": "frozen_tool",
+                          "args": {}, "caller_policy": "disabled"}}))
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(mcp_registry, "load",
+                                  lambda: json.loads(json.dumps(self.POLICY_CONFIG)))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_the_product_caller_is_refused_a_manual_only_operation(self):
+        session = _FakeSession(_tool_result("ok"))
+        with mock.patch.object(mcp_client, "_session", lambda *a, **k: session):
+            with self.assertRaises(mcp_registry.NotAllowed) as caught:
+                mcp_client.call("log.browse", {"path": "/apps/x/log"})
+        self.assertIn("manual_only", str(caught.exception))
+        self.assertEqual(session.calls, [], "a refused operation must never reach the wire")
+
+    def test_the_console_may_call_the_same_operation(self):
+        """That is the entire point of the distinction: a result that cannot be trusted as evidence
+        can still be useful to a human reading it directly."""
+        result, session = self._run("log.browse", {"path": "/apps/x/log"})
+        self.assertTrue(result["called"])
+        self.assertTrue(session.calls)
+
+    def test_a_disabled_operation_is_refused_from_both_surfaces(self):
+        session = _FakeSession(_tool_result("ok"))
+        with mock.patch.object(mcp_client, "_session", lambda *a, **k: session):
+            with self.assertRaises(mcp_registry.NotAllowed):
+                mcp_client.call("log.frozen", {})
+            result = mcp_console.run("log.frozen", {})
+        self.assertFalse(result["called"])
+        self.assertEqual(session.calls, [])
+
+    def test_a_caller_that_forgets_to_identify_itself_gets_the_strict_answer(self):
+        """`caller` defaults to `product`. Forgetting to pass it must fail closed."""
+        with self.assertRaises(mcp_registry.NotAllowed):
+            mcp_registry.build_call("log.browse", {"path": "/x"})
+
+    def test_an_unknown_policy_value_falls_back_to_the_built_in_not_to_open(self):
+        cfg = json.loads(json.dumps(self.POLICY_CONFIG))
+        cfg["operations"]["log.browse"]["caller_policy"] = "probably_fine"
+        with mock.patch.object(mcp_registry, "load", lambda: cfg):
+            # log.browse is manual_only in the built-in table, so a junk value must not open it.
+            self.assertEqual(mcp_registry.caller_policy("log.browse"), "manual_only")
+
+    def test_the_catalog_counts_the_three_layers_separately(self):
+        """"15/15" only ever meant the names are mapped. Reporting it as one number is what let it
+        be read as "15 operations you can trust"."""
+        layers = mcp_console.catalog()["layers"]
+        self.assertEqual(layers["total"], len(self.POLICY_CONFIG["operations"]))
+        self.assertGreaterEqual(layers["wired"], layers["caller"])
+        self.assertGreaterEqual(layers["caller"], layers["evidence_safe"])
+        self.assertEqual(layers["manual_only"], 1)
+        self.assertEqual(layers["disabled"], 1)
+
+    def test_a_semantic_warning_keeps_an_operation_out_of_evidence_safe(self):
+        cfg = json.loads(json.dumps(self.POLICY_CONFIG))
+        cfg["operations"]["log.list_apps"]["semantic_warnings"] = ["returns_files_as_apps"]
+        with mock.patch.object(mcp_registry, "load", lambda: cfg):
+            catalog = mcp_console.catalog()
+        entry = catalog["operations"]["log.list_apps"]
+        self.assertEqual(entry["caller_policy"], "enabled")
+        self.assertEqual(entry["state"], "ready")          # wired and called...
+        self.assertTrue(entry["semantic_warnings"])        # ...but not trusted
+        self.assertNotIn("log.list_apps",
+                         [n for n, e in catalog["operations"].items()
+                          if e["state"] == "ready" and e["caller_policy"] == "enabled"
+                          and not e["semantic_warnings"]])
+
+    def test_the_shipped_config_marks_the_three_operations_we_decided_not_to_call(self):
+        """These are decisions with reasons attached, not preferences: `log.investigate` cannot be
+        held to a file boundary, `log.browse` takes a raw path around the verification chain, and
+        their alert parser returns a paragraph where an alarm name should be."""
+        patch = mock.patch.object(mcp_registry, "load", mcp_registry.load.__wrapped__
+                                  if hasattr(mcp_registry.load, "__wrapped__") else None)
+        del patch
+        for name in ("log.browse", "log.investigate", "aws.parse_alert"):
+            with self.subTest(operation=name):
+                self.assertEqual(mcp_registry._CALLER_POLICY.get(name), "manual_only")
+
+
+class ReadSemanticsInTheConsoleTests(ConsoleTestCase):
+    """The console and the investigator must apply the SAME rule to a `log.read` response.
+
+    The intranet's exact worry: "避免控制台看出 retrieval_method=tail，产品 caller 却仍按 keyword
+    消费" — the console showing the downgrade while the product went on believing it.
+    """
+
+    READ_CONFIG = dict(CONFIG, operations=dict(
+        CONFIG["operations"],
+        **{"log.read": {"server": "logdream", "tool": "read_logdream_log",
+                        "args": {"app": "app", "file": "file_name", "mode": "read_mode",
+                                 "keyword": "keyword"},
+                        "const": {}}}))
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(mcp_registry, "load",
+                                  lambda: json.loads(json.dumps(self.READ_CONFIG)))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_downgraded_read_is_reported_as_such_not_as_a_result(self):
+        body = json.dumps({"lines": ["09:41 INFO heartbeat ok"], "retrieval_method": "tail"})
+        result, _session = self._run(
+            "log.read", {"app": "a", "file": "b", "mode": "keyword", "keyword": "CPUUtilization"},
+            result=_tool_result(body))
+        self.assertTrue(result["ok"])                       # the CALL succeeded...
+        self.assertTrue(result["read_semantics"]["semantic_downgrade"])
+        self.assertFalse(result["read_semantics"]["evidence_accepted"])   # ...the ANSWER is not one
+        self.assertEqual(result["read_semantics"]["actual_method"], "tail")
+
+    def test_a_confirmed_match_is_reported_as_accepted(self):
+        body = json.dumps({"lines": ["03:15 ERROR CPUUtilization breach"],
+                           "retrieval_method": "keyword"})
+        result, _session = self._run("log.read", {"app": "a", "file": "b",
+                                                  "keyword": "CPUUtilization"},
+                                     result=_tool_result(body))
+        self.assertTrue(result["read_semantics"]["evidence_accepted"])
+        self.assertEqual(result["read_semantics"]["literal_matches"], 1)
+
+    def test_other_operations_carry_no_read_verdict(self):
+        result, _session = self._run("log.list_apps")
+        self.assertNotIn("read_semantics", result)
+
+
 class ExitGateTests(ConsoleTestCase):
 
     LEAKY = ("customer alice@example.com called from 9123 4567 about card 4111111111111111 "

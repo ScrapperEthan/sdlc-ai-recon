@@ -21,7 +21,6 @@
     "",
     "【地址和凭证不在这里】走环境变量(见下面每个 server 的 url_env),真实地址永不进 git。"
   ],
-
   "servers": {
     "logdream": {
       "url_env": "SDLC_MCP_LOGDREAM_URL",
@@ -30,18 +29,29 @@
       "_note": "RUNBOOK-55 实测:旧式 SSE,6 个工具,客户端不需要 token。",
       "sources": {
         "_note": [
-          "RUNBOOK-56 问题 1 已答:hk1 和 hkp3 【都是生产】,但放的日志不一样。",
+          "RUNBOOK-56 问题 1 已答:hkl 和 hkp3 【都是生产】,但放的日志不一样。",
           "所以默认【两个都查】,并且每条证据都要标明来自哪一个。",
-          "『哪类日志在哪个 source』请内网 Codex 查实后写在下面 description 里。"
+          "⚠️ 是 hkl(小写字母 L),不是 hk1(数字一) —— RUNBOOK-60 真机确认。",
+          "  写错的那个名字不会报错,只会每次查都返回拒绝,而『拒绝』被读成『没日志』",
+          "  就等于把半个生产源静默丢掉。这里之前就是错的。",
+          "description 由内网 2026-08-04 真机 probe 后填入。"
         ],
-        "hk1":  {"query_by_default": true, "description": "?"},
-        "hkp3": {"query_by_default": true, "description": "?"}
+        "hkl": {
+          "query_by_default": true,
+          "description": "生产日志源;真机已见 exception / otx_trace / sftp 及日期轮转文件。97 个 app 目录。"
+        },
+        "hkp3": {
+          "query_by_default": true,
+          "description": "生产日志源;与 hkl 内容不同,真机已见 exception / otx_trace 及日期轮转文件。92 个 app 目录。"
+        }
       },
       "log_files": {
         "_note": "RUNBOOK-55 实测。注意真名是 otx_trace.log,不是同事 SKILL 里写的 trace.log。",
         "trace": "otx_trace.log",
         "exception": "exception.log",
-        "other": ["sftp.log"],
+        "other": [
+          "sftp.log"
+        ],
         "history_suffix": "_YYYYMMDD",
         "path_pattern": "/apps/<app>/log"
       }
@@ -65,30 +75,72 @@
       ]
     }
   },
-
   "operations": {
-    "_README": "左边的 key 是代码里写死的操作名,不要改。右边的 tool/args 由内网填。",
-
+    "_README": [
+      "左边的 key 是代码里写死的操作名,不要改。右边的 tool/args 由内网填。",
+      "",
+      "【2026-08-04 新增三个字段,引擎会真的执行,不是 UI 文案】",
+      "  `caller_policy`      : enabled | manual_only | disabled",
+      "     enabled     = 产品调查链可以用,手动控制台也可以",
+      "     manual_only = 【只能人工在 MCP 面板里调】,调查链调它会被引擎拒绝",
+      "     disabled    = 保留映射只为让工具名可以和 tools/list 对账,任何路径都不可调",
+      "  `semantic_warnings`  : 远端在某些情况下会回答一个不同的问题(见 log.read)",
+      "  `data_class`         : payload | metadata —— 只决定面板提示力度,",
+      "                         【不决定脱不脱敏】,脱敏对所有操作一律执行",
+      "",
+      "不写这些字段就用代码里的默认值(mcp_registry._CALLER_POLICY / _SEMANTIC_WARNINGS)。"
+    ],
     "log.list_apps": {
-      "server": "logdream", "tool": "list_logdream_apps",
-      "args": {}, "const": {},
-      "_note": "RUNBOOK-55 已确认工具名。返回 hk1 98 个 / hkp3 93 个 app。"
+      "server": "logdream",
+      "tool": "list_logdream_apps",
+      "args": {},
+      "const": {},
+      "_note": [
+        "RUNBOOK-55 已确认工具名。2026-08-04 真机复核:hkl 97 个 / hkp3 92 个 app 目录。",
+        "旧记录的 98 / 93 把 /apps 下的非目录条目也算进去了 —— 解析必须只认 entry_type=dir,",
+        "把旁边的文件当成 app 会让一个不存在的 app 通过验证,查回来是空,而空会被读成『没问题』。"
+      ]
     },
     "log.browse": {
-      "server": "logdream", "tool": "browse_logdream",
-      "args": {"app": "?", "source": "?", "path": "?"}, "const": {}
+      "server": "logdream",
+      "tool": "browse_logdream",
+      "args": {
+        "app": "?",
+        "source": "?",
+        "path": "?"
+      },
+      "const": {},
+      "caller_policy": "manual_only",
+      "_note": [
+        "仅人工诊断。它接收任意 path,等于绕过 list_apps→search_files 那两步验证,",
+        "所以不进产品调查链。真要用,path 只能由代码从已确认的 app 拼出来。"
+      ]
     },
     "log.search_files": {
-      "server": "logdream", "tool": "search_logdream_log_files",
-      "args": {"app": "?", "source": "?", "keyword": "?", "filename_pattern": "?", "date_hint": "?"},
+      "server": "logdream",
+      "tool": "search_logdream_log_files",
+      "args": {
+        "app": "?",
+        "source": "?",
+        "keyword": "?",
+        "filename_pattern": "?",
+        "date_hint": "?"
+      },
       "const": {}
     },
     "log.read": {
-      "server": "logdream", "tool": "read_logdream_log",
+      "server": "logdream",
+      "tool": "read_logdream_log",
       "args": {
-        "app": "?", "source": "?", "file": "?", "mode": "?",
-        "keyword": "?", "from_time": "?", "to_time": "?",
-        "timezone": "?", "max_lines": "?"
+        "app": "?",
+        "source": "?",
+        "file": "?",
+        "mode": "?",
+        "keyword": "?",
+        "from_time": "?",
+        "to_time": "?",
+        "timezone": "?",
+        "max_lines": "?"
       },
       "const": {},
       "_note": [
@@ -101,61 +153,150 @@
         "4) mode 支持哪几种(tail / keyword / range / alert_time_backtrack / auto)?",
         "   把真实取值写在下面 modes 里。"
       ],
-      "modes": {"tail": "?", "keyword": "?", "range": "?", "backtrack": "?", "auto": "?"}
+      "modes": {
+        "tail": "?",
+        "keyword": "?",
+        "range": "?",
+        "backtrack": "?",
+        "auto": "?"
+      },
+      "semantic_warnings": [
+        "keyword_falls_back_to_tail"
+      ],
+      "_semantic_note": [
+        "⚠️ 2026-08-04 真机 probe:keyword 没命中时【不返回 0 行】,而是静默返回文件尾部,",
+        "   `retrieval_method` 会诚实地写 `tail`。auto 和不传 mode 也一样。",
+        "   引擎现在会读 retrieval_method,并且【在本地逐行复核关键词是否真的出现】——",
+        "   复核不过的一律不算证据(webapp/incident_parse.validate_log_read_semantics)。",
+        "   本地复核是决定性的那一步,它不依赖你们的字段名和说法。",
+        "   如果以后服务端改成『没命中就返回空』,把这条 semantic_warnings 删掉即可。"
+      ]
     },
     "log.investigate": {
-      "server": "logdream", "tool": "investigate_logdream",
-      "args": {"app": "?", "source": "?", "symptom": "?", "keyword": "?",
-                "alert_time": "?", "date_hint": "?"},
+      "server": "logdream",
+      "tool": "investigate_logdream",
+      "args": {
+        "app": "?",
+        "source": "?",
+        "symptom": "?",
+        "keyword": "?",
+        "alert_time": "?",
+        "date_hint": "?"
+      },
       "const": {},
-      "_note": "他们的综合排障接口。要填:输出是【结构化 findings】还是一段文本?"
+      "_note": [
+        "他们的综合排障接口。2026-08-04 真机 probe:返回是结构化的(不是一段文本),",
+        "但 candidate_files 是 seed 不是 allow-list —— 传 1 个文件它实际读了 4 个;",
+        "keyword 不约束读取也不约束 findings(不可能命中的 keyword 与不传 keyword 返回逐字节相同);",
+        "lines 是每文件上限不是全局上限。越过文件边界就控制不住调用预算和范围,",
+        "所以保持产品零调用,只在面板里人工用。服务端若提供 strict_candidate_files /",
+        "strict_keyword / global_max_lines,再考虑接入。"
+      ],
+      "caller_policy": "manual_only",
+      "semantic_warnings": [
+        "candidate_files_is_a_hint_not_an_allow_list",
+        "keyword_not_applied"
+      ]
     },
-
     "aws.parse_alert": {
-      "server": "cloudwatch", "tool": "parse_cloudwatch_alert",
-      "args": {"alert_text": "alertText"}, "const": {},
-      "_note": "RUNBOOK-55 已确认参数名 alertText。"
+      "server": "cloudwatch",
+      "tool": "parse_cloudwatch_alert",
+      "args": {
+        "alert_text": "alertText"
+      },
+      "const": {},
+      "_note": [
+        "RUNBOOK-55 已确认参数名 alertText。仅人工诊断:它会把整段告警文字当成 alarm name,",
+        "所以产品侧的 alarm name 一律本地严格提取(RUNBOOK-64),不走这个工具。"
+      ],
+      "caller_policy": "manual_only"
     },
     "aws.get_alarm": {
-      "server": "cloudwatch", "tool": "get_alarm", "args": {"alarm_name": "?"}, "const": {}
+      "server": "cloudwatch",
+      "tool": "get_alarm",
+      "args": {
+        "alarm_name": "?"
+      },
+      "const": {}
     },
     "aws.alarm_history": {
-      "server": "cloudwatch", "tool": "get_alarm_history",
-      "args": {"alarm_name": "?", "from_time": "?", "to_time": "?"}, "const": {}
+      "server": "cloudwatch",
+      "tool": "get_alarm_history",
+      "args": {
+        "alarm_name": "?",
+        "from_time": "?",
+        "to_time": "?"
+      },
+      "const": {}
     },
     "aws.metric_window": {
-      "server": "cloudwatch", "tool": "get_metric_window",
-      "args": {"resource": "?", "metric": "?", "from_time": "?", "to_time": "?"}, "const": {}
+      "server": "cloudwatch",
+      "tool": "get_metric_window",
+      "args": {
+        "resource": "?",
+        "metric": "?",
+        "from_time": "?",
+        "to_time": "?"
+      },
+      "const": {}
     },
     "aws.recent_changes": {
-      "server": "cloudwatch", "tool": "get_recent_cloudtrail_events",
-      "args": {"resource": "?", "from_time": "?", "to_time": "?"}, "const": {},
+      "server": "cloudwatch",
+      "tool": "get_recent_cloudtrail_events",
+      "args": {
+        "resource": "?",
+        "from_time": "?",
+        "to_time": "?"
+      },
+      "const": {},
       "_note": "CloudTrail —— 证据等级最高的一类(截图里那个 Aurora roleswap 就是这么查出来的)。"
     },
     "aws.log_groups_for_resource": {
-      "server": "cloudwatch", "tool": "find_log_groups_for_resource",
-      "args": {"resource": "?"}, "const": {}
+      "server": "cloudwatch",
+      "tool": "find_log_groups_for_resource",
+      "args": {
+        "resource": "?"
+      },
+      "const": {}
     },
     "aws.query_logs": {
-      "server": "cloudwatch", "tool": "query_logs",
-      "args": {"log_groups": "?", "query": "?", "from_time": "?", "to_time": "?"}, "const": {}
+      "server": "cloudwatch",
+      "tool": "query_logs",
+      "args": {
+        "log_groups": "?",
+        "query": "?",
+        "from_time": "?",
+        "to_time": "?"
+      },
+      "const": {}
     },
     "aws.resource_tags": {
-      "server": "cloudwatch", "tool": "get_resource_tags", "args": {"resource": "?"}, "const": {},
+      "server": "cloudwatch",
+      "tool": "get_resource_tags",
+      "args": {
+        "resource": "?"
+      },
+      "const": {},
       "_note": "RUNBOOK-55:alarm 自身无 tag;ECS service 有 10 个 key,有 owner,无 application。"
     },
-
     "portal.sms_by_tracking_id": {
-      "server": "portal", "tool": "query_sms_delivery_record_by_tracking_id",
-      "args": {"tracking_id": "?"}, "const": {},
+      "server": "portal",
+      "tool": "query_sms_delivery_record_by_tracking_id",
+      "args": {
+        "tracking_id": "?"
+      },
+      "const": {},
       "_note": "只读查询。截图里那条 338 的排查就是从这一步开始的。"
     },
     "portal.email_by_tracking_id": {
-      "server": "portal", "tool": "query_email_delivery_record_by_tracking_id",
-      "args": {"tracking_id": "?"}, "const": {}
+      "server": "portal",
+      "tool": "query_email_delivery_record_by_tracking_id",
+      "args": {
+        "tracking_id": "?"
+      },
+      "const": {}
     }
   },
-
   "never_expose": {
     "_note": [
       "永远不允许接入的工具 —— 会产生真实业务动作。",
@@ -167,11 +308,26 @@
       "  `*resend*` 会把它们一起封掉,以后想用的时候会浪费半天去查为什么调不动。",
       "  所以按【动作动词】封,不按关键词封。"
     ],
-    "tools": ["open_portal_login"],
+    "tools": [
+      "open_portal_login"
+    ],
     "patterns": [
-      "do_*", "execute_*", "perform_*", "trigger_*",
-      "*_resend", "resend_*", "*_submit", "submit_*", "*_send", "send_*",
-      "delete_*", "remove_*", "update_*", "create_*", "login*", "*_login"
+      "do_*",
+      "execute_*",
+      "perform_*",
+      "trigger_*",
+      "*_resend",
+      "resend_*",
+      "*_submit",
+      "submit_*",
+      "*_send",
+      "send_*",
+      "delete_*",
+      "remove_*",
+      "update_*",
+      "create_*",
+      "login*",
+      "*_login"
     ],
     "read_only_but_not_exposed": {
       "_note": [
@@ -179,7 +335,11 @@
         "重发判断是 Portal MCP 的透传,我们的代码图帮不上忙,且是唯一有真实业务后果的一条)。",
         "以后如果决定要接,把工具加进 operations 即可 —— deny 列表不会挡住它们。"
       ],
-      "tools": ["check_sms_resend_need", "check_htcl_sms_resend_need", "check_email_resend_need"]
+      "tools": [
+        "check_sms_resend_need",
+        "check_htcl_sms_resend_need",
+        "check_email_resend_need"
+      ]
     }
   }
 }

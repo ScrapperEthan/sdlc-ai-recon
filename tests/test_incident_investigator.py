@@ -20,13 +20,18 @@ ALERT = ("prodECS_mc-hk-hase-csl-sms-deli-job_service_CPUUtilizationMINOR[80perc
          "at 2026-07-30 03:15 HKT")
 ALERT_TIMES = [{"text": "2026-07-30 03:15 HKT", "timezone": "Asia/Hong_Kong",
                 "ambiguous": False, "normalized": "2026-07-30 03:15:00"}]
+# Every line carries the search term, because that is what a keyword search RETURNS. Before the
+# 2026-08-04 semantic gate these lines contained no `CPUUtilization` at all and the investigator
+# still reported them as "keyword hit: 6 lines" — the fixture encoded the exact defect the intranet's
+# live probe found on the real server. A read whose lines do NOT contain the term is now its own
+# fixture, in tests/test_incident_read_semantics.py, which is where it belongs.
 DIRTY_LOG = "\n".join([
-    "2026-07-30 03:15:01 ERROR SmsDeliveryException customer alice.wong@example.com failed",
-    "2026-07-30 03:15:02 WARN  retry for 9123 4567 ref MDCTRACK-9F2K-88H1",
-    "2026-07-30 03:15:03 ERROR TimeoutException acct 4123456789012345 gave up",
-    "2026-07-30 03:15:04 ERROR SmsDeliveryException hkid A1234567 second attempt",
-    "2026-07-30 03:15:05 INFO  recovered",
-    "2026-07-30 03:15:06 INFO  this sixth line is past the excerpt cap",
+    "2026-07-30 03:15:01 ERROR SmsDeliveryException CPUUtilization 91% customer alice.wong@example.com failed",
+    "2026-07-30 03:15:02 WARN  CPUUtilization retry for 9123 4567 ref MDCTRACK-9F2K-88H1",
+    "2026-07-30 03:15:03 ERROR TimeoutException CPUUtilization acct 4123456789012345 gave up",
+    "2026-07-30 03:15:04 ERROR SmsDeliveryException CPUUtilization hkid A1234567 second attempt",
+    "2026-07-30 03:15:05 INFO  CPUUtilization recovered",
+    "2026-07-30 03:15:06 INFO  CPUUtilization this sixth line is past the excerpt cap",
 ])
 SECRETS = ("alice.wong@example.com", "9123 4567", "4123456789012345", "A1234567",
            "MDCTRACK-9F2K-88H1")
@@ -930,8 +935,8 @@ class StructuredResponseTests(unittest.TestCase):
         "file": "otx_trace.log",
         "line_count": 2,
         "lines": [
-            "2026-07-30 03:15:01 ERROR SmsDeliveryException failed",
-            "2026-07-30 03:15:02 ERROR TimeoutException gave up",
+            "2026-07-30 03:15:01 ERROR SmsDeliveryException CPUUtilization failed",
+            "2026-07-30 03:15:02 ERROR TimeoutException CPUUtilization gave up",
         ],
     }, indent=2)
     # One directory (the app) and one file beside it. The old regex split produced seven "apps":

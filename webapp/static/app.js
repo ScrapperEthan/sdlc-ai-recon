@@ -657,12 +657,30 @@ function renderMcpOperation(op) {
       ${op.data_class === 'payload'
         ? mcpBadge('payload', '可能含正文', '这类返回预期会带生产正文/客户可关联数据。注意：脱敏对所有操作一律执行，这个标记只决定提示力度。')
         : mcpBadge('', '元数据')}
+      ${op.caller_policy === 'manual_only'
+        ? mcpBadge('warn', '仅人工诊断', '已映射，可以在这里手动调，但产品的调查链永不调用它 —— 这条在引擎里是硬拦截，不是 UI 文案。')
+        : op.caller_policy === 'disabled'
+          ? mcpBadge('bad', '禁止调用', '保留映射只为让工具名可以和 tools/list 对账；任何路径都不可调用。')
+          : ''}
+      ${(op.semantic_warnings || []).length
+        ? mcpBadge('bad', '语义告警', '远端在某些情况下会回答一个不同的问题：'
+            + (op.semantic_warnings || []).join('、'))
+        : ''}
       ${op.tool ? `<span class="mcp-op-tool">→ ${escapeHtml(op.tool)}</span>` : ''}
     </summary>
     <div class="mcp-op-body">
       ${op.purpose ? `<p>${escapeHtml(op.purpose)}</p>` : ''}
       ${op.remote_description
         ? `<p class="mcp-note">对方 tools/list 的说明（他们写的，原样转载）：${escapeHtml(op.remote_description)}</p>`
+        : ''}
+      ${(op.semantic_warnings || []).length
+        ? `<p class="mcp-note"><b>语义告警</b>：${escapeHtml((op.semantic_warnings || []).join('、'))}`
+          + `。远端在这些情况下会回答一个不同的问题，所以引擎会在本地复核返回，`
+          + `复核不过的一律不算证据。</p>`
+        : ''}
+      ${op.caller_policy === 'manual_only'
+        ? `<p class="mcp-note"><b>仅人工诊断</b>：调查链不会调用它。你可以在这里手动调、自己读，`
+          + `但它的返回不会进入任何证据包 —— 这条是引擎里的硬拦截。</p>`
         : ''}
       ${op.note ? `<p class="mcp-note">${escapeHtml(op.note)}</p>` : ''}
       ${op.const_keys && op.const_keys.length
@@ -688,13 +706,25 @@ function renderMcpCatalog(data) {
   }
   const ops = data.operations || {};
   const total = Object.keys(ops).length;
-  const ready = Object.values(ops).filter((op) => op.state === 'ready').length;
+  const layers = data.layers || {};
+  const ready = layers.wired != null
+    ? layers.wired : Object.values(ops).filter((op) => op.state === 'ready').length;
   const off = !data.calling_enabled || !data.console_enabled;
   const retention = data.raw_retention || {};
 
+  // Three separate questions, because one ratio answered only the first and was read as all three
+  // (intranet, 2026-08-04). "Wired" = names and arguments mapped. "Caller" = the product actually
+  // uses it. "Evidence-safe" = and it has no known way of answering a different question than the
+  // one asked. `log.read` is wired and called, and is NOT evidence-safe.
   const state = `<div class="mcp-state${off ? ' is-off' : ''}">`
-    + `<b>${ready}/${total}</b> 个操作已接通 · 调用开关 <b>${data.calling_enabled ? '开' : '关'}</b>`
+    + `接线 <b>${ready}/${total}</b>`
+    + (layers.caller != null ? ` · 产品已接 <b>${layers.caller}/${total}</b>` : '')
+    + (layers.evidence_safe != null ? ` · 证据可信 <b>${layers.evidence_safe}/${total}</b>` : '')
+    + `<br>调用开关 <b>${data.calling_enabled ? '开' : '关'}</b>`
     + ` · 手动调用 <b>${data.console_enabled ? '开' : '关'}</b>`
+    + (layers.manual_only ? ` · 仅人工诊断 <b>${layers.manual_only}</b>` : '')
+    + (layers.with_warnings ? ` · <b>${layers.with_warnings}</b> 条有语义告警` : '')
+    + '<br><i>接线 ≠ 可信：接线只证明工具名和参数名对上了，不证明远端遵守参数语义。</i>'
     + (data.calling_note ? `<br>${escapeHtml(data.calling_note)}` : '')
     + (data.config_error ? `<br>配置读取失败：${escapeHtml(data.config_error)}` : '')
     + `<br>配置文件：<code>${escapeHtml(data.config_path || '')}</code>（工具名/参数名/返回结构都由内网在这里维护，改配置不用改代码）`
@@ -763,6 +793,20 @@ function mcpResultBadges(result) {
   }
   const leaked = (result.exit_scan || {}).sanitized_at_exit || 0;
   if (leaked) parts.push(mcpBadge('bad', `出口再脱敏 ${leaked} 处`, '到出口还匹配 PII 说明上游脱敏有漏，请报告'));
+  // The verdict, not just the response. A console that showed the lines while the product caller
+  // consumed them as a keyword hit is the split this exists to close.
+  const read = result.read_semantics;
+  if (read) {
+    if (read.semantic_downgrade) {
+      parts.push(mcpBadge('bad', `降级成 ${read.actual_method || 'tail'}`,
+        '关键词没命中，服务端回了文件尾部。这些行不是关键词证据。'));
+    } else if (read.actual_method) {
+      parts.push(mcpBadge('', `读法 ${read.actual_method}`));
+    }
+    parts.push(mcpBadge(read.evidence_accepted ? 'ok' : 'warn',
+      `本地确认 ${read.literal_matches}/${read.lines_returned} 行`,
+      '本地逐行复核了关键词是否真的出现在返回里 —— 这一步不依赖对方的字段和说法。'));
+  }
   return parts.join('');
 }
 

@@ -20,8 +20,11 @@ from retriever import code as rcode, incident
 from webapp import config, incident_plan, incident_raw_store as store, redaction
 
 
-LINES = ["2026-07-30 03:15:01 ERROR SmsDeliveryException alice.wong@example.com failed",
-         "2026-07-30 03:15:02 WARN  retry for 9123 4567"]
+# Carrying the search term, because a keyword read returns lines that contain it. Since 2026-08-04
+# a read whose lines do not contain the term produces no evidence at all, so a fixture without it
+# would be testing retention of something that is never retained.
+LINES = ["2026-07-30 03:15:01 ERROR SmsDeliveryException CPUUtilization alice.wong@example.com failed",
+         "2026-07-30 03:15:02 WARN  CPUUtilization retry for 9123 4567"]
 
 
 class _Store(unittest.TestCase):

@@ -461,15 +461,19 @@ def _flatten_content(result):
     return "\n".join(texts), content, sorted(set(kinds))
 
 
-def call(operation, args=None, timeout=None):
+def call(operation, args=None, timeout=None, caller="product"):
     """Run one abstract operation. Returns a result dict; raises only for refusals and transport.
 
     `ok=False` with `tool_reported_error=True` means their tool ran and reported a problem — a
     different fact from a TransportError, and the two must not be collapsed: one says the query was
     wrong, the other says we never asked.
+
+    `caller` defaults to `product` — the stricter of the two. A caller that forgets to say which
+    surface it is gets the evidence-chain rules, not the console's.
     """
     _require_enabled()
-    server, tool, params = mcp_registry.build_call(operation, args)   # allow-list + deny + naming
+    # allow-list + deny + caller policy + naming
+    server, tool, params = mcp_registry.build_call(operation, args, caller=caller)
     started = time.time()
 
     # One short, audited retry for a transport failure that did not carry the request (RUNBOOK-65:

@@ -55,6 +55,11 @@ RESPONSE_SHAPES = {
         "line_text": ("line", "text", "message", "content", "log", "raw"),
         # Their own count, reported next to ours so a disagreement is visible rather than assumed.
         "count": ("line_count", "total_lines", "matched_lines", "total", "count"),
+        # HOW they actually read the file, which is not always how we asked. The intranet's
+        # 2026-08-04 live probe: `mode=keyword` with a keyword that cannot match returns the last N
+        # lines with `retrieval_method: tail` rather than zero rows. Their response was already
+        # honest about it; we were the ones not looking. See `validate_log_read_semantics`.
+        "retrieval_method": ("retrieval_method", "read_method", "method", "mode_used", "read_mode"),
     },
     "log.list_apps": {
         "entries": ("entries", "apps", "applications", "items", "results", "data"),
@@ -185,6 +190,130 @@ def extract_log_lines(text, structured=None, operation="log.read"):
             operation, "lines", shape.get("lines") or (),
             extra=f"An entry was a {type(row).__name__}, not a line. ")
     return lines, reported, ""
+
+
+# How a `log.read` actually came back, most-trusted first. `keyword_match` is the ONLY value that
+# licenses the word "hit"; everything else is context or a refusal.
+READ_OUTCOMES = ("keyword_match", "time_context", "tail_context", "no_match",
+                 "semantic_downgrade", "unreadable")
+
+# Their names for "I did not search, I just took the end of the file". Configurable for the usual
+# reason — this is vocabulary on their side — but the DEFAULT is deliberately broad, because the
+# failure mode of an unrecognised value is the dangerous direction: an unknown method with a keyword
+# we cannot confirm locally still ends up as `no_match`, never as a hit.
+TAIL_METHODS = ("tail", "last", "end", "recent")
+CONTEXT_METHODS = ("alert_time_backtrack", "backtrack", "range", "window", "time_range")
+
+
+def _declared_methods(operation, key, fallback):
+    declared = ((mcp_registry.operations().get(operation) or {}).get("request") or {}).get(key)
+    if isinstance(declared, str):
+        return (declared.lower(),)
+    if isinstance(declared, (list, tuple)) and declared:
+        return tuple(str(item).lower() for item in declared)
+    return fallback
+
+
+def literal_matches(lines, keyword):
+    """The lines that actually CONTAIN the keyword, checked here rather than taken on trust.
+
+    Case-insensitive substring, nothing cleverer: this is a verification, and a fuzzy verification
+    that accepts near-misses verifies nothing. An empty keyword matches nothing rather than
+    everything — "no keyword was asked for" must not read as "every line matched".
+    """
+    needle = (keyword or "").strip().casefold()
+    if not needle:
+        return []
+    return [line for line in lines if needle in str(line).casefold()]
+
+
+def validate_log_read_semantics(out, requested_mode="", requested_keyword="",
+                                operation="log.read"):
+    """Did this read actually answer the question we asked?
+
+    The defect this exists for (intranet live probe, 2026-08-04): asking `log.read` for a keyword
+    that cannot match does NOT return zero rows. It silently returns the last N lines with
+    `retrieval_method: tail` — and the previous code accepted any non-empty response as
+    "keyword hit: N lines". A server-side fallback was being renamed, on our side, into evidence.
+    Their response was honest the whole time; we were not reading the field that said so.
+
+    Two independent checks, because either alone can be fooled:
+
+    * **What they say they did.** `retrieval_method` from the body. A `tail` when we asked for a
+      keyword is a `semantic_downgrade` — the query ran, it just answered a different question.
+    * **What the lines actually contain.** Checked locally, so a server that reports the right
+      method but returns the wrong rows still cannot produce a false hit. This one does not depend
+      on their field names, their vocabulary, or their honesty, which is why it is the one that
+      decides.
+
+    Returns a dict rather than a boolean because the caller has to report the DIFFERENCE: "we looked
+    and there were no matching lines" and "we asked for a search and got the tail of the file
+    instead" lead to opposite next actions, and collapsing them is how a wiring gap becomes
+    "the logs were clean".
+
+    Shared by the investigator and the MCP console on purpose. The console showing
+    `retrieval_method=tail` while the product caller still consumed it as a keyword hit is exactly
+    the split the intranet warned about.
+    """
+    text = (out or {}).get("text") or ""
+    structured = (out or {}).get("structured")
+    body = _decode(text, structured)
+    lines, reported, error = extract_log_lines(text, structured, operation)
+
+    shape = response_shape(operation)
+    actual = ""
+    for key in (shape.get("retrieval_method") or ()):
+        value = _dig(body, key) if isinstance(body, dict) else None
+        if isinstance(value, str) and value.strip():
+            actual = value.strip()
+            break
+
+    wanted_keyword = (requested_keyword or "").strip()
+    matched = literal_matches(lines or [], wanted_keyword)
+    lowered = actual.lower()
+    is_tail = lowered in _declared_methods(operation, "tail_methods", TAIL_METHODS)
+    is_context = lowered in _declared_methods(operation, "context_methods", CONTEXT_METHODS)
+    # We sent a keyword, so a tail response is a downgrade — regardless of the mode we named. Their
+    # probe found the silent fallback on `keyword`, on `auto`, AND on sending no mode at all; only
+    # explicitly asking for the tail makes a tail the right answer.
+    asked_for_keyword = bool(wanted_keyword) and (requested_mode or "").lower() != "tail"
+
+    if lines is None:
+        outcome = "unreadable"
+    elif matched:
+        # Locally confirmed. This is the only path that may be called a hit, and note that it holds
+        # even when they downgraded the method: if the tail happens to contain the term, it contains
+        # the term. What is refused is calling an UNCONFIRMED line a match.
+        outcome = "keyword_match"
+    elif asked_for_keyword and is_tail:
+        outcome = "semantic_downgrade"
+    elif not lines:
+        outcome = "no_match"
+    elif is_context:
+        outcome = "time_context"
+    elif is_tail:
+        outcome = "tail_context"
+    else:
+        # Lines came back, nothing in them contains the term, and they did not say how they read.
+        # Unknown provenance plus no local confirmation is not a hit.
+        outcome = "no_match" if wanted_keyword else "tail_context"
+
+    return {
+        "outcome": outcome,
+        "actual_method": actual,
+        "requested_mode": requested_mode or "",
+        "requested_keyword": wanted_keyword,
+        "lines": lines,
+        "literal_matches": matched,
+        # Lines that came back but are NOT confirmed matches. Readable by a human as surrounding
+        # context; never counted, quoted, or described as a keyword result.
+        "context_lines": [] if matched else list(lines or []),
+        "semantic_downgrade": outcome == "semantic_downgrade",
+        # The whole point of the split: only this licenses evidence.
+        "evidence_accepted": outcome == "keyword_match",
+        "reported_count": reported,
+        "error": error,
+    }
 
 
 def extract_app_names(text, structured=None, operation="log.list_apps"):

@@ -213,6 +213,17 @@ MCP_CONSOLE_MAX_CHARS = int(os.environ.get("SDLC_MCP_CONSOLE_MAX_CHARS", "20000"
 # is the failure this must not introduce. 0 disables caching.
 MCP_PROBE_TTL = int(os.environ.get("SDLC_MCP_PROBE_TTL", "60"))
 
+# ---- read-only UAT database (through the intranet's own skill) ----
+# Default OFF, same discipline as SDLC_MCP_ENABLED: unset means no code path in webapp/db_readonly.py
+# imports the runner or opens a connection, so behaviour is identical to before this existed. And it
+# is not sufficient on its own — the query must also be declared, `enabled`, wired (no "?" left) and
+# within its caller_policy in config/db_queries.json, and SDLC_DB_SKILL must point at the intranet's
+# skill. Four independent gates, none of which this switch can substitute for.
+#
+# The connection itself is never ours: the read-only DB skill belongs to the intranet, holds the
+# token provider, and must never be committed to this repo.
+DB_ENABLED = os.environ.get("SDLC_DB_ENABLED", "") not in ("", "0", "false", "False")
+
 # ---- incident investigator: raw log retention (UAT internal test ONLY) ----
 # OFF by default. ON retains the raw log text an investigation read, so a devops tester can click an
 # evidence item and check it against the original — evidence you cannot verify is evidence people

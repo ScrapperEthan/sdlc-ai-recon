@@ -426,6 +426,21 @@ TOOLS = [
              "portal_channel": {"type": "string", "enum": ["sms", "email", "auto"]},
              "max_queries": {"type": "integer"}},
             ["alert_text"]),
+    _schema("db_query",
+            "LIVE READ-ONLY query against the UAT database, run through the intranet's own skill. "
+            "You cannot write SQL and there is no way to ask for one: pick a `query` NAME the "
+            "intranet has declared and pass its `params`. Call with NO arguments first to see the "
+            "catalog — which names exist, which are actually wired, and what each one needs; add "
+            "`check=true` to also test the connection. "
+            "THREE things about the answer that you must carry into yours: (1) it is UAT, not "
+            "production — the data may be copied, masked or synthetic, so never state a UAT row as "
+            "a production fact; (2) `ok:false` means the query DID NOT RUN — 'not wired', 'not "
+            "ready' and 'refused' are never 'there is no such record', and a packet without a "
+            "`rows` key is not an empty result; (3) this supplements the code graph, the snapshots "
+            "and the MCP evidence — it does not replace them, so say which of your statements came "
+            "from a live UAT query and which came from a snapshot or from code.",
+            {"query": {"type": "string"}, "params": {"type": "object"},
+             "check": {"type": "boolean"}}),
 ]
 
 # Tools whose result is a sub-agent evidence packet, so it is charged to the `subagent` context lane
@@ -627,4 +642,14 @@ def dispatch(name, a):
         return result
     if name == "show_coverage":
         return _coverage_view(a.get("kind"), a.get("value"))
+    if name == "db_query":
+        # Imported here, not at module import time: the retrieval-only tool surface must not depend
+        # on the database path existing, exactly as with incident_investigator.
+        from . import db_readonly
+        query = (a.get("query") or "").strip()
+        if not query:
+            return db_readonly.catalog(probe=bool(a.get("check")))
+        # `caller="product"` is the model asking. It is the stricter setting, and the default in
+        # db_registry is 'internal', so wiring a query's SQL does not by itself hand it to the chat.
+        return db_readonly.run(query, a.get("params") or {}, caller="product")
     return {"error": f"unknown tool: {name}"}

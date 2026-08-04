@@ -1,0 +1,110 @@
+{
+  "_README": [
+    "只读 UAT 数据库：我们的『命名查询』↔ 你们的真实 SQL / schema / 表名 / 列名 —— 内网维护。",
+    "",
+    "【为什么是这样分的】",
+    "  模型永远不写 SQL。它只能做两件事:选一个下面 `queries` 里的名字 + 传绑定参数。",
+    "  真正的 SQL 文本、schema、表名、列名、行数上限、哪些列允许进模型上下文,全部在这个文件里。",
+    "  所以你们改表名 = 改这个文件,不用等外部推代码 —— 和 config/mcp_tools.json 完全一样的缝。",
+    "",
+    "【怎么填】",
+    "  - 左边(查询名字、`params` 的键名)是我们的,**不要改**,代码按左边写死。",
+    "  - `sql`      = 一条完整的、列名显式的 SELECT / WITH ... SELECT。参数写成 %(名字)s,",
+    "                 名字必须出现在同一条目的 `params` 里。**不要自己拼字符串。**",
+    "  - `columns`  = **白名单**:只有列在这里的字段才会进入模型上下文和浏览器。",
+    "                 ⚠️ 这是最重要的一栏:PII 列只要不写进来,就永远出不去。",
+    "                 留 \"?\" = 还没填 → 这条查询【拒绝执行】,不会先查了再说。",
+    "  - `source_tables` = 这条查询碰了哪几张表,只用于在答案里标出处,不参与执行。",
+    "  - `max_rows` = 本条的行数上限,会再被 runner.max_rows_hard_cap 压一次。",
+    "  - `caller_policy` = \"internal\"(默认,只有内部/控制台可调) 或 \"product\"(聊天里的模型可调)",
+    "                      或 \"disabled\"。**默认关**:这条路是全新的,开放必须是一次明确的编辑。",
+    "  - `enabled`  = false 时这条查询存在但不可调用(名字仍可被核对)。",
+    "",
+    "【值写 \"?\" 表示还没填】助手会明确说『这条查询还没接通』,",
+    "  **绝不会拿一条猜的 SQL 去查,也绝不会把『没接通』说成『库里没有这条记录』。**",
+    "",
+    "【地址、账号、token 不在这里,也不在任何地方的 git 里】",
+    "  连接完全由内网的 skill 负责。这边只知道它在磁盘上的路径,而那条路径来自环境变量",
+    "  SDLC_DB_SKILL。skill 目录本身【永远不要提交】。"
+  ],
+
+  "runner": {
+    "_note": [
+      "内网 skill `.github/skills/ai-ai-readonly-db` 的调用契约(RUNBOOK-72 回传 §1)。",
+      "module_env 指向 scripts/readonly_db.py 的【绝对路径】,或 skill 目录本身。",
+      "environment 固定 UAT,且【模型不能传】—— 生产要单独走一轮评审,不是改一个字母。",
+      "response 三项是【他们的返回长什么样】。留 \"?\" 时我们只接受两种能无歧义识别的形状:",
+      "  (a) 一个 list of dict;(b) 一个 dict,同时有 rows 和 columns 两个 list。",
+      "  两种都不是 → 【fail closed】,报『看不懂返回形状』,不猜。",
+      "  RUNBOOK-61 的教训:他们的返回是结构化的,我按文本读了,两行读成十一行。"
+    ],
+    "module_env": "SDLC_DB_SKILL",
+    "check_function": "check_readonly_connection",
+    "query_function": "run_readonly_query",
+    "environment": "u",
+    "allowed_environments": ["u"],
+    "max_rows_hard_cap": 200,
+    "response": {
+      "rows": "?",
+      "columns": "?",
+      "row_format": "?"
+    }
+  },
+
+  "schemas": ["?"],
+
+  "queries": {
+    "snapshot_freshness": {
+      "_what": "第一批优先级 1:我手上的快照有多旧、哪几行漂了。不改变任何现有结论,只回答『我的话有多旧』。",
+      "enabled": false,
+      "caller_policy": "internal",
+      "sql": "?",
+      "params": {},
+      "max_rows": 50,
+      "columns": ["?"],
+      "source_tables": ["?"]
+    },
+
+    "usecase_routing_live": {
+      "_what": "第一批优先级 2:指定 use case 当前的路由配置(渠道 / 厂商 / rule text)。",
+      "_note": "列白名单确认之前不要 enable —— rule text 是自由文本,可能带客户信息。",
+      "enabled": false,
+      "caller_policy": "internal",
+      "sql": "?",
+      "params": {
+        "use_case_id": {"type": "string", "required": true}
+      },
+      "max_rows": 20,
+      "columns": ["?"],
+      "source_tables": ["?"]
+    },
+
+    "topic_usecase_map": {
+      "_what": "第一批优先级 3:topic ↔ use case 的实时映射核验(补强现有静态 usecase_routing)。",
+      "enabled": false,
+      "caller_policy": "internal",
+      "sql": "?",
+      "params": {
+        "topic": {"type": "string", "required": true}
+      },
+      "max_rows": 100,
+      "columns": ["?"],
+      "source_tables": ["?"]
+    },
+
+    "channel_status_window": {
+      "_what": "第一批优先级 4:按时间窗的成功/失败分布(聚合)。",
+      "_note": "只在消息状态表、时间字段、审计影响都确认之后再 enable。只返回计数,永不返回消息正文或客户字段。",
+      "enabled": false,
+      "caller_policy": "internal",
+      "sql": "?",
+      "params": {
+        "channel": {"type": "string", "required": true},
+        "hours": {"type": "integer", "required": false}
+      },
+      "max_rows": 50,
+      "columns": ["?"],
+      "source_tables": ["?"]
+    }
+  }
+}

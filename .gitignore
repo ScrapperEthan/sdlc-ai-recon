@@ -32,3 +32,8 @@ scratch/
 # eval placeholder map: the shipped config/eval_repos.json is an EMPTY public template;
 # the box keeps its real repo/use-case ids here and they must never be committed.
 /config/eval_repos.local.json
+
+# the intranet's read-only DB skill. It holds their token provider and endpoint details, is
+# git-excluded on their box, and must never be committed here either. We import its runner from a
+# path in SDLC_DB_SKILL; nothing about it belongs in this repo.
+/.github/skills/

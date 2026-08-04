@@ -29,8 +29,16 @@ EXPECTED_MODEL_TOOLS = {
     # result comes back through the investigator's redaction + exit gate — see
     # webapp/incident_investigator.py. Default-off behind SDLC_MCP_ENABLED.
     "incident_investigate",   # 2026-07-30
+    # Live read-only UAT database, through the intranet's own skill. One tool, not one per query:
+    # the named queries live in config/db_queries.json, so the intranet adding a query is a config
+    # edit and the model-visible surface stays fixed at this single entry point. Default-off behind
+    # SDLC_DB_ENABLED, and every query defaults to caller_policy 'internal' — so shipping this tool
+    # grants the model nothing until somebody deliberately opens a query to it.
+    "db_query",   # 2026-08-04
 }
-_INCIDENT_TOOLS = {"incident_impact", "incident_investigate"}
+# Deliberate non-Q&A capabilities. Subtracted so that growth HERE can never be mistaken for the
+# retrieval surface regrowing — which is what the count below is actually protecting.
+_NON_QA_TOOLS = {"incident_impact", "incident_investigate", "db_query"}
 _QA_SURFACE = 14
 
 
@@ -45,9 +53,10 @@ class ModelToolSurfaceTests(unittest.TestCase):
                          "TOOLS should have no duplicate names")
 
     def test_the_qa_surface_itself_has_not_regrown(self):
-        """Adding an incident tool must not be a side door for re-adding retired Q&A tools."""
+        """Adding an incident or database tool must not be a side door for re-adding retired Q&A
+        tools."""
         names = {entry["function"]["name"] for entry in tools.TOOLS}
-        self.assertEqual(len(names - _INCIDENT_TOOLS), _QA_SURFACE)
+        self.assertEqual(len(names - _NON_QA_TOOLS), _QA_SURFACE)
 
     def test_only_the_investigator_is_charged_to_the_subagent_lane(self):
         """The lane exists for sanitized evidence packets. A plain retrieval tool joining it would

@@ -204,6 +204,25 @@ because the question is a little vague — a stated assumption beats an interrog
     eyeballing or manually tallying a `repos`/`items` list** — this is what fixed a prior bug where the
     answer said "22" when the actual returned list had 21.
 
+12. **Live UAT database (`db_query`) — a THIRD kind of evidence, and the one most easily
+    over-claimed.** Everything above is code, a graph, or a snapshot. `db_query` runs a *named*
+    read-only query against the **UAT** database through the intranet's own skill. You cannot write
+    SQL; call `db_query()` with no arguments to see which named queries exist and which are actually
+    wired, then call one by name with its `params`.
+    - **Label the source in your answer.** Say which statements came from a live UAT query and which
+      came from a snapshot or from code. "The snapshot says X, and a live UAT query today agrees" is
+      a much stronger answer than either half, and merging them into one unlabelled claim throws
+      away the only part a reader can check.
+    - **UAT is not production.** The packet carries `environment: uat` and
+      `production_verified: false` — report them. Never present a UAT row as a production fact.
+    - **`ok:false` means the query did not run.** `not_wired` / `not_ready` / `refused` / `disabled`
+      are all "we could not ask", never "there is no such record". A packet with no `rows` key is
+      not an empty result — say the database is not connected or the query is not wired, and stop.
+      Only `ok:true` with `rows: []` means the query ran and matched nothing, and even then say
+      "no matching rows in UAT", not "this does not exist".
+    - **`columns_dropped` is normal, not an error.** Columns outside the configured allow-list never
+      leave the database; do not ask for them and do not speculate about their contents.
+
 ## Incident alerts — call `incident_impact`, and stay in your lane
 
 When the user pastes something that looks like a production alert (`prodECS_<repo>_service_...`,

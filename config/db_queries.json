@@ -11,6 +11,11 @@
     "  - 左边(查询名字、`params` 的键名)是我们的,**不要改**,代码按左边写死。",
     "  - `sql`      = 一条完整的、列名显式的 SELECT / WITH ... SELECT。参数写成 %(名字)s,",
     "                 名字必须出现在同一条目的 `params` 里。**不要自己拼字符串。**",
+    "                 ⚠️ 不必为了行数上限自己加 LIMIT —— runner 会把它包成",
+    "                 `SELECT * FROM (你的 SQL) AS readonly_result LIMIT <safe_limit>`,",
+    "                 在数据库端执行前就加上了(RUNBOOK-73 回传 §3)。",
+    "                 但**大表一定要写明确的 WHERE**:LIMIT 替代不了合理的过滤条件、索引",
+    "                 和 15 秒 statement timeout。",
     "  - `columns`  = **白名单**:只有列在这里的字段才会进入模型上下文和浏览器。",
     "                 ⚠️ 这是最重要的一栏:PII 列只要不写进来,就永远出不去。",
     "                 留 \"?\" = 还没填 → 这条查询【拒绝执行】,不会先查了再说。",
@@ -25,18 +30,33 @@
     "",
     "【地址、账号、token 不在这里,也不在任何地方的 git 里】",
     "  连接完全由内网的 skill 负责。这边只知道它在磁盘上的路径,而那条路径来自环境变量",
-    "  SDLC_DB_SKILL。skill 目录本身【永远不要提交】。"
+    "  SDLC_DB_SKILL。skill 目录本身【永远不要提交】—— 它叫什么、放在哪,这个仓库里一个字都不写。",
+    "",
+    "【⚠️ 这个文件本身:请用本地副本,不要直接改这一份】",
+    "  内网【推不了代码】,所以你们在盒子上改了这一份,下次 git pull 就会冲突或被覆盖。",
+    "  做法和 config/mcp_tools.json 完全一样:把真实配置放在一个【被 gitignore 的本地文件】里,",
+    "  用环境变量 SDLC_DB_QUERIES 指过去(例如 config/db_queries.local.json,已在 .gitignore 里)。",
+    "  仓库里这一份永远是【模板】:全是 \"?\",不含任何真实表名、列名、schema。"
   ],
 
   "runner": {
     "_note": [
-      "内网 skill `.github/skills/ai-ai-readonly-db` 的调用契约(RUNBOOK-72 回传 §1)。",
-      "module_env 指向 scripts/readonly_db.py 的【绝对路径】,或 skill 目录本身。",
+      "内网只读 DB skill 的调用契约(RUNBOOK-72 回传 §1 + RUNBOOK-73 回传 §1-§3,均已真机确认)。",
+      "module_env 指向 runner 模块的【绝对路径】,或 skill 目录本身。目录名不写在这里 ——",
+      "  代码不需要它,写了反而多一处会抄错的名字(RUNBOOK-60 的 hk1/hkl 就是这么来的)。",
       "environment 固定 UAT,且【模型不能传】—— 生产要单独走一轮评审,不是改一个字母。",
-      "response 三项是【他们的返回长什么样】。留 \"?\" 时我们只接受两种能无歧义识别的形状:",
-      "  (a) 一个 list of dict;(b) 一个 dict,同时有 rows 和 columns 两个 list。",
-      "  两种都不是 → 【fail closed】,报『看不懂返回形状』,不猜。",
-      "  RUNBOOK-61 的教训:他们的返回是结构化的,我按文本读了,两行读成十一行。"
+      "",
+      "response = 他们成功时返回的形状。RUNBOOK-73 已确认:返回一个 dict,rows 是 list[dict],",
+      "  【没有独立的 columns 键】—— 列名从每行 dict 的键推导,不虚构一个不存在的返回键。",
+      "  所以 columns 留 \"?\" 是【正确答案】,不是没填完。",
+      "  留 \"?\" 且 rows 也没填时,只接受两种无歧义形状,其余 fail closed(不猜)。",
+      "",
+      "verify = 他们返回里【自带的证据字段】,我们逐个本地复核而不是相信。缺字段不算失败,",
+      "  但字段在且对不上就【拒绝使用这次结果】。这是 keyword P0 的教训:",
+      "  『第二道检查必须不依赖对方』。",
+      "",
+      "not_ready_exceptions = 哪些异常类名算【通路没接好】(报 not_ready),其余算【问了但失败】",
+      "  (报 error)。两者对使用者都是『不能当成没有数据』,分开只是为了排障看得出是哪一种。"
     ],
     "module_env": "SDLC_DB_SKILL",
     "check_function": "check_readonly_connection",
@@ -45,12 +65,26 @@
     "allowed_environments": ["u"],
     "max_rows_hard_cap": 200,
     "response": {
-      "rows": "?",
+      "rows": "rows",
       "columns": "?",
-      "row_format": "?"
-    }
+      "row_format": "dict"
+    },
+    "verify": {
+      "ok": "ok",
+      "read_only": "transaction_read_only",
+      "environment": "environment",
+      "row_count": "row_count"
+    },
+    "not_ready_exceptions": ["OperationalError", "InterfaceError"]
   },
 
+  "_schemas_note": [
+    "runner 实际允许的 schema 名。填上之后会【强制校验】:命名查询里每个表都必须限定在这些",
+    "schema 内,拼错一个字母会在发出调用之前被拒,而不是查到一张不该查的表。",
+    "留 [\"?\"] = 只要求『表名必须 schema 限定』,不校验是哪一个。",
+    "RUNBOOK-73 §4 说 schema01/schema11 是真名不是占位 —— 但我不把你们的真实 schema 名",
+    "写进这个公共仓库,请填在本地的 SDLC_DB_QUERIES 文件里。"
+  ],
   "schemas": ["?"],
 
   "queries": {

@@ -37,3 +37,9 @@ scratch/
 # git-excluded on their box, and must never be committed here either. We import its runner from a
 # path in SDLC_DB_SKILL; nothing about it belongs in this repo.
 /.github/skills/
+
+# the box's REAL db_queries config (real schemas, tables, columns, SQL), pointed at by
+# SDLC_DB_QUERIES. The committed config/db_queries.json is an all-"?" template: the intranet cannot
+# push, so editing the tracked file on the box guarantees a pull conflict. This is the same
+# arrangement as SDLC_MCP_TOOLS.
+/config/db_queries.local.json

@@ -42,11 +42,31 @@ from . import config
 from . import db_registry
 from . import redaction
 
-# UAT is not production, and a database row reads as authoritative in a way a log line does not.
-# Every packet carries this, so it survives being quoted out of context.
-CAVEAT = ("Live UAT read-only query. UAT is NOT production: it may hold copied, masked or synthetic "
-          "data. Never present a UAT row as a production fact, and never conclude a record does not "
-          "exist in production because it is absent here.")
+# Today the runner addresses one environment, `u`. The label is looked up rather than hard-coded
+# because a packet that SAYS "uat" while the config points somewhere else is worse than no label at
+# all — it is a false provenance stamp on data somebody will quote.
+_ENVIRONMENT_LABELS = {"u": "uat"}
+
+
+def _label(cfg=None):
+    declared = db_registry._clean(db_registry.runner(cfg).get("environment_labels"))
+    try:
+        code = db_registry.environment(cfg)
+    except db_registry.NotAllowed:
+        return "unknown"
+    return str(declared.get(code) or _ENVIRONMENT_LABELS.get(code) or code)
+
+
+def _caveat(label):
+    """UAT is not production, and a database row reads as authoritative in a way a log line does
+    not. Every packet carries this, so it survives being quoted out of context."""
+    if label == "uat":
+        return ("Live UAT read-only query. UAT is NOT production: it may hold copied, masked or "
+                "synthetic data. Never present a UAT row as a production fact, and never conclude a "
+                "record does not exist in production because it is absent here.")
+    return (f"Live read-only query against environment {label!r}, which this build has no reviewed "
+            f"label for. Treat it as unverified: state the environment explicitly and do not "
+            f"present these rows as production facts.")
 
 # What a caller must not conclude from a non-ok packet. Carried in the packet rather than left to
 # the prompt, because the failure it guards against is a model narrating a refusal as a finding.
@@ -75,6 +95,20 @@ def _safe_reason(exc):
                   "<redacted-host>", text)
     text = redaction.redact(text)
     return text[:300]
+
+
+def _failure_state(exc, cfg=None):
+    """`not_ready` for "the path is not connected", `error` for "we asked and it failed".
+
+    Both mean the same thing to a reader — we could not ask, so absence proves nothing — and both
+    produce a packet with no `rows`. The split exists only so an operator can tell a plumbing
+    problem from a query problem without reading the message. The class names are THEIRS, so they
+    live in config: today the UAT Proxy auth failure surfaces as `OperationalError`.
+    """
+    names = db_registry.runner(cfg).get("not_ready_exceptions")
+    names = {str(n) for n in names} if isinstance(names, list) else {"OperationalError"}
+    lineage = {klass.__name__ for klass in type(exc).__mro__}
+    return "not_ready" if lineage & names else "error"
 
 
 def _runner_path(cfg=None):
@@ -176,6 +210,42 @@ def _extract(raw, cfg):
         f"shape. No rows were read and this is NOT an empty result.")
 
 
+def _verify(raw, rows, cfg, requested_environment):
+    """Check the evidence THEY put in the response, instead of taking the rows on trust.
+
+    Their reply carries `ok`, `transaction_read_only`, `environment` and `row_count` (RUNBOOK-73
+    §1). Those are facts about the query that just ran, and reading rows without looking at them
+    would be the same mistake as counting a keyword hit without checking the keyword appeared: the
+    payload looks identical either way. Absent fields are not failures — we assert nothing about a
+    field they did not send — but a field that IS there and disagrees means this result does not
+    get used.
+    """
+    if not isinstance(raw, dict):
+        return
+    fields = db_registry._clean(db_registry.runner(cfg).get("verify"))
+    ok_key = fields.get("ok", "ok")
+    if ok_key in raw and not raw.get(ok_key):
+        raise NotReady("the runner reported the query did NOT succeed; no rows were read and this "
+                       "is not an empty result.")
+    read_only_key = fields.get("read_only", "transaction_read_only")
+    if read_only_key in raw and raw.get(read_only_key) is not True:
+        raise NotReady("the runner did not confirm a read-only transaction, so this result is not "
+                       "used. Read-only is the premise of the whole path, not a preference.")
+    env_key = fields.get("environment", "environment")
+    if env_key in raw and str(raw.get(env_key)) != str(requested_environment):
+        raise NotReady(f"the answer came back from environment {str(raw.get(env_key))!r} when "
+                       f"{str(requested_environment)!r} was asked for. A result from a database we "
+                       f"did not address is discarded.")
+    count_key = fields.get("row_count", "row_count")
+    declared = raw.get(count_key)
+    if isinstance(declared, int) and declared < len(rows):
+        # Fewer counted than handed over means we are reading a different list than they counted.
+        # The other direction is left alone: whether row_count is measured before or after their
+        # LIMIT wrapper is their business, and a larger count is not evidence of a misread.
+        raise NotReady(f"the runner counted {declared} rows but the list read has {len(rows)}; the "
+                       f"response is being read wrongly, so nothing from it is used.")
+
+
 def _keys(rows):
     names = []
     for row in rows:
@@ -191,6 +261,10 @@ def _project(columns_allowed, columns_seen, rows):
     seen = {str(c) for c in columns_seen}
     for row in rows:
         seen |= {str(k) for k in row}
+    if not rows:
+        # No rows says nothing about which columns the query selects, so reporting every declared
+        # column as "missing" would invent a schema problem out of an empty result.
+        return list(allowed), [], [], []
     kept = [c for c in allowed if c in seen]
     dropped = sorted(seen - set(allowed))
     missing = [c for c in allowed if c not in seen]
@@ -224,7 +298,7 @@ def _refusal(name, state, reason, **extra):
         "reason": reason,
         "means_no_data": False,
         "hint": NOT_A_RESULT,
-        "environment": "uat",
+        "environment": _label(),
         "production_verified": False,
         "queried_at": _now(),
     }
@@ -242,14 +316,14 @@ def catalog(probe=False):
     out = {
         "ok": True,
         "state": "catalog",
-        "environment": "uat",
+        "environment": _label(cfg),
         "production_verified": False,
         "calling_enabled": bool(config.DB_ENABLED),
         "skill_configured": _skill_configured(cfg),
         "queries": db_registry.readiness(cfg),
         "config_path": db_registry._config_path(),
         "config_error": cfg.get("_load_error", ""),
-        "caveat": CAVEAT,
+        "caveat": _caveat(_label(cfg)),
     }
     ready = [n for n, e in out["queries"].items() if e["state"] == "ready"]
     out["ready"] = sorted(ready)
@@ -284,13 +358,13 @@ def check():
     except db_registry.NotAllowed as exc:
         return {"ok": False, "state": "refused", "reason": str(exc)}
     except BaseException as exc:                       # noqa: BLE001
-        return {"ok": False, "state": "error", "reason": _safe_reason(exc)}
+        return {"ok": False, "state": _failure_state(exc), "reason": _safe_reason(exc)}
     # Their check's return shape is not pinned down yet (RUNBOOK-73 asks for it). A dict is read by
     # its `ok`; anything else is read by truthiness. Neither reading invents a success.
     ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
     return {"ok": ok, "state": "ok" if ok else "error",
             "reason": "" if ok else "the runner reported the connection is not usable",
-            "environment": "uat"}
+            "environment": _label()}
 
 
 def run(name, args=None, caller="product"):
@@ -300,8 +374,9 @@ def run(name, args=None, caller="product"):
     out-of-policy query produces a precise refusal and costs zero database contact even when the
     path is fully enabled.
     """
+    cfg = db_registry.load()
     try:
-        plan = db_registry.build_query(name, args, caller=caller)
+        plan = db_registry.build_query(name, args, cfg=cfg, caller=caller)
     except db_registry.NotWired as exc:
         return _refusal(name, "not_wired", str(exc))
     except db_registry.NotAllowed as exc:
@@ -316,23 +391,25 @@ def run(name, args=None, caller="product"):
         # The second run of the ONE gate definition, immediately before the call. `build_query`
         # already ran it; this is not redundancy for its own sake — `plan` is data, and a caller
         # that assembled one by other means must not get a socket out of it.
-        db_registry.check_statement(plan["sql"])
-        cfg = db_registry.load()
+        db_registry.check_statement(plan["sql"], cfg)
         module = _load_runner(cfg)
         query = _callable(module, cfg, "query_function", "run_readonly_query")
         raw = query(plan["sql"], params=plan["params"], limit=plan["max_rows"],
                     environment=plan["environment"])
         columns_seen, rows = _extract(raw, cfg)
+        _verify(raw, rows, cfg, plan["environment"])
     except NotReady as exc:
         return _refusal(name, "not_ready", str(exc))
     except db_registry.NotAllowed as exc:
         return _refusal(name, "refused", str(exc))
     except BaseException as exc:                       # noqa: BLE001 - never becomes "no rows"
-        # Their runner refusing, the proxy rejecting the role, a timeout: all of them are "we did
-        # not get an answer". There is no second attempt with another account or another
-        # environment — a fallback that widens access on failure is how a read-only guarantee dies.
-        return _refusal(name, "error", _safe_reason(exc))
+        # Their runner signals every failure by raising (RUNBOOK-73 §2), so this branch is the
+        # normal failure path, not an edge case. There is no second attempt with another account
+        # or another environment — a fallback that widens access on failure is how a read-only
+        # guarantee dies.
+        return _refusal(name, _failure_state(exc, cfg), _safe_reason(exc))
 
+    label = _label(cfg)
     truncated = len(rows) > plan["max_rows"]
     rows = rows[:plan["max_rows"]]
     kept, dropped, missing, projected = _project(plan["columns"], columns_seen, rows)
@@ -347,11 +424,11 @@ def run(name, args=None, caller="product"):
         "columns_dropped": dropped,
         "columns_missing": missing,
         "source_tables": plan["source_tables"],
-        "environment": "uat",
+        "environment": label,
         "production_verified": False,
         "queried_at": _now(),
-        "provenance": f"db:uat/{name}",
-        "caveat": CAVEAT,
+        "provenance": f"db:{label}/{name}",
+        "caveat": _caveat(label),
     }
     # The same exit gate every production-to-browser path crosses. Reaching it with something to fix
     # means the column allow-list let a PII column through, so it counts rather than repairing

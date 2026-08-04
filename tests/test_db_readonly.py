@@ -19,6 +19,7 @@ What these pin, in the order they matter:
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,18 @@ import os
 import sqlite3
 
 STATE = os.environ["FAKE_RUNNER_STATE"]
+
+
+class OperationalError(Exception):
+    """psycopg's class name for the UAT Proxy auth failure (their RUNBOOK-73 §2)."""
+
+
+class ResultLimitExceeded(Exception):
+    """A runner-side refusal: they asked and the runner said no."""
+
+
+_EXCEPTIONS = {"OperationalError": OperationalError,
+               "ResultLimitExceeded": ResultLimitExceeded}
 
 
 def _state():
@@ -65,7 +78,7 @@ def run_readonly_query(sql, params=None, limit=100, environment="u"):
     data = _state()
     mode = data.get("mode", "return")
     if mode == "raise":
-        raise RuntimeError(data.get("error", "boom"))
+        raise _EXCEPTIONS.get(data.get("error_type"), RuntimeError)(data.get("error", "boom"))
     if mode == "sqlite":
         return _sqlite(data, sql, params, limit)
     return data.get("response")
@@ -298,6 +311,22 @@ class EnvironmentTests(_Harness):
         db_readonly.run("routing", {"uc": "UC1"})
         self.assertEqual([c["environment"] for c in self.calls("query")], ["u"])
 
+    def test_a_packet_is_never_stamped_uat_when_the_config_points_elsewhere(self):
+        # If someone widens allowed_environments, the label has to follow. A packet that says "uat"
+        # over data from somewhere else is a false provenance stamp on rows people will quote —
+        # worse than no label, because it survives being copied out of context.
+        payload = _base_config()
+        payload["runner"]["environment"] = "p"
+        payload["runner"]["allowed_environments"] = ["u", "p"]
+        self.write_config(payload)
+        self.write_state({"mode": "return", "response": [{"use_case_id": "UC1", "channel": "SMS"}]})
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertTrue(packet["ok"])
+        self.assertEqual(packet["environment"], "p")
+        self.assertEqual(packet["provenance"], "db:p/routing")
+        self.assertIn("no reviewed label", packet["caveat"])
+        self.assertFalse(packet["production_verified"])
+
 
 class FailureIsNotAbsenceTests(_Harness):
     """The LogDream keyword P0, one system over: a refusal must not read like an answer."""
@@ -359,6 +388,132 @@ class FailureIsNotAbsenceTests(_Harness):
         self.assertTrue(packet["ok"])
         self.assertEqual(packet["rows"], [])
         self.assertEqual(packet["row_count"], 0)
+
+
+class ConfirmedRunnerContractTests(_Harness):
+    """Their real return shape and failure behaviour, confirmed on the box in RUNBOOK-73.
+
+    Everything here was a guess a round ago. It is pinned now precisely because the previous five
+    integration defects were all this: an assumption about their side that nobody had written down.
+    """
+
+    REAL_RESPONSE = {"rows": "rows", "columns": "?", "row_format": "dict"}
+
+    def use_real_contract(self, **overrides):
+        payload = _base_config()
+        payload["runner"]["response"] = dict(self.REAL_RESPONSE)
+        payload["runner"]["verify"] = {"ok": "ok", "read_only": "transaction_read_only",
+                                       "environment": "environment", "row_count": "row_count"}
+        payload["runner"]["not_ready_exceptions"] = ["OperationalError"]
+        payload["queries"]["routing"].update(overrides)
+        self.write_config(payload)
+
+    def reply(self, rows, **overrides):
+        """Their documented envelope: a dict, rows are dicts, and there is NO columns key."""
+        envelope = {"ok": True, "environment": "u", "transaction_read_only": True,
+                    "row_limit": 10, "row_count": len(rows), "rows": rows}
+        envelope.update(overrides)
+        self.write_state({"mode": "return", "response": envelope})
+
+    def test_their_documented_envelope_is_read(self):
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1", "channel": "SMS"}])
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertTrue(packet["ok"], packet)
+        self.assertEqual(packet["rows"], [{"use_case_id": "UC1", "channel": "SMS"}])
+        # Column names come from the row dicts; `columns: "?"` is the right answer, not a gap.
+        self.assertEqual(packet["columns"], ["use_case_id", "channel"])
+
+    def test_an_empty_result_invents_no_missing_columns(self):
+        self.use_real_contract()
+        self.reply([])
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertTrue(packet["ok"])
+        self.assertEqual(packet["rows"], [])
+        self.assertEqual(packet["columns_missing"], [])
+
+    def test_a_reply_that_says_it_failed_is_not_read_for_rows(self):
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1", "channel": "SMS"}], ok=False)
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "not_ready")
+        self.assertNotIn("rows", packet)
+
+    def test_a_result_not_proven_read_only_is_discarded(self):
+        # They send the proof; checking it is the cheap half. Read-only is the premise of the path.
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1", "channel": "SMS"}], transaction_read_only=False)
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "not_ready")
+        self.assertIn("read-only", packet["reason"])
+        self.assertNotIn("rows", packet)
+
+    def test_an_answer_from_another_environment_is_discarded(self):
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1", "channel": "SMS"}], environment="p")
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "not_ready")
+        self.assertNotIn("rows", packet)
+
+    def test_a_row_count_below_the_rows_read_means_we_read_the_wrong_list(self):
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1"}, {"use_case_id": "UC2"}], row_count=1)
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "not_ready")
+        self.assertNotIn("rows", packet)
+
+    def test_a_row_count_above_the_rows_read_is_not_treated_as_a_defect(self):
+        # Whether they count before or after their LIMIT wrapper is theirs to decide; only the
+        # impossible direction is evidence that we are misreading the response.
+        self.use_real_contract()
+        self.reply([{"use_case_id": "UC1", "channel": "SMS"}], row_count=999)
+        self.assertTrue(db_readonly.run("routing", {"uc": "UC1"})["ok"])
+
+    def test_the_proxy_auth_failure_reads_as_not_ready(self):
+        self.use_real_contract()
+        self.write_state({"mode": "raise", "error_type": "OperationalError",
+                          "error": "could not connect"})
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "not_ready")
+        self.assertNotIn("rows", packet)
+        self.assertFalse(packet["means_no_data"])
+
+    def test_a_runner_side_refusal_reads_as_error_not_as_plumbing(self):
+        self.use_real_contract()
+        self.write_state({"mode": "raise", "error_type": "ResultLimitExceeded",
+                          "error": "result over 1MB"})
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "error")
+        self.assertNotIn("rows", packet)
+
+
+class SchemaScopeTests(_Harness):
+    """A schema list, once configured, is a scope gate — not a spelling check."""
+
+    def with_schemas(self, schemas, sql=None):
+        payload = _base_config()
+        payload["schemas"] = schemas
+        if sql:
+            payload["queries"]["routing"]["sql"] = sql
+        self.write_config(payload)
+
+    def test_a_schema_outside_the_configured_scope_is_refused(self):
+        self.with_schemas(["schema11"])
+        packet = db_readonly.run("routing", {"uc": "UC1"})
+        self.assertEqual(packet["state"], "refused")
+        self.assertIn("outside the configured scope", packet["reason"])
+        self.assertEqual(self.calls(), [])
+
+    def test_a_configured_schema_is_accepted(self):
+        self.with_schemas(["schema01", "schema11"])
+        self.write_state({"mode": "return", "response": []})
+        self.assertTrue(db_readonly.run("routing", {"uc": "UC1"})["ok"])
+
+    def test_an_unfilled_schema_list_only_requires_qualification(self):
+        self.with_schemas(["?"])
+        self.write_state({"mode": "return", "response": []})
+        self.assertTrue(db_readonly.run("routing", {"uc": "UC1"})["ok"])
+        self.assertEqual(db_registry.allowed_schemas(db_registry.load()), [])
 
 
 class ColumnAllowListTests(_Harness):
@@ -522,10 +677,37 @@ class ShippedConfigTests(unittest.TestCase):
     def test_the_shipped_environment_is_uat(self):
         self.assertEqual(db_registry.environment(self.cfg), "u")
 
-    def test_the_intranet_skill_is_not_in_this_repo(self):
-        # It holds their token provider and is git-excluded on the box. If it ever appears here,
-        # something copied it out of the box — fail loudly rather than quietly publish it.
-        self.assertFalse(os.path.isdir(os.path.join(ROOT, ".github", "skills")))
+    def test_the_confirmed_runner_contract_ships_as_the_default(self):
+        # Names stay theirs and stay in config; a CONTRACT they have confirmed on the box is a fact
+        # a fresh deployment should not have to rediscover.
+        runner = db_registry.runner(self.cfg)
+        self.assertEqual(runner["response"]["rows"], "rows")
+        self.assertEqual(runner["response"]["row_format"], "dict")
+        self.assertEqual(runner["response"]["columns"], "?")
+        self.assertIn("OperationalError", runner["not_ready_exceptions"])
+
+    def test_no_schema_name_of_theirs_ships_in_this_repo(self):
+        self.assertEqual(db_registry.allowed_schemas(self.cfg), [])
+
+    def test_the_intranet_skill_is_never_tracked_by_git(self):
+        """It holds their token provider: it must never be COMMITTED. That is not the same as
+        "must not exist on disk", and the difference is not academic — the box keeps the skill at
+        exactly this path, so the stronger assertion failed on the one machine that has to run it
+        (their RUNBOOK-73 §5). Assert the invariant that is actually true: nothing under it is
+        tracked, and the path is ignored so nothing can become tracked by accident.
+        """
+        try:
+            tracked = subprocess.run(["git", "ls-files", "--", ".github/skills"], cwd=ROOT,
+                                     capture_output=True, text=True, timeout=30)
+            ignored = subprocess.run(["git", "check-ignore", "-q", ".github/skills/anything"],
+                                     cwd=ROOT, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):    # pragma: no cover - environment-dependent
+            self.skipTest("git is not available here")
+        if tracked.returncode != 0:                      # pragma: no cover - not a checkout
+            self.skipTest("not a git checkout")
+        self.assertEqual(tracked.stdout.strip(), "",
+                         "the intranet's DB skill must never be tracked by this repo")
+        self.assertEqual(ignored.returncode, 0, ".github/skills/ must be gitignored")
 
     def test_the_master_switch_is_off_by_default(self):
         with mock.patch.dict(os.environ, {}, clear=False):

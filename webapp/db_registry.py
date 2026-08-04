@@ -121,12 +121,26 @@ _NAMED_PARAM = re.compile(r"%\(([A-Za-z_]\w*)\)s")
 _POSITIONAL_PARAM = re.compile(r"%s")
 
 
-def statement_problems(sql):
+def allowed_schemas(cfg=None):
+    """The schemas a named query may read, lower-cased. Empty means "qualified, but unchecked".
+
+    Filled in, this is a scope gate rather than a syntax check — the same distinction the LogDream
+    audit turned on: a table name that happens to resolve is not a table we were allowed to read,
+    and a one-letter typo in a schema resolves to a real, different place.
+    """
+    raw = (cfg or load()).get("schemas")
+    if not isinstance(raw, list):
+        return []
+    return [str(s).strip().lower() for s in raw if str(s).strip() not in ("", UNSET)]
+
+
+def statement_problems(sql, schemas=None):
     """Every reason this statement is not acceptable, as a list. Empty list means acceptable.
 
     Returns all of them rather than the first: a config author fixing one placeholder at a time
     should not need one round trip per problem.
     """
+    schemas = [str(s).lower() for s in (schemas or [])]
     problems = []
     text = (sql or "").strip()
     if not text:
@@ -155,17 +169,24 @@ def statement_problems(sql):
         problems.append("positional %s parameters are not accepted — use %(name)s")
     known_ctes = {match.lower() for match in _CTE.findall(body)}
     for relation in _RELATION.findall(body):
-        if "." in relation:
+        if "." not in relation:
+            if relation.lower() not in known_ctes:
+                problems.append(f"relation {relation!r} is not schema-qualified (write schema.table)")
             continue
-        if relation.lower() in known_ctes:
-            continue
-        problems.append(f"relation {relation!r} is not schema-qualified (write schema.table)")
+        schema = relation.split(".", 1)[0].lower()
+        if schemas and schema not in schemas:
+            problems.append(f"schema {schema!r} is outside the configured scope {sorted(schemas)}")
     return problems
 
 
-def check_statement(sql):
-    """Raise `NotAllowed` naming every problem. The single definition both layers call."""
-    problems = statement_problems(sql)
+def check_statement(sql, cfg=None):
+    """Raise `NotAllowed` naming every problem. The single definition both layers call.
+
+    Both layers pass through here — and both let it read the schema scope from the same config —
+    so there is no way for the planning side and the executing side to disagree about what is
+    acceptable. That disagreement is precisely what RUNBOOK-71 turned out to be.
+    """
+    problems = statement_problems(sql, allowed_schemas(cfg))
     if problems:
         raise NotAllowed("statement refused: " + "; ".join(problems))
 
@@ -259,7 +280,7 @@ def build_query(name, args=None, cfg=None, caller="product"):
             f"config/db_queries.json. No database call was made.")
 
     sql = str(spec.get("sql"))
-    check_statement(sql)
+    check_statement(sql, cfg)
     environment(cfg)     # refuse a non-UAT target before anything is bound
 
     declared = _clean(spec.get("params"))
@@ -307,7 +328,8 @@ def readiness(cfg=None):
         if not isinstance(spec, dict):
             continue
         missing = _missing(spec)
-        problems = [] if "sql" in missing else statement_problems(str(spec.get("sql")))
+        problems = ([] if "sql" in missing
+                    else statement_problems(str(spec.get("sql")), allowed_schemas(cfg)))
         if missing:
             state = "not_wired"
         elif problems:

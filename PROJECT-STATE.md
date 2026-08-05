@@ -3,14 +3,13 @@
 Living status doc: **where we are across the full SDLC lifecycle**, updated as we go.
 Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready specs).
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-06
 
-> ⚠️ **Honesty note about this file (2026-08-05).** The milestone log below stops at 2026-07-21
-> while the repo is at 2026-08-05 — RUNBOOK-46 through RUNBOOK-75 (MDC grouping, the AIOps/MCP
-> incident chain, the answer-quality evals, the read-only DB layer, and today's owner answers) are
-> **not** recorded here. The stage table above is therefore also behind. Bringing this file back in
-> line is tracked work, not a formality: it is the document used to explain the project upward, and
-> quoting it today would understate the estate by roughly two weeks of shipped capability.
+> ✅ **Caught up 2026-08-06.** This file had stalled at 2026-07-21 while the repo ran on to
+> 2026-08-05 — RUNBOOK-46 through RUNBOOK-76 (93 commits) were missing, including an entire new
+> capability line. The gap is now filled from the commit history rather than from memory. The
+> largest single omission was **production incident investigation**, which is not a variation on
+> anything already in the table and now has its own row.
 
 > Legend: 🟢 live / done · 🟡 in progress (beachhead) · ⚪ not started · 🔵 TBD / optional
 > Rule: keep it honest — "compiling-shaped" ≠ "builds"; don't mark 🟢 until it actually runs.
@@ -22,11 +21,12 @@ Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready 
 | Stage | Status | Reached | What we have | Next |
 |---|---|---|---|---|
 | **Requirements analysis** | 🟡 beachhead | 2026-07-03 | Plain-language ask → structured `ChangeRequest` → **retrieval-grounded target** (repo + controller) with a citation-backed rationale; refuses to guess when ambiguous. Verified on the real mirror (`change.from_intent`). Parser is rule-based (swappable for an LLM) | Real LLM parser; free-form intent; widen beyond the add-endpoint template |
-| **Architecture design / impact** | 🟢 foundation | 2026-07-01 | Cross-repo Q&A + impact / dependency / message-routing analysis over the mirror — the retrieval "moat" | Turn understanding into a design proposal for a specific change |
+| **Architecture design / impact** | 🟢 foundation | 2026-07-01 | Cross-repo Q&A + impact / dependency / message-routing analysis over the mirror — the retrieval "moat". Since 2026-07-29 the chain runs **all the way to the exit** (carrier + SMSC/APNs), not just to ingress, joined to the authoritative `tbl_use_case_router` on its real four-column key | Hub repos still answer "376 downstream", which is correct and useless — blast radius needs tiering. Carrier coverage is capped at ~27% by the source data, not by us |
 | **Code generation** | 🟡 beachhead | 2026-07-03 | Scaffolding (new service) **+ in-context change to an existing service, now driven by intent+retrieval:** `from_intent` locates the target and `add_endpoint` applies a templated change, verified green on `mc-hk-hase-ingress-api`. Change *content* is still templated (add-endpoint) | Widen change kinds (message listener / DAO / config — REPOMAP already indexes these) beyond the endpoint template |
 | **Run tests** | 🟢 thin slice | 2026-07-03 | **Proven end-to-end on a real service:** the tool runs `mvn test` on the generated change in `scratch/` and emits `BUILD_RESULT.md` (PASS, exit 0) itself — verified on `mc-hk-hase-ingress-api` (real Maven 3.9.6, Zulu JDK 21) | Broaden beyond a single templated GET endpoint (message listener / DAO / config), and drive the change from a real ask not a hardcoded template |
 | **Build** | 🟢 thin slice | 2026-07-03 | Same run: real service compiles + tests green in `scratch/`; `change/build.py` resolves `mvn`→`mvn.cmd` on Windows and records launch failures instead of crashing | Same broadening; later `mvn package` / multi-module |
 | **Deploy** | 🔵 TBD | — | — | Stays human-gated. Possibly an **MCP server / skills** so the internal copilot / opencode **assists** a human through deploy (never autonomous) — see "Deploy" below |
+| **Operate / incident response** | 🟡 beachhead | 2026-07-31 | **New line, not a variation on the rows above.** Production alert → *which logs to look at* → cited root cause → business blast radius, over three colleague-owned MCP servers (LogDream / CloudWatch / Portal). We own the **query plan**, they execute. A dedicated investigator sub-agent reads production logs, redacts at three layers, and returns a structured evidence packet — raw logs never enter the model context or session history. Live-verified on the real intranet across RUNBOOK-60 → 71 | Only ONE LogDream app is mapped today (hkp3 + portal), so coverage — not engine capability — is the ceiling. Needs the service↔app-name map for the hot ~20 services |
 
 ---
 
@@ -78,20 +78,34 @@ with cited rationale, refuses to guess — verified on the real mirror 2026-07-0
 comes first because the spec must be grounded in real code; serve it via the narrow-first
 router (a domain sub-agent only later, if needed).
 
-## Current focus / recommended next: a thin **vertical slice** of the loop
+## Current focus / recommended next (rewritten 2026-08-06)
 
-Rather than pushing right toward deploy, the highest-value next move is to close a
-thin end-to-end slice for **one real task** (e.g. "add an endpoint / message listener
-to an existing service"):
+The 2026-07 recommendation on this line was "close a thin vertical slice generate → test → diff".
+**That slice closed on 2026-07-03** and the project moved somewhere the old text did not anticipate:
+almost all of the last month went into the **retrieval/knowledge layer and the incident line**, not
+into code generation. That was the right call — every stage is capped by what the assistant can
+correctly say about the estate — but it means the honest current position is:
 
-1. **Understand impact** — we have this (Step 1 retrieval). 🟢
-2. **Generate a real code change** — extend scaffolding from "skeleton" to actual code
-   in the context of an existing service. 🟡→
-3. **Compile + test it green** in `scratch/` (`mvn`) — pulls in *Run tests* + *Build*. ⚪→
-4. **Produce a diff for human review.**
+**The engine is ahead of the data.** Across five verification rounds the intranet has stopped
+finding engine defects and started finding *my assumptions about their environment*; the remaining
+blockers are almost all somebody else's to unblock:
 
-This single slice is the most credible capability to demonstrate: *the assistant writes
-a change that compiles and passes tests, grounded in our own code, without touching prod.*
+| Blocked on | What it gates | Who |
+| --- | --- | --- |
+| UAT RDS Proxy **read-role auth** | live DB queries (layer built, untested against a real DB) | DB owner |
+| A **same-moment** export of the 5 UAT tables | every cross-table count is a cross-time join today | DBA, one ticket |
+| **service ↔ LogDream app-name** map (hot ~20) | incident coverage — only one app is mapped | intranet, ~half a day |
+| **vendor alias sign-off** (`HTCL` / `HTCL OLD` / `AWS HK SNS` / `AWS SG SNS`) | naming a carrier instead of quoting a raw string | business owner |
+| `send_mode = 0` (903 rows) | one code table entry | business owner |
+
+**What is genuinely ours to fix next**, in priority order:
+
+1. **Hub blast-radius tiering.** `api-common` answers "376 downstream" — correct, and useless.
+   A shared library's impact needs tiering (direct vs transitive, cross-channel, criticality) and
+   collapsing, or the flagship answer stays unusable on exactly the repos people ask about most.
+2. **Widen change kinds** (message listener / DAO / config) beyond the add-endpoint template —
+   this is the *Code generation* row's stated Next and has not moved since 2026-07-03.
+3. **Productionise** — still `127.0.0.1`, no auth, no audit trail. Fine for a demo, not for a team.
 
 ## Cross-cutting / platform track (parallel to the capability line)
 
@@ -137,6 +151,13 @@ is solid.
 When a stage changes status: update its row (Status / Reached / What we have / Next)
 **and** append a dated line to the Milestone log. Record the date a stage is first
 reached so we can see the pace over time. Keep the honesty rule at the top.
+
+- **2026-07-22 → 2026-07-24 — MDC scope made defensible, and three parsing defects fixed on real data.** `list_repos` gained `group="mdc"` (the `amet-mdc` ∪ `mdc_common` footprint), and RUNBOOK-46/47 verified it adversarially on the box: **MDC = 45 business-confirmed repos**, plus **2 graph-adjacent candidates** the sheet does not list — so the honest phrasing is "45 confirmed +2 pending owner", never "complete". RUNBOOK-48 exercised all 21 tools and confirmed **CodeGraph is live (31/31 bundles) and degrades honestly** — no silent grep fallback. Three real parsing defects fixed against measured data: **3HK SMSC over-count 69→14** (missing vendor + an `htcl→3hk` alias), the **complete universe 392→460** (decision-jobs genuinely 404, not pagination), and an **SMS vendor mis-parse** replaced with a rightmost-known-vendor whitelist. RUNBOOK-52 closed a suspected ICCM/3HK nesting bug as **correct as built** — the one edge case is 0/79 in real data. Also fixed a **P0 message-direction bug**: constant-only `reference` edges were folded into consumers, mislabelling producers.
+- **2026-07-27 — The ownership seam was generalised, and it turned out only 1 of 5 ingestion points had one.** RUNBOOK-49/50/51 had each ended up editing the same Python vocabulary file, which is the definition of a missing seam. Worse, `index/*.json` is gitignored — so **every knob edit made on the box died there**, including the owner-answer seam itself. Fix: a committed `config/` directory the intranet can edit and version. This is the constraint that has shaped every design since: **the intranet cannot push anywhere**, so anything they must edit has to be a file git either tracks (and we merge) or never touches (`*.local.json`). The owner's `rule_text` answers landed the same day (`>` `&` `|` + rule_text-over-priority) and lit up interpretation with **zero code change** — the seam working as designed. `AGENTS.md` now records the AI division of labour explicitly.
+- **2026-07-28 → 2026-07-29 — AIOps recon, then the incident path itself.** Two recon rounds (RUNBOOK-55/56) established the shape before any building: a colleague's three MCP servers, and the seam **we own the query plan, they execute**. Then `incident_impact` (alert text → affected repos → topics → use cases), a structure-aware context budget, and a shared `FACTS.md`. Scope was deliberately cut — resend dropped, blast radius added, and **exactly one** sub-agent, split by PII/size/replayability rather than by tool count. The RUNBOOK-57 "use-case gap" turned out to be **a bypassed guard, not a data problem**; and the same week the chain was carried **to the exit** (vendor + SMSC/APNs) instead of stopping at ingress.
+- **2026-07-30 → 2026-07-31 — Five rounds of the intranet catching me asserting things about their environment.** Every single defect had the same shape, and the shape sharpened each round: **names → structures → formats**. (1) `hk1` vs `hkl` — I misread a transcribed value, and digit/letter lookalikes are now permanently suspect; MCP tool **errors were not branched**, so an error body could be reported as "found logs". (2) A whole **missing hop** — `log.search_files` → `file_name`, which `log.read` requires — plus a `from_time` parameter that does not exist. (3) **Their responses are JSON and I was reading them as text** (2 lines became 11; `entries`/`README.txt` became "app names" in a *verification* set), and a missing timezone **reported a refusal and then sent the request anyway**. (4) `alert_time` **format**: passing `2026-07-30 03:15 HKT` verbatim was rejected — the stamp and the timezone are separate parameters. "Pass it through unchanged" was the right instinct and the wrong conclusion, because **format and instant are two different things**. Each fix moved something out of code and into `config/mcp_tools.json`: first the arguments, then response **shapes**, then value **formats**. Also shipped: the CloudWatch metric branch (the first round with **nothing left for me to guess** — their handoff doc gave the whole contract up front), and an **alarm-name leak** found at the exit gate, fixed by fingerprinting **by value** across the whole packet rather than by field type, because one identifier appears in several fields.
+- **2026-08-03 — Answer quality became measurable, and the first baseline mostly indicted the test harness.** 20 eval cases, each carrying the RUNBOOK or owner decision it encodes, checked with deliberately blunt **negative** assertions (`must_not_mention`, `must_not_call_tools`) — no judge model, because a judge would drift too. The box's first baseline read **14/20**; on inspection it was **19/20**. Five of the six reds were the checker punishing the model for **quoting a forbidden phrase in order to deny it**, which is *better* behaviour than avoiding the words. Lesson kept: **when a case goes red, the first suspect is the assertion, not the model.** Also shipped the MCP console panel (the status pill opens a catalog you can read and call), reusing the existing redaction gate rather than opening a second path.
+- **2026-08-04 — Two defects of the same shape, one day apart, and the read-only DB layer.** (1) When a keyword **did not match**, the server silently returned the **tail of the file** — and we stamped it "matched N lines", producing a confident root cause from unrelated production logs. (2) An app being **in the live list did not mean we were allowed to read it**: 35 unrelated repos could slip in via a naming rule. Both fixes are **local re-verification** that does not depend on the other side — line-by-line confirmation that the keyword actually appears, and an explicitly-mapped scope with a strict zero-call refusal. The read-only UAT DB layer was built the same day, deliberately **everything except their names**; their runner contract was absorbed with each of its four evidence fields **verified locally** rather than trusted (no proof of a read-only transaction → the result is discarded). They caught me writing "cannot exist on disk" where the contract said "cannot be committed". 🔴 Still blocked on **UAT RDS Proxy read-role auth** — the one thing no amount of engine work can unblock.
 
 - **2026-08-05 — Three owner answers landed and were implemented at three different strengths; the glossary stopped faking decodings.** The DB connection work is parked (waiting on the DB owner), so this round is everything that does not depend on it.
   - **`business_category` — the data dictionary defines 0–7 and stops there.** This makes the 33/37 finding *stronger*, not weaker: three sources now disagree (dictionary 0–7 / `BusinessCategoryEnum.java` also 8, 10–21, 32, 34, 35 / real UAT rows also **33** and **37**, all `status=Y`). Flattening those into one "known enum" is exactly what produced the earlier wrong claim that 33/37 were unregistered *new* categories — they are registered nowhere. `resolve_business_category()` now returns a `source` (`data_dictionary` / `code_enum` / `undefined`) and only `undefined` is a defect; codes defined in code but absent from the dictionary excerpt are reported, never alarmed. Enums moved out of code into `config/business_enums.json`.

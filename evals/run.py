@@ -22,6 +22,18 @@ So the checks are deliberately blunt and mostly NEGATIVE:
 Every case carries a `why` naming the RUNBOOK or owner decision it encodes. A case with no `why`
 is a case nobody will trust when it goes red.
 
+**One rule learned the hard way (RUNBOOK-66 baseline):** when a case goes red, the FIRST suspect is
+the assertion, not the model. Five of that baseline's six reds were this file punishing the model
+for quoting a forbidden phrase in order to *deny* it — which is better behaviour than avoiding the
+words, so a checker that fails it trains exactly the wrong thing. `asserts_phrase` exists for that.
+
+**And one rule about the questions themselves:** no case may hardcode a real repo id. Only the box
+can verify a name, so questions use `{placeholder}` and `config/eval_repos.json` supplies the real
+values (blank in the committed template — an unresolved placeholder SKIPS its case rather than
+running against a guess). A test enforces this, and it has already caught a case that named a repo
+which does happen to be real: the rule is about who is entitled to assert the name, not about
+whether the guess was lucky.
+
 Running it:
 
     python -m evals.run                     # in-process, needs mirror + a real model

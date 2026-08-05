@@ -75,10 +75,32 @@
       "",
       "That mapping is used ONLY to CROSS-CHECK rule_text, never to override it: rule_text stays",
       "authoritative per the 2026-07-27 owner answer. A disagreement is reported as a data-quality",
-      "finding, exactly like the existing rule_text-vs-priority disagreement.",
+      "finding, exactly like the existing rule_text-vs-priority disagreement."
+    ],
+
+    "_measured_2026_08_05": [
+      "CONFIRMED PRESENT in the real UAT master export (the column bound successfully), so the",
+      "optimistic binding paid off. But the dictionary is INCOMPLETE against its own data:",
       "",
-      "This column is bound optimistically — absent from the export just means the cross-check does",
-      "not run, and nothing else changes."
+      "  code 3 -> 1,435 rows      defined: send by single channel",
+      "  code 0 ->   903 rows      *** NOT DEFINED — and the second most common value ***",
+      "  code 2 ->   249 rows      defined: send by priority",
+      "  code 1 ->   148 rows      defined: send at the same time",
+      "  code 5 ->    72 rows      *** NOT DEFINED ***",
+      "  code 4 ->     3 rows      *** NOT DEFINED ***",
+      "",
+      "Undefined codes stay undefined — resolve_send_mode() reports them as unknown rather than",
+      "guessing, and they are excluded from the cross-check because a comparison it does not",
+      "understand is worse than no comparison. `usecase_consistency` raises an `undefined_send_mode`",
+      "finding so those ~978 rows leave a trace rather than vanishing.",
+      "",
+      "OWNER QUESTION OPEN: what do 0, 4 and 5 mean? Add them to `data_dictionary` and",
+      "`rule_text_equivalent` below when the answer arrives — no engine change is needed. On the box,",
+      "write them to config/business_enums.local.json (gitignored, auto-preferred) rather than here.",
+      "",
+      "The cross-check found 30 rule_text disagreements on the real export. ALSO an open owner",
+      "question: expected historic drift, or a data-quality exception? Until answered they are",
+      "reported at warning severity with rule_text named as the winner, which is the safe reading."
     ],
     "data_dictionary": {
       "1": "Send at the same time",

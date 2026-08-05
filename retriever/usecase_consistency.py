@@ -415,6 +415,32 @@ def quality_findings(severity=None, offset=0, limit=50):
             "citations": [], "count_active": no_ext_active, "count_inactive": no_ext_inactive,
         })
 
+    # send_mode codes present in the data but absent from the owner's dictionary. Measured on the
+    # real UAT export 2026-08-05: the dictionary defines 1/2/3, and the export ALSO contains 0
+    # (the second most common value), 4 and 5. Silence here would be the wrong shape twice over —
+    # the per-use-case cross-check skips unknown codes (correctly, it cannot compare what it does
+    # not understand), so without this dataset-wide finding an undefined code that covers hundreds
+    # of rows would leave no trace anywhere.
+    undefined_modes = {}
+    for uc_id_lower, identity in identity_idx.items():
+        resolved = uc.resolve_send_mode(identity.get("send_mode_code"))
+        if resolved["code"] is not None and not resolved["known"]:
+            undefined_modes[resolved["code"]] = undefined_modes.get(resolved["code"], 0) + 1
+    if undefined_modes:
+        defined = ", ".join(str(code) for code in sorted(uc.send_mode_enum()))
+        findings.append({
+            "check": "undefined_send_mode", "severity": "warning", "use_case_id": None,
+            "message": (
+                "tbl_use_case.send_mode carries code(s) the data dictionary does not define: "
+                + ", ".join(f"{code} ({count} row(s))"
+                            for code, count in sorted(undefined_modes.items()))
+                + f" — defined codes are {defined}. These rows are excluded from the "
+                  "send_mode/rule_text cross-check, so their send semantics rest on rule_text "
+                  "alone. Ask the owner what the codes mean; the answer goes in "
+                  "config/business_enums.json and needs no code change."),
+            "citations": [], "codes": sorted(undefined_modes),
+        })
+
     base_quality = uc.quality_report()
     if base_quality.get("available"):
         dictionary, code_only = uc.business_category_sources()

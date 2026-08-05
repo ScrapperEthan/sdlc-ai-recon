@@ -180,14 +180,39 @@ def coverage(names=None, path="index/glossary.json"):
     totals = {"filled": 0, "placeholder": 0, "missing": 0}
     for item in tokens:
         totals[item["state"]] += 1
-    covered = sum(1 for name in repo_names
-                  if any(tok.lower() in authored and not is_unfilled(authored[tok.lower()])
-                         for tok in _TOKEN_RE.findall(name)))
+
+    usable = {token for token, meaning in authored.items()
+              if meaning and not is_unfilled(meaning)}
+    any_meaning = full_meaning = 0
+    slots = decoded = 0
+    for name in repo_names:
+        name_tokens = [tok.lower() for tok in _TOKEN_RE.findall(name)]
+        if not name_tokens:
+            continue
+        hits = [tok for tok in name_tokens if tok in usable]
+        slots += len(name_tokens)
+        decoded += len(hits)
+        if hits:
+            any_meaning += 1
+        if len(hits) == len(name_tokens):
+            full_meaning += 1
+
     return {
         "file_readable": _read(path) is not None,
         "path": _resolve(path),
         "repos_measured": len(repo_names),
-        "repos_with_any_meaning": covered,
+        # MEASURED 2026-08-05 and found useless: this hit 459/460 before the box filled anything,
+        # and stayed at 459/460 after 20 more tokens were filled. Almost every repo name contains
+        # at least one common token, so "any" saturates immediately. Kept because a DROP here would
+        # still be meaningful, but it must never be quoted as progress.
+        "repos_with_any_meaning": any_meaning,
+        # The two that actually move. `token_slots_decoded` is the honest completion rate: of every
+        # token occurrence across every real repo name, how many can be explained. `repos_fully_
+        # decoded` is the stricter one a reader feels — a name is only genuinely readable when it
+        # has no unexplained parts left.
+        "token_slots": slots,
+        "token_slots_decoded": decoded,
+        "repos_fully_decoded": full_meaning,
         "authored_entries": len(authored),
         "distinct_tokens": len(tokens),
         "totals": totals,
@@ -206,9 +231,15 @@ def render_coverage_markdown(report):
             "replaces every CJK character with `?`).",
             "",
         ]
+    slots = report["token_slots"] or 1
     lines += [
         f"- repo names measured: **{report['repos_measured']}**",
-        f"- names that get at least one token decoded: **{report['repos_with_any_meaning']}**",
+        f"- **token slots decoded: {report['token_slots_decoded']} / {report['token_slots']} "
+        f"({100 * report['token_slots_decoded'] // slots}%)** — the number that moves as you fill",
+        f"- **names with EVERY token decoded: {report['repos_fully_decoded']}** — the number a "
+        "reader feels",
+        f"- names with at least one token decoded: {report['repos_with_any_meaning']} "
+        "(saturates almost immediately — do not read this one as progress)",
         f"- authored entries: **{report['authored_entries']}**",
         f"- tokens seen in real names: **{report['distinct_tokens']}** "
         f"(filled {report['totals']['filled']}, placeholder {report['totals']['placeholder']}, "

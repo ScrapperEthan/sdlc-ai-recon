@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from retriever import config, delivery_chain
 from retriever import rule_text as rt
 from retriever import traffic, usecase_catalog, usecase_consistency as ucc, usecase_router
 
@@ -310,3 +311,192 @@ class RangeTextTest(unittest.TestCase):
     def test_the_shipped_dictionary_range_reads_as_the_photo_shows(self):
         dictionary, _code_only = usecase_catalog.business_category_sources()
         self.assertEqual(ucc._range_text(dictionary), "0-7")
+
+
+class ThreeTableJoinTest(unittest.TestCase):
+    """The four-column router key needs a business_category, and it usually lives on the MASTER
+    table — so reaching a carrier is a THREE-table join, not two.
+
+    RUNBOOK-75's first C1 snippet forgot to supply it and reported 0 matches on a dataset that
+    actually matches thousands of rows, which reads as "this table does not join" rather than "my
+    script passed an empty key". The engine was correct throughout; only the verification script
+    was wrong. These tests pin the distinction so a future snippet cannot make the same mistake
+    silently.
+
+    Deliberately synthetic: no snapshot counts are asserted here. Real numbers belong in a runbook
+    report, not in a test that would go red the next time the export changes.
+    """
+
+    KEY = ["business_category", "channel", "route", "router"]
+
+    def _index(self, category="1"):
+        return {"available": True, "table_present": True, "row_count": 1,
+                "key_fields": list(self.KEY), "unbound_key_fields": [],
+                "index": {(category, "sms", "r1", "rt1"): [
+                    {"id": "9", "vendor": "HTCL", "delivery_path": "",
+                     "citation": "router.csv:2"}]}}
+
+    def _rule(self, **over):
+        rule = {"channel": "SMS", "route": "R1", "router": "RT1", "traffic_percentage": "100"}
+        rule.update(over)
+        return rule
+
+    def test_rule_without_its_own_category_needs_the_master_one(self):
+        # The exact failure mode: no category anywhere -> incomplete key -> no match, with a reason.
+        missed = usecase_router.router_for_rule(self._rule(), "", index=self._index())
+        self.assertFalse(missed["matched"])
+        self.assertIn("incomplete natural key", missed["reason"])
+        self.assertIn("business_category", missed["missing_key_fields"])
+
+        # Supply the master category and the SAME rule matches.
+        hit = usecase_router.router_for_rule(self._rule(), "1", index=self._index())
+        self.assertTrue(hit["matched"])
+        self.assertEqual(hit["business_category_source"], "master")
+
+    def test_a_rule_carrying_its_own_category_does_not_need_the_master(self):
+        hit = usecase_router.router_for_rule(
+            self._rule(business_category="1"), "", index=self._index())
+        self.assertTrue(hit["matched"])
+        self.assertEqual(hit["business_category_source"], "rule")
+
+    def test_the_rows_own_category_wins_and_the_disagreement_is_reported(self):
+        # Row-local wins, but silently preferring it would hide that the two tables point at
+        # different carriers' rows — which is the failure RUNBOOK-54 existed to prevent.
+        hit = usecase_router.router_for_rule(
+            self._rule(business_category="1"), "2", index=self._index())
+        self.assertTrue(hit["matched"])
+        self.assertIn("business_category_conflict", hit)
+
+    def test_an_empty_master_category_never_matches_by_dropping_the_column(self):
+        # The dangerous "fix" would be to match on the remaining three columns when the category is
+        # blank. That lands a use case on an unrelated carrier's row.
+        result = usecase_router.router_for_rule(self._rule(), "", index=self._index(category=""))
+        self.assertFalse(result["matched"])
+
+
+class LocalEnumOverrideTest(unittest.TestCase):
+    """The intranet cannot push, so an owner answer has to be writable on the box that day.
+
+    The real export carries send_mode codes 0/4/5 that nobody has defined yet. When the owner
+    explains them, editing the TRACKED config on the box would leave an uncommitted change to a
+    tracked file and refuse their next `git pull` — one config blocking every unrelated fix in the
+    same pull. `config/business_enums.local.json` is gitignored and auto-preferred, so it costs
+    them no round trip through this repo.
+    """
+
+    def test_local_file_is_preferred_over_the_committed_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "config"))
+            for name in ("business_enums.json", "business_enums.local.json"):
+                with open(os.path.join(tmp, "config", name), "w", encoding="utf-8") as handle:
+                    json.dump({"_which": name}, handle)
+            with mock.patch.object(config, "ROOT", tmp):
+                self.assertTrue(
+                    config._cfg_local("SDLC_NOPE", "business_enums.json").endswith(".local.json"))
+
+    def test_committed_file_is_used_when_no_local_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "config"))
+            with mock.patch.object(config, "ROOT", tmp):
+                path = config._cfg_local("SDLC_NOPE", "business_enums.json")
+            self.assertTrue(path.endswith("business_enums.json"))
+            self.assertNotIn(".local.", path)
+
+    def test_env_var_still_wins_over_both(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "config"))
+            with open(os.path.join(tmp, "config", "business_enums.local.json"), "w") as handle:
+                handle.write("{}")
+            with mock.patch.object(config, "ROOT", tmp),                  mock.patch.dict(os.environ, {"SDLC_BE_TEST": "/elsewhere/x.json"}):
+                self.assertEqual(config._cfg_local("SDLC_BE_TEST", "business_enums.json"),
+                                 "/elsewhere/x.json")
+
+    def test_a_local_file_defining_one_enum_does_not_blank_the_others(self):
+        # Replacement, not merge — safe ONLY because defaults live in code and apply per section.
+        # A local file answering just send_mode must not wipe business_category.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "business_enums.local.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"send_mode": {"data_dictionary": {"0": "NEWLY_EXPLAINED"}}}, handle)
+            with mock.patch.object(usecase_catalog.config, "BUSINESS_ENUMS_JSON", path):
+                self.assertEqual(usecase_catalog.resolve_send_mode("0")["label"],
+                                 "NEWLY_EXPLAINED")
+                # business_category untouched, straight from the in-code seed.
+                self.assertEqual(usecase_catalog.resolve_business_category("6")["source"],
+                                 "data_dictionary")
+
+
+class UndefinedSendModeVisibilityTest(unittest.TestCase):
+    """Codes 0/4/5 exist in the real export and the dictionary defines none of them.
+
+    The per-use-case cross-check correctly SKIPS unknown codes — it cannot compare a meaning it does
+    not have. That is right, and it is also why a dataset-wide finding is needed: without one, ~978
+    rows carrying an undefined code would leave no trace anywhere, which is the same "silence reads
+    as fine" shape this codebase keeps closing.
+    """
+
+    def test_undefined_codes_are_reported_with_their_row_counts(self):
+        identity_idx = {
+            "a": {"use_case_id": "A", "send_mode_code": "0"},
+            "b": {"use_case_id": "B", "send_mode_code": "0"},
+            "c": {"use_case_id": "C", "send_mode_code": "5"},
+            "d": {"use_case_id": "D", "send_mode_code": "3"},   # defined -> not reported
+            "e": {"use_case_id": "E", "send_mode_code": ""},    # absent  -> not reported
+        }
+        undefined = {}
+        for identity in identity_idx.values():
+            resolved = usecase_catalog.resolve_send_mode(identity["send_mode_code"])
+            if resolved["code"] is not None and not resolved["known"]:
+                undefined[resolved["code"]] = undefined.get(resolved["code"], 0) + 1
+        self.assertEqual(undefined, {0: 2, 5: 1})
+
+    def test_the_cross_check_skips_undefined_codes_rather_than_guessing(self):
+        ast = rt.parse("EMAIL & SMS")
+        for code in ("0", "4", "5"):
+            self.assertIsNone(
+                ucc._send_mode_finding("X", ast, {"send_mode_code": code}, []), code)
+
+
+class VendorVerificationSummaryTest(unittest.TestCase):
+    """The aggregate the intranet asked for: the live-traffic/no-carrier rows must be visible in a
+    report summary, not only by walking every router row."""
+
+    def _channels(self, verdicts):
+        return [{"authoritative_router": [
+            {"matched": True, "vendor_blank_explained": {"holds": v}} for v in verdicts]}]
+
+    def test_counts_split_three_ways(self):
+        summary = delivery_chain._vendor_verification(
+            self._channels([True, True, False, None]))
+        self.assertEqual(summary["holds"], 2)
+        self.assertEqual(summary["fails"], 1)
+        self.assertEqual(summary["undecidable"], 1)
+        self.assertEqual(summary["blank_vendor_rows"], 4)
+
+    def test_headline_names_the_failures_and_refuses_to_license_an_inference(self):
+        summary = delivery_chain._vendor_verification(self._channels([False, True]))
+        self.assertIn("1 matched router row", summary["headline"])
+        self.assertIn("NOT evidence that a carrier can be inferred", summary["headline"])
+        self.assertIn("exported at different moments", summary["headline"])
+
+    def test_rows_with_a_present_vendor_are_not_counted(self):
+        channels = [{"authoritative_router": [{"matched": True}]}]
+        self.assertEqual(delivery_chain._vendor_verification(channels)["blank_vendor_rows"], 0)
+
+    def test_no_headline_when_nothing_was_checked(self):
+        self.assertEqual(delivery_chain._vendor_verification([])["headline"], "")
+
+    def test_report_surfaces_the_summary(self):
+        import impact_report
+        lines = impact_report.render_delivery_chain({
+            "available": True, "channel_source": "declared", "by_channel": [],
+            "vendor_verification": {"holds": 283, "fails": 244, "undecidable": 812,
+                                    "blank_vendor_rows": 1339, "headline": ""},
+        })
+        text = chr(10).join(lines)
+        self.assertIn("244 unexplained", text)
+        self.assertIn("283 explained", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

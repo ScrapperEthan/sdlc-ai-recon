@@ -1,9 +1,15 @@
 # RUNBOOK-75 (INTERNAL Codex) — verify the three 2026-08-05 owner answers, and fill the glossary
 
+> ## ✅ 已执行完毕 2026-08-05 —— 结论见 `docs/RUNBOOK-75-FINDINGS-zh.md`
+>
+> 内网已跑完并回报。**保留这份文件只为可复现**,不需要再跑一遍。任务 C 的脚本**当时是错的**,
+> 已按内网的诊断修正(见下方 🔴 标注);其余任务的脚本原样有效。
+> 后续验证在 **RUNBOOK-76**。
+>
 > **只读。** 不写任何生产数据,不改被 git 跟踪的文件(唯一的例外是 `index/glossary.json`,
 > 它本来就是盒子本地的、被 gitignore 的手写文件)。
 >
-> **背景:** 业主 2026-08-05 回答了三件事,代码已按答案改完并推送(1425 tests 本地全绿)。
+> **背景:** 业主 2026-08-05 回答了三件事,代码已按答案改完并推送(1445 tests 本地全绿)。
 > 这份 runbook 只做一件事:**在真实数据上验证这三条实现是对的**,以及把词典填起来。
 >
 > **回报纪律(和前几轮一样):** 回报**取值和计数**,不要贴数据行,不要贴人名
@@ -17,7 +23,7 @@
 git pull && python -m pytest tests -q
 ```
 
-期望 **1425 passed**。如果这一步就不绿,**先停,把失败贴回来** —— 后面的验证都建立在它之上。
+期望 **1445 passed**。如果这一步就不绿,**先停,把失败贴回来** —— 后面的验证都建立在它之上。
 
 ---
 
@@ -60,13 +66,20 @@ python -c "from retriever import glossary; r=glossary.write_coverage('index'); p
 只列没填的。
 
 **回报:**
-1. 上面那行的输出(三个状态的计数 + 测量了多少个仓库名 + 有多少个仓库名至少能解出一个词)。
+1. 上面那行的输出。
 2. `GLOSSARY_COVERAGE.md` 里**前 20 行**的 token 和出现次数(不需要贴含义)。
+
+> 🔴 **指标缺陷,2026-08-05 由内网的实测数据暴露并已修正。** 原先这里让你看
+> `repos_with_any_meaning` —— 但它在你们填之前就已经是 **459/460**,填完 20 个 token 还是
+> **459/460**。几乎每个仓库名都含至少一个常见 token,所以这个指标一开始就饱和了,**量不出任何
+> 进展**。现在报告改为以 `token_slots_decoded`(所有名字里所有 token 的解出率)和
+> `repos_fully_decoded`(整个名字没有一处未解释)为准,这两个才会随着填写而移动。
 
 ### A4. 填前 20 个
 
 按清单从上往下填 `index/glossary.json`,**存成 UTF-8**。不用一次填完,前 20 个就能覆盖绝大多数
-仓库名。填完重跑 A2 和 A3,回报 `repos_with_any_meaning` 的变化。
+仓库名。填完重跑 A2 和 A3,回报 `token_slots_decoded` 和 `repos_fully_decoded` 的变化
+(**不是** `repos_with_any_meaning` —— 见上面那条指标缺陷说明)。
 
 > 值可以是中文。只要确认存盘是 UTF-8,中文不会再变成 `?`。
 
@@ -134,18 +147,39 @@ print('parseable:', n, 'with fallback stages:', fb)
 业主的原话是"vendor 是空**基本上**也是因为 percentage 为 0"。代码**没有**把这句话写成规则,
 而是**逐行复核**。这一任务就是量出"基本上"到底是多少。
 
+> 🔴 **修正 2026-08-05(内网抓到的):** 这段脚本的**第一版是错的** —— 它初始化了 `m = None` 却
+> 从来没填充,于是每一行都把**空的** master `business_category` 传进四列连接键,而
+> `_key_of()` 遇到任何一列为空就拒绝匹配(这是**正确**的行为,部分键匹配会连到别人家的厂商)。
+> 结果是 **0 matched**,看起来像"这张表连不上",实际是脚本没给够输入。
+>
+> **引擎的连接实现是对的**(`impact_report.py:552` 一直有正确地传 master),错的只是这段验证脚本。
+> 修正后 **2,967 matched**。下面是修正版:**必须先建 `use_case_id → business_category` 的映射。**
+
 ```bash
 python -c "
 from retriever import usecase_catalog as uc, usecase_router as ur
 idx = ur.index_by_natural_key()
 print('router index available:', idx['available'], 'rows:', idx['row_count'])
-master = {}
+
+# THE FIX: business_category lives on tbl_use_case, and the four-column key needs it. Without this
+# lookup every key is incomplete and NOTHING matches. (A channel-rule row that carries its own
+# business_category wins over this — router_for_rule handles that — but most do not.)
+_d, _p, rows, cols = uc._master_rows()
+bound, _amb = uc._master_column_map(cols)
+id_col, cat_col = bound.get('use_case_id'), bound.get('business_category')
+master_cat = {}
+for _l, row in rows:
+    rid = (row.get(id_col) or '').strip().lower() if id_col else ''
+    if rid:
+        master_cat[rid] = (row.get(cat_col) or '').strip() if cat_col else ''
+print('master categories loaded:', len(master_cat))
+
 holds = {True: 0, False: 0, None: 0}
 matched = blank = 0
 for ucid, rules in uc.rules_by_use_case_id().items():
-    m = None
+    category = master_cat.get(ucid, '')
     for rule in rules:
-        r = ur.router_for_rule(rule, (m or {}).get('business_category_code',''), index=idx)
+        r = ur.router_for_rule(rule, category, index=idx)
         if not r.get('matched'): continue
         matched += 1
         if 'vendor_blank_explained' in r:
@@ -157,6 +191,9 @@ print('explanation FAILS (live traffic, no carrier):', holds[False])
 print('undecidable (percentage unreadable):', holds[None])
 "
 ```
+
+**健全性检查:** 如果 `matched child rows` 是 **0**,那是脚本问题不是数据问题 —— 先确认
+`master categories loaded` 不是 0。
 
 **回报:** 全部五个数字。
 

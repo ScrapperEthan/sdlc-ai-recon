@@ -322,6 +322,42 @@ def _authoritative_rows(channel, rules, business_category, router_index):
     return out
 
 
+def _vendor_verification(by_channel):
+    """Aggregate of the per-row blank-vendor check, so a reader sees it without walking every row.
+
+    The intranet's RUNBOOK-75 run measured the owner's "基本上" on the real UAT export and it does
+    NOT hold as a rule: of the blank-vendor rows it could decide, roughly half were 0% routes and
+    roughly half were carrying live traffic. `fails` is therefore the number that matters — routes
+    with real volume and no authoritative carrier — and it is exactly the population a rule-shaped
+    implementation would have erased.
+
+    The caveat travels with the count on purpose: a failed explanation is EITHER a real data gap OR
+    an artefact of the four tables coming from different export runs. Neither reading licenses
+    inferring a carrier.
+    """
+    counts = {"holds": 0, "fails": 0, "undecidable": 0}
+    for item in by_channel:
+        for row in item.get("authoritative_router") or []:
+            verdict = row.get("vendor_blank_explained")
+            if not verdict:
+                continue
+            counts["holds" if verdict["holds"] is True else
+                   ("fails" if verdict["holds"] is False else "undecidable")] += 1
+
+    total = sum(counts.values())
+    out = dict(counts, blank_vendor_rows=total, headline="")
+    if not total:
+        return out
+    out["headline"] = (
+        f"{counts['fails']} matched router row(s) have a blank vendor on a rule that IS carrying "
+        f"traffic — the owner's usual explanation (0% route) does not apply to them "
+        f"({counts['holds']} row(s) it does apply to, {counts['undecidable']} undecidable). "
+        "That is either a genuine gap in the authoritative carrier record or an artefact of the "
+        "tables being exported at different moments — it is NOT evidence that a carrier can be "
+        "inferred.")
+    return out
+
+
 def _channel_traffic(channel, rules):
     """This channel's traffic verdict across its rule rows, or a clean 'unknown' with no rules.
 
@@ -510,6 +546,10 @@ def exit_path(channels, rules=None, topics=None, business_category=""):
             + ", ".join(idle)
             + " — these channels have a valid exit path but carry no traffic, so they must not be "
               "counted as live when answering 'which channels are affected'.")
+
+    result["vendor_verification"] = _vendor_verification(result["by_channel"])
+    if result["vendor_verification"]["fails"]:
+        result["caveats"].append(result["vendor_verification"]["headline"])
 
     methods = {item["vendor_selection"]["method"] for item in result["by_channel"]}
     if "channel_upper_bound" in methods:

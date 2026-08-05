@@ -43,3 +43,10 @@ scratch/
 # push, so editing the tracked file on the box guarantees a pull conflict. This is the same
 # arrangement as SDLC_MCP_TOOLS.
 /config/db_queries.local.json
+
+# the box's business-enum answers. The committed config/business_enums.json carries what the owner
+# has confirmed so far; the real export also contains send_mode codes 0/4/5 that nobody has defined
+# yet. When those answers land, the intranet must be able to write them on the box the same day —
+# and they cannot push, so editing the tracked file would refuse their next pull. Same arrangement
+# as db_queries.local.json.
+/config/business_enums.local.json

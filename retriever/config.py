@@ -27,6 +27,29 @@ def _cfg(env, name, *legacy_parts):
     return legacy if os.path.exists(legacy) else new_path
 
 
+def _cfg_local(env, name):
+    """Like `_cfg`, plus the box-local escape hatch: env -> ``config/<stem>.local.json`` -> the
+    committed ``config/<name>``.
+
+    The middle step exists because THE INTRANET CANNOT PUSH. An owner answer that lands on their
+    side (a code's meaning, a vendor alias) has to be writable on the box the same day, and editing
+    the tracked file to do it turns the next unrelated `git pull` into a refused merge. A
+    conventional filename beats requiring an env var, which a rebuilt box forgets.
+
+    Replacement, not merge — same rule as `webapp/db_registry.config_source`. It is safe here only
+    because every default lives in code and is applied PER SECTION, so a local file that defines
+    just one enum still gets the built-in values for the others rather than blanking them.
+    """
+    override = os.environ.get(env)
+    if override:
+        return override
+    stem = name[:-len(".json")] if name.endswith(".json") else name
+    local = os.path.join(ROOT, "config", f"{stem}.local.json")
+    if os.path.isfile(local):
+        return local
+    return os.path.join(ROOT, "config", name)
+
+
 MIRROR = _p("SDLC_MIRROR", "mirror")
 RECON_DIR = _p("SDLC_RECON", "recon_out")
 INDEX_DIR = _p("SDLC_INDEX", "index")
@@ -62,8 +85,12 @@ RULE_TEXT_SEMANTICS_JSON = _cfg(
 # box's real schema. Each code records WHICH source defines it — the data dictionary and
 # BusinessCategoryEnum.java disagree about the range, and only a code defined by neither is a
 # defect. Missing file -> the built-in seed in retriever/usecase_catalog.py, unchanged behaviour.
-BUSINESS_ENUMS_JSON = _cfg("SDLC_BUSINESS_ENUMS", "business_enums.json", "index",
-                           "business_enums.json")
+#
+# `_cfg_local` because the real export turned out to carry send_mode codes the dictionary does not
+# define (0, 4 and 5 — and 0 is the second most common value). When the owner explains them, the
+# intranet must be able to write the answer on the box that day; they cannot push, so editing the
+# tracked file would block their next pull.
+BUSINESS_ENUMS_JSON = _cfg_local("SDLC_BUSINESS_ENUMS", "business_enums.json")
 # Incident (AIOps) alert-text vocabulary: environment/resource/severity/metric tokens, timezone
 # aliases, and the not-yet-supplied delivery_path name->id map. Committed knob dir, intranet-owned
 # (AGENTS.md §2) — an AWS renaming should never require an engine edit. Missing file is harmless:

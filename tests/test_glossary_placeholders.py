@@ -145,5 +145,54 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(report["repos_measured"], 1)
 
 
+
+class CoverageMetricTest(unittest.TestCase):
+    """The metric the intranet's real run proved useless, and the two that replace it.
+
+    RUNBOOK-75 measured: the box filled the top 20 ranked tokens (filled 23 -> 43) and
+    `repos_with_any_meaning` did not move at all — 459 of 460 before, 459 of 460 after. Almost
+    every repo name shares a common token, so "at least one" saturates before any real work starts.
+    Quoting it as progress would have reported a full day's filling as zero improvement.
+    """
+
+    def _report(self, authored, names):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "glossary.json")
+            _write(path, authored)
+            return glossary.coverage(names, path=path)
+
+    NAMES = ["mc-hk-api", "mc-hk-job"]
+
+    def test_any_meaning_saturates_and_hides_real_progress(self):
+        # One shared token already lights up every name; filling more moves this metric zero.
+        before = self._report({"mc": "MDC"}, self.NAMES)
+        after = self._report({"mc": "MDC", "hk": "HongKong", "api": "service"}, self.NAMES)
+        self.assertEqual(before["repos_with_any_meaning"], after["repos_with_any_meaning"])
+
+    def test_token_slots_decoded_moves_with_every_token_filled(self):
+        before = self._report({"mc": "MDC"}, self.NAMES)
+        after = self._report({"mc": "MDC", "hk": "HongKong"}, self.NAMES)
+        self.assertEqual(before["token_slots"], 6)          # 3 tokens x 2 names
+        self.assertEqual(before["token_slots_decoded"], 2)  # 'mc' in both
+        self.assertEqual(after["token_slots_decoded"], 4)   # + 'hk' in both
+
+    def test_fully_decoded_needs_every_token_in_the_name(self):
+        partial = self._report({"mc": "MDC", "hk": "HongKong"}, self.NAMES)
+        self.assertEqual(partial["repos_fully_decoded"], 0)  # 'api'/'job' still unexplained
+        complete = self._report(
+            {"mc": "MDC", "hk": "HongKong", "api": "service", "job": "scheduled job"}, self.NAMES)
+        self.assertEqual(complete["repos_fully_decoded"], 2)
+
+    def test_placeholders_do_not_count_toward_any_completion_metric(self):
+        report = self._report({"mc": "MDC", "hk": "TBC ? ???????"}, self.NAMES)
+        self.assertEqual(report["token_slots_decoded"], 2)   # 'hk' is authored but says nothing
+        self.assertEqual(report["repos_fully_decoded"], 0)
+
+    def test_markdown_leads_with_the_metric_that_moves(self):
+        markdown = glossary.render_coverage_markdown(self._report({"mc": "MDC"}, self.NAMES))
+        self.assertIn("token slots decoded", markdown)
+        self.assertIn("do not read this one as progress", markdown)
+
+
 if __name__ == "__main__":
     unittest.main()

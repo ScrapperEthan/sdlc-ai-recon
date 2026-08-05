@@ -986,6 +986,21 @@ def render_delivery_chain(payload):
             if row.get("citation"):
                 bits.append(row["citation"])
             lines.append(" | ".join(bits))
+    traffic_summary = payload.get("traffic") or {}
+    if traffic_summary.get("idle_channels"):
+        lines.append("- **configured but not sending** (traffic_percentage 0): "
+                     + ", ".join(traffic_summary["idle_channels"]).upper()
+                     + " — do not count these as live when answering 'which channels are affected'")
+
+    # The aggregate the intranet asked for: without it, the live-traffic/no-carrier rows are only
+    # visible by walking every router row, which nobody reading a report does.
+    verification = payload.get("vendor_verification") or {}
+    if verification.get("blank_vendor_rows"):
+        lines.append(
+            f"- blank-vendor rows checked against traffic_percentage: "
+            f"**{verification['fails']} unexplained** (live traffic, no carrier) / "
+            f"{verification['holds']} explained (0% route) / "
+            f"{verification['undecidable']} undecidable")
     if payload.get("note"):
         lines.append(f"- note: {payload['note']}")
     lines.extend(f"- caveat: {caveat}" for caveat in payload.get("caveats") or [])

@@ -20,7 +20,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from . import config
+from . import config, glossary
 
 # business_category codes DEFINED BY THE DATA DICTIONARY (owner-relayed screenshot, 2026-08-05).
 # This is the authoritative spec for the column and it stops at 7.
@@ -53,7 +53,7 @@ BUSINESS_CATEGORY_ENUM = {**BUSINESS_CATEGORY_DICTIONARY, **BUSINESS_CATEGORY_CO
 # override it (rule_text is authoritative per the 2026-07-27 owner answer).
 SEND_MODE_ENUM = {
     1: "Send at the same time", 2: "Send by priority", 3: "Send by single channel",
-    # Supplied 2026-08-06 from the full dictionary page. 4 and 5 were the codes the first excerpt
+    # Supplied 2026-08-05 from the full dictionary page. 4 and 5 were the codes the first excerpt
     # cut off; 0 (903 rows) is still unexplained and deliberately stays out of this map.
     4: "Send by separately", 5: "Mixed mode",
 }
@@ -74,7 +74,7 @@ SEND_MODE_RULE_TEXT_EQUIVALENT = {
 # worse. It is carried here so the data-quality output can name it as a KNOWN UNKNOWN.
 SEND_MODE_PENDING_MEANING = {
     0: ("appears on ~903 rows of the real UAT export — a legitimate, widely used value whose "
-        "meaning the data dictionary does not give. Owner question outstanding since 2026-08-06. "
+        "meaning the data dictionary does not give. Owner question outstanding since 2026-08-05. "
         "Rows carrying it are excluded from the rule_text cross-check; their send semantics rest "
         "on rule_text alone, which is authoritative anyway."),
 }
@@ -525,17 +525,27 @@ def _enums_config():
 
 
 def _int_keyed(section, key):
-    """{int code: label} from one `<section>.<key>` block, ignoring `_`-prefixed metadata keys."""
+    """{int code: label} from one `<section>.<key>` block, ignoring `_`-prefixed metadata keys.
+
+    Placeholder labels are DROPPED, using the same test the glossary uses. This is the same failure
+    shape in a second place: a human hand-writes a meaning into a config file, and an unfilled one
+    renders as though it were an answer. Here it is worse than in the glossary, because a code with
+    a placeholder label comes back `known=True` — so writing `"0": "unknown"` into `data_dictionary`
+    would disguise "nobody has told us yet" as "defined", and silently switch on a cross-check that
+    has nothing real to compare against. The intranet spotted this risk before writing the file
+    (RUNBOOK-76); the gate means being right about it no longer depends on noticing.
+    """
     block = (section or {}).get(key)
     if not isinstance(block, dict):
         return None
     out = {}
     for code, label in block.items():
         text = str(code).strip()
-        if text.startswith("_") or not str(label).strip():
+        meaning = str(label).strip()
+        if text.startswith("_") or not meaning or glossary.is_unfilled(meaning):
             continue
         try:
-            out[int(text)] = str(label).strip()
+            out[int(text)] = meaning
         except ValueError:
             continue
     return out or None

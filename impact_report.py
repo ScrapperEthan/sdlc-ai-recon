@@ -1004,7 +1004,7 @@ def render_delivery_chain(payload):
 
     # The aggregate the intranet asked for: without it, the live-traffic/no-carrier rows are only
     # visible by walking every router row, which nobody reading a report does. Owner-decided
-    # 2026-08-06: report the split, do NOT raise it as a data-quality exception.
+    # 2026-08-05: report the split, do NOT raise it as a data-quality exception.
     verification = payload.get("vendor_verification") or {}
     if verification.get("blank_vendor_rows"):
         lines.append(
@@ -1177,6 +1177,12 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target")
     parser.add_argument("--out", default=os.path.join(config.INDEX_DIR, "reports"))
+    # `--out ""` was the documented way to print without writing a file, and it does not survive
+    # PowerShell: an empty quoted argument is not passed through to argparse, so the box silently
+    # got the default and wrote a report it did not ask for. A flag needs no quoting anywhere.
+    parser.add_argument("--no-write", action="store_true",
+                         help="print the report only; write no file (shell-independent "
+                              "equivalent of --out \"\", which PowerShell does not pass through)")
     parser.add_argument("--include-inactive", action="store_true",
                          help="source-system: targets only; disabled use cases excluded by default")
     parser.add_argument("--offset", type=int, default=0,
@@ -1205,7 +1211,7 @@ def main(argv=None):
         return 1
 
     print(render_report_markdown(report), end="")
-    if args.out:
+    if args.out and not args.no_write:
         path = write_report(report, args.out)
         print("")
         print(f"Wrote {display_path(path)}")

@@ -329,7 +329,7 @@ def _vendor_verification(by_channel):
     NOT hold as a rule: of the blank-vendor rows it could decide, roughly half were 0% routes and
     roughly half were carrying live traffic.
 
-    OWNER DECISION 2026-08-06: those rows are **NOT a data-quality exception**. The messaging team's
+    OWNER DECISION 2026-08-05: those rows are **NOT a data-quality exception**. The messaging team's
     routing rules make several of them expected — whole router families are deliberately skipped
     when a use case is provisioned (`would NOT choose ICCM related router`; `can ignore the ICCM
     related routers, and HUTCHISON_GW related router`), and a channel's carrier can be decided by
@@ -355,7 +355,7 @@ def _vendor_verification(by_channel):
     out["headline"] = (
         f"{counts['fails']} matched router row(s) carry traffic with no vendor recorded "
         f"({counts['holds']} are standby 0% rows, {counts['undecidable']} undecidable). "
-        "Owner-decided 2026-08-06: this is NOT a data-quality exception — the routing rules skip "
+        "Owner-decided 2026-08-05: this is NOT a data-quality exception — the routing rules skip "
         "whole router families for a given use case (ICCM, HUTCHISON_GW) and decide some carriers "
         "by app name or delivery mode rather than by this column, so a live route with no recorded "
         "carrier is an expected shape. Reported as a count only. What remains forbidden either way: "

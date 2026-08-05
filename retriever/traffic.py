@@ -1,6 +1,6 @@
 """`tbl_use_case_channel_rule.traffic_percentage` — a configured share, and what 0 actually means.
 
-## 0% is STANDBY, not "off" — corrected 2026-08-06
+## 0% is STANDBY, not "off" — corrected 2026-08-05
 
 The first version of this module read `traffic_percentage = 0` as "this channel does not send, do
 not count it as live". That is **wrong in the direction that matters most**, and the routing rules
@@ -35,7 +35,7 @@ two different correct answers, and the engine must not collapse them.
 **A blank `tbl_use_case_router.vendor` is "基本上" because the percentage is 0.** Explicitly
 *mostly*, not always — and measured on the real UAT export it holds for only ~54% of the decidable
 rows. So this module never *derives* one from the other; `usecase_router.router_for_rule` checks it
-per row. Per the owner 2026-08-06 the rows where it does not hold are **NOT a data-quality
+per row. Per the owner 2026-08-05 the rows where it does not hold are **NOT a data-quality
 exception** — the routing rules above show several legitimate ways a live route ends up with no
 authoritative carrier recorded. They are counted and shown, not flagged.
 

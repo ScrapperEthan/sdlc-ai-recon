@@ -331,6 +331,48 @@ class SendModeTest(unittest.TestCase):
         self.assertFalse(resolved["known"])
         self.assertFalse(resolved["pending"])
 
+    def test_a_placeholder_label_never_becomes_a_definition(self):
+        """The same failure shape as the glossary, in a second place — and worse here.
+
+        A hand-written config with `"0": "unknown"` would come back `known=True`, disguising
+        "nobody has told us yet" as "defined" AND switching on a cross-check with nothing real to
+        compare against. RUNBOOK-76: the intranet spotted this before writing the file. The gate
+        means being right about it no longer depends on someone noticing.
+        """
+        for placeholder in ("unknown", "TBC", "???", "待确认", "n/a", "TODO"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "business_enums.json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump({"send_mode": {"data_dictionary": {"0": placeholder}}}, handle)
+                with mock.patch.object(usecase_catalog.config, "BUSINESS_ENUMS_JSON", path):
+                    resolved = usecase_catalog.resolve_send_mode("0")
+                self.assertFalse(resolved["known"], placeholder)
+                self.assertEqual(resolved["label"], "", placeholder)
+                # ...and it falls back to the built-in, so 0 stays PENDING rather than becoming
+                # an unrecognised code, which is the honest state.
+                self.assertTrue(resolved["pending"], placeholder)
+
+    def test_a_placeholder_business_category_label_is_also_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "business_enums.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"business_category": {"data_dictionary": {"33": "TBC"}}}, handle)
+            with mock.patch.object(usecase_catalog.config, "BUSINESS_ENUMS_JSON", path):
+                resolved = usecase_catalog.resolve_business_category("33")
+        self.assertEqual(resolved["source"], "undefined")
+        self.assertFalse(resolved["known"])
+
+    def test_a_real_label_containing_a_question_mark_survives(self):
+        # The gate must not be so eager that it eats a genuine annotation.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "business_enums.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"send_mode": {"data_dictionary": {"0": "Send on demand? see RB-76"}}},
+                          handle)
+            with mock.patch.object(usecase_catalog.config, "BUSINESS_ENUMS_JSON", path):
+                resolved = usecase_catalog.resolve_send_mode("0")
+        self.assertTrue(resolved["known"])
+
     def test_send_mode_binds_exact_only_so_it_cannot_take_send_policy(self):
         # A fuzzy ("send",) fallback would let send_policy bind here — the first-column-wins defect
         # that made `status` bind to `unknown_bounce_back_status`.
@@ -367,7 +409,7 @@ class SendModeCrossCheckTest(unittest.TestCase):
         self.assertIn("rule_text is authoritative", finding["resolution"])
 
     def test_mixed_mode_became_comparable_when_code_5_arrived(self):
-        # Before 2026-08-06 a MIXED expression could not be checked at all: no code named that
+        # Before 2026-08-05 a MIXED expression could not be checked at all: no code named that
         # shape, so it could neither agree nor disagree. The full dictionary gave 5 = "Mixed mode",
         # which is literally what rule_text calls MIXED — so it now checks positively.
         self.assertIsNone(self._check("(SMS > EMAIL) & PUSH", "5"))
@@ -556,8 +598,8 @@ class UnreadableSendModeVisibilityTest(unittest.TestCase):
             {"send_mode_code": "0"},    # pending — 903 real rows, meaning not supplied
             {"send_mode_code": "0"},
             {"send_mode_code": "99"},   # unexpected — genuine drift
-            {"send_mode_code": "5"},    # defined since 2026-08-06 -> neither
-            {"send_mode_code": "4"},    # defined since 2026-08-06 -> neither
+            {"send_mode_code": "5"},    # defined since 2026-08-05 -> neither
+            {"send_mode_code": "4"},    # defined since 2026-08-05 -> neither
             {"send_mode_code": ""},     # absent -> neither
         ])
         self.assertEqual(pending, {0: 2})
@@ -589,7 +631,7 @@ class VendorVerificationSummaryTest(unittest.TestCase):
         self.assertEqual(summary["blank_vendor_rows"], 4)
 
     def test_headline_reports_a_count_and_refuses_to_license_an_inference(self):
-        # Owner-decided 2026-08-06: these are NOT a data-quality exception. The routing rules skip
+        # Owner-decided 2026-08-05: these are NOT a data-quality exception. The routing rules skip
         # whole router families per use case, so a live route with no recorded carrier is an
         # expected shape — count it, do not flag it.
         summary = delivery_chain._vendor_verification(self._channels([False, True]))

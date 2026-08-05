@@ -185,7 +185,7 @@ def _send_mode_finding(uc_id, ast, identity, citations):
         return None
 
     expected = resolved["rule_text_equivalent"]
-    # `mixed` became comparable on 2026-08-06: the dictionary's code 5 is literally "Mixed mode",
+    # `mixed` became comparable on 2026-08-05: the dictionary's code 5 is literally "Mixed mode",
     # which is the same thing rule_text calls MIXED. Before that, a MIXED expression could not be
     # checked at all — a single code could neither agree nor disagree with it.
     actual = {"PARALLEL": "parallel_all", "FALLBACK": "ordered_precedence",

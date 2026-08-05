@@ -17,10 +17,13 @@
 ## 先决条件
 
 ```bash
-git pull && python -m pytest tests -q
+git pull && python -m pytest tests -q -p no:cacheprovider
 ```
 
-期望 **1458 passed**。
+期望 **1475 passed**。
+
+> `-p no:cacheprovider` 是为了消掉你们上轮报的 `.pytest_cache` `WinError 5` 写入警告 ——
+> 那个警告无害(测试本身全过),但噪音会掩盖真问题。
 
 ---
 
@@ -95,7 +98,7 @@ print('live with no standby:', live_only, '| standby-only channels:', standby_on
 挑一条含 0% 路由的用例:
 
 ```bash
-python impact_report.py use-case:<挑一条> --out ""
+python impact_report.py use-case:<挑一条> --no-write
 ```
 
 **期望**在 delivery chain 段看到 `**standby**` 或 `**dual-vendor**` 开头的行,并且里面明确说
@@ -108,7 +111,7 @@ python impact_report.py use-case:<挑一条> --out ""
 ## A —— 三表连接的回归测试(你们抓到的那个)
 
 ```bash
-python -m pytest tests/test_traffic_and_enums.py::ThreeTableJoinTest -q
+python -m pytest tests/test_traffic_and_enums.py::ThreeTableJoinTest -q -p no:cacheprovider
 ```
 
 期望 **4 passed**。这四条钉住的是:子行没有自带 category 时**必须**有 master category 才能匹配;
@@ -135,7 +138,7 @@ python -m pytest tests/test_traffic_and_enums.py::ThreeTableJoinTest -q
 挑一条有权威 router 行、且 vendor 为空的用例:
 
 ```bash
-python impact_report.py use-case:<挑一条> --out ""
+python impact_report.py use-case:<挑一条> --no-write
 ```
 
 在「delivery chain」那一段应该能看到一行形如:
@@ -146,7 +149,7 @@ python impact_report.py use-case:<挑一条> --out ""
 
 **回报:** 这一行的原样输出(用哪条用例你们自己挑,不用告诉我 id)。
 
-**⚠️ 措辞已按业主 2026-08-06 的决定改过,请顺便确认两件事:**
+**⚠️ 措辞已按业主 2026-08-05 的决定改过,请顺便确认两件事:**
 
 1. **不应该**再出现 `unexplained` 这个词 —— 业主明确说这批**不是数据质量异常**
    (路由规则里整族 router 是刻意跳过的,有些渠道的厂商根本不由那一列决定)。
@@ -238,16 +241,34 @@ python -c "from retriever import glossary; r=glossary.write_coverage('index'); p
 config/business_enums.local.json
 ```
 
-内容只需要写你们要改的那一节,例如:
+> 🔴 **本节的第一版有缺陷,已修(内网 2026-08-05 抓到)。** 原来的示例 JSON 里我**编了一个值**:
+> `"rule_text_equivalent": { "0": "parallel_all" }`。那是我随手填的占位示例,**照抄就会凭空
+> 制造一条业务语义**。内网正确地拒绝了,并且给出了比我的示例更严谨的理由,照抄如下:
+>
+> - **不能**把 `"0": "unknown"` 之类写进 `data_dictionary` —— 那会让程序判为 `known=True`,
+>   **把「待业主确认」伪装成「已定义」**,还会顺带打开一个无物可比的交叉验证。
+> - **只有业主同时给出名称 AND 与 `rule_text` 的正式对应关系时**,才填 `rule_text_equivalent`。
+>   给了名字没给对应关系,就只填 `data_dictionary`。
+>
+> 这条判断已经落进代码:枚举加载现在复用词典那套**占位符闸门**
+> (`glossary.is_unfilled`),`unknown` / `TBC` / `???` 这类值会被直接丢弃而不是当成定义 ——
+> 所以现在**即使有人照抄了坏示例,程序也不会把它当真**。但这不是让你们少想一步的理由。
+
+内容只需要写你们要改的那一节。**只有拿到业主的正式名称之后**才写:
 
 ```json
 {
   "send_mode": {
-    "data_dictionary": { "0": "<业主给的名称>", "4": "...", "5": "..." },
-    "rule_text_equivalent": { "0": "parallel_all" }
+    "data_dictionary": {
+      "0": "<业主给出的正式名称,不要写 unknown / TBC / 待确认>"
+    }
   }
 }
 ```
+
+`rule_text_equivalent` **先不要填** —— 除非业主明确说了 0 对应 `rule_text` 的哪种语义
+(`parallel_all` / `ordered_precedence` / `exclusive_choice` / `mixed`)。没说就留空:
+交叉验证跳过一个编号,远好过拿一个猜出来的对应关系去比对。
 
 **这是替换不是合并** —— 但**每一节各自独立回退到代码里的默认值**,所以一个只写 `send_mode` 的
 本地文件**不会**把 `business_category` 清空。请顺手验证这一点:

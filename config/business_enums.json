@@ -86,10 +86,10 @@
       "  code 0 ->   903 rows      *** STILL UNEXPLAINED — and the second most common value ***",
       "  code 2 ->   249 rows      send by priority",
       "  code 1 ->   148 rows      send at the same time",
-      "  code 5 ->    72 rows      mixed mode        (supplied 2026-08-06)",
-      "  code 4 ->     3 rows      send by separately (supplied 2026-08-06)",
+      "  code 5 ->    72 rows      mixed mode        (supplied 2026-08-05)",
+      "  code 4 ->     3 rows      send by separately (supplied 2026-08-05)",
       "",
-      "2026-08-06: the full dictionary page arrived and closed 4 and 5. The first excerpt had been",
+      "2026-08-05: the full dictionary page arrived and closed 4 and 5. The first excerpt had been",
       "cut off after 3, which is why they looked undefined. Code 0 remains genuinely unexplained.",
       "",
       "Note what 5 unlocked: 'Mixed mode' is the dictionary's own name for what rule_text calls",
@@ -129,7 +129,7 @@
         "",
         "Move a code from here into `data_dictionary` the moment the owner explains it."
       ],
-      "0": "appears on ~903 rows of the real UAT export — a legitimate, widely used value whose meaning the data dictionary does not give. Owner question outstanding since 2026-08-06. Rows carrying it are excluded from the rule_text cross-check; their send semantics rest on rule_text alone, which is authoritative anyway."
+      "0": "appears on ~903 rows of the real UAT export — a legitimate, widely used value whose meaning the data dictionary does not give. Owner question outstanding since 2026-08-05. Rows carrying it are excluded from the rule_text cross-check; their send semantics rest on rule_text alone, which is authoritative anyway."
     }
   }
 }

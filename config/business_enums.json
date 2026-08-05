@@ -1,0 +1,94 @@
+{
+  "_README": [
+    "Code-table knob for the tbl_use_case integer columns. Editing this file changes what the",
+    "assistant says; no code change is needed. Same seam as config/rule_text_semantics.json.",
+    "",
+    "WHY PROVENANCE IS A FIELD HERE, not a comment:",
+    "",
+    "business_category has THREE sources and they do not agree, so 'is this code legal' has three",
+    "different answers depending on who you ask:",
+    "",
+    "  1. the DATA DICTIONARY (owner-relayed screenshot, 2026-08-05) defines 0-7 and stops there;",
+    "  2. BusinessCategoryEnum.java on the mirror additionally defines 8, 10-21, 32, 34, 35;",
+    "  3. the real UAT rows additionally CONTAIN 33 (1 row, B0001) and 37 (6 rows, I0135-I0140),",
+    "     all with status=Y, i.e. active.",
+    "",
+    "Flattening those into one 'known enum' is what produced the earlier claim that 33/37 were",
+    "'unregistered new categories'. They are not: nothing defines them anywhere. Codes 8-35, by",
+    "contrast, ARE defined — just not in the dictionary excerpt we were shown, which is a weaker",
+    "statement and must not be reported as drift.",
+    "",
+    "So each entry carries the source that defines it, and only a code defined by NEITHER source is",
+    "a data-contract defect. A code in `code_enum` but not `data_dictionary` is reported as such and",
+    "is NOT an alarm — the dictionary excerpt may simply be older or narrower than the code.",
+    "",
+    "The table these columns belong to is inferred from the neighbouring columns in the same",
+    "screenshot (bounce_back periods, mi_category, has_order_status, send_mode) which match",
+    "tbl_use_case. If that inference is ever contradicted, fix it here rather than in code.",
+    "",
+    "Adding a code: put it under the source that actually defines it. Never move a code into",
+    "`data_dictionary` to silence a warning."
+  ],
+
+  "business_category": {
+    "_source": "data dictionary screenshot relayed by the project owner, 2026-08-05",
+    "data_dictionary": {
+      "0": "WPB_REALTIME_MARKETING",
+      "1": "WPB_REALTIME_SERVICING",
+      "2": "WPB_BATCH_SERVICING",
+      "3": "WPB_BATCH_MARKETING",
+      "4": "WPB_HR_REALTIME_SERVICING",
+      "5": "WPB_SEC_REALTIME_SERVICING",
+      "6": "CMB",
+      "7": "WPB_HS_REALTIME_SERVICING"
+    },
+    "code_enum": {
+      "_source": "BusinessCategoryEnum.java on the mirror — defined in code, absent from the dictionary excerpt above",
+      "8": "WPB_TC_REALTIME_SERVICING",
+      "10": "HASE_WPB_SERVICING_REALTIME_GENERAL",
+      "11": "HASE_WPB_SERVICING_REALTIME_HIGHRISK",
+      "12": "HASE_WPB_SERVICING_BATCH",
+      "13": "HASE_WPB_MARKETING_REALTIME_GENERAL",
+      "14": "HASE_WPB_MARKETING_BATCH",
+      "15": "HASE_CMB_SERVICING_REALTIME_GENERAL",
+      "16": "HASE_CMB_SERVICING_REALTIME_HIGHRISK",
+      "17": "HASE_CMB_SERVICING_BATCH",
+      "18": "HASE_CMB_MARKETING_REALTIME_GENERAL",
+      "19": "HASE_CMB_MARKETING_BATCH",
+      "20": "HASE_WPB_SERVICING_TIMECRITICAL",
+      "21": "HASE_CMB_SERVICING_TIMECRITICAL",
+      "32": "HSBC_WPB_SERVICING_BATCH",
+      "34": "HSBC_WPB_SERVICING_TIMECRITICAL",
+      "35": "HSBC_WPB_SERVICING_REALTIME_HIGHRISK"
+    }
+  },
+
+  "send_mode": {
+    "_source": "same data dictionary screenshot, 2026-08-05",
+    "_note": [
+      "An INDEPENDENT third statement of the send semantics that tbl_use_case_ext.rule_text and",
+      "tbl_use_case_channel_rule.priority both also describe. The three map onto each other:",
+      "",
+      "  send_mode 1 (same time)     <-> rule_text '&' (parallel_all)",
+      "  send_mode 2 (by priority)   <-> rule_text '>' (ordered_precedence)",
+      "  send_mode 3 (single channel)<-> rule_text no operator, or '|' (exclusive_choice)",
+      "",
+      "That mapping is used ONLY to CROSS-CHECK rule_text, never to override it: rule_text stays",
+      "authoritative per the 2026-07-27 owner answer. A disagreement is reported as a data-quality",
+      "finding, exactly like the existing rule_text-vs-priority disagreement.",
+      "",
+      "This column is bound optimistically — absent from the export just means the cross-check does",
+      "not run, and nothing else changes."
+    ],
+    "data_dictionary": {
+      "1": "Send at the same time",
+      "2": "Send by priority",
+      "3": "Send by single channel"
+    },
+    "rule_text_equivalent": {
+      "1": "parallel_all",
+      "2": "ordered_precedence",
+      "3": "exclusive_choice"
+    }
+  }
+}

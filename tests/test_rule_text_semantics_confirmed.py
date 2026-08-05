@@ -1,8 +1,11 @@
-"""The 2026-07-27 owner answer on rule_text semantics, and the fail-closed guards around it.
+"""The owner answers on rule_text semantics, and the fail-closed guards around them.
 
-Owner's words: `>` 哪个大就哪个先发 / `&` 一起发 / `|` 二选一 / 以 rule_text 为准,没有的情况下再看
-priority. These tests pin that reading AND pin the two behaviours that must survive it: an
-unconfirmed config still refuses to guess, and a config declaring a meaning we do not implement
+2026-07-27: `>` 哪个大就哪个先发 / `&` 一起发 / `|` 二选一 / 以 rule_text 为准,没有的情况下再看
+priority. 2026-08-05 closed the one follow-up that answer left open — `>` 的右边是左边失败了才发, so
+`stage_transition` is now `fallback_on_failure`.
+
+These tests pin that reading AND pin the behaviours that must survive it: an unconfirmed config
+still refuses to guess, and a config declaring a meaning (or a stage transition) we do not implement
 fails CLOSED rather than being interpreted with today's structural assumptions.
 """
 import json
@@ -14,6 +17,9 @@ from unittest import mock
 from retriever import rule_text as rt
 from retriever import usecase_consistency as ucc
 
+# Operators confirmed, stage transition NOT — i.e. the state between the two owner answers. Kept
+# under its own name because several tests below exist specifically to prove that intermediate state
+# still behaves (operators interpret, the transition stays honest about being unknown).
 CONFIRMED = {
     ">": {"meaning": "ordered_precedence"},
     "&": {"meaning": "parallel_all"},
@@ -22,6 +28,9 @@ CONFIRMED = {
     "stage_transition": "unconfirmed",
     "source_precedence": {"order": ["rule_text", "channel_rule_priority"]},
 }
+
+# The full 2026-08-05 state: operators AND the stage transition confirmed.
+CONFIRMED_WITH_FALLBACK = dict(CONFIRMED, stage_transition="fallback_on_failure")
 
 # The canonical disagreement from RUNBOOK-45 Part B.
 I0141 = "LETTER > (EMAIL & SMS)"
@@ -41,9 +50,12 @@ class ShippedConfigTest(unittest.TestCase):
     def test_shipped_config_makes_rule_text_authoritative(self):
         self.assertEqual(rt.source_precedence(), ["rule_text", "channel_rule_priority"])
 
-    def test_stage_transition_stays_unconfirmed(self):
-        # The owner confirmed left-sends-first, NOT whether the next stage fires only on failure.
-        self.assertEqual(rt.load_semantics().get("stage_transition"), "unconfirmed")
+    def test_shipped_config_confirms_stage_transition_as_fallback(self):
+        # 2026-08-05: 左边失败了才发. The shipped config must carry it, and it must survive the
+        # fail-closed validator (a typo here would silently drop back to "unconfirmed").
+        self.assertEqual(rt.stage_transition(), "fallback_on_failure")
+        self.assertIn("only when the earlier one failed",
+                      rt.stage_transition_note(rt.stage_transition()))
 
 
 class InterpretationTest(unittest.TestCase):
@@ -67,6 +79,56 @@ class InterpretationTest(unittest.TestCase):
         result = rt.interpret(rt.parse("SMS"), rt.DEFAULT_SEMANTICS)
         self.assertTrue(result["available"])
         self.assertEqual(result["initial_channels"], ["SMS"])
+
+
+class StageTransitionTest(unittest.TestCase):
+    """左边失败了才发 — and the reading that matters MORE for blast radius: while the earlier stage
+    is healthy, the later ones are not sending at all."""
+
+    def test_fallback_on_failure_marks_later_stages_as_not_live(self):
+        result = rt.interpret(rt.parse(I0141), CONFIRMED_WITH_FALLBACK)
+        self.assertEqual(result["stage_transition"], "fallback_on_failure")
+        self.assertIs(result["stages_are_live"], False)
+        self.assertIn("not carrying traffic", result["stage_transition_note"].lower())
+
+    def test_always_follows_marks_later_stages_as_live(self):
+        result = rt.interpret(rt.parse(I0141), dict(CONFIRMED, stage_transition="always_follows"))
+        self.assertEqual(result["stage_transition"], "always_follows")
+        self.assertIs(result["stages_are_live"], True)
+
+    def test_unconfirmed_transition_reports_none_not_a_default(self):
+        # The dangerous shape would be defaulting to True or False here — a blast radius silently
+        # computed on a guess. None forces the consumer to handle "we do not know".
+        result = rt.interpret(rt.parse(I0141), CONFIRMED)
+        self.assertEqual(result["stage_transition"], "unconfirmed")
+        self.assertIsNone(result["stages_are_live"])
+
+    def test_unrecognised_transition_value_fails_closed(self):
+        # Same guard as _MEANINGS: a transition this module does not implement must read as
+        # unconfirmed, never be passed through for a consumer to branch on.
+        weird = dict(CONFIRMED, stage_transition="fire_and_forget")
+        self.assertEqual(rt.stage_transition(weird), "unconfirmed")
+        result = rt.interpret(rt.parse(I0141), weird)
+        self.assertEqual(result["stage_transition"], "unconfirmed")
+        self.assertIsNone(result["stages_are_live"])
+
+    def test_report_spells_out_which_channel_waits_on_which(self):
+        import impact_report
+        ast = rt.parse(I0141)
+        lines = impact_report.render_rule_text_ast(
+            dict(ast, semantics="owner-confirmed"),
+            rt.interpret(ast, CONFIRMED_WITH_FALLBACK))
+        text = "\n".join(lines)
+        self.assertIn("fallback only", text)
+        self.assertIn("EMAIL sends only if LETTER fails", text)
+        self.assertIn("SMS sends only if LETTER fails", text)
+
+    def test_report_keeps_the_honest_note_while_unconfirmed(self):
+        import impact_report
+        ast = rt.parse(I0141)
+        lines = impact_report.render_rule_text_ast(
+            dict(ast, semantics="owner-confirmed"), rt.interpret(ast, CONFIRMED))
+        self.assertIn("NOT owner-confirmed", "\n".join(lines))
 
 
 class FailsClosedTest(unittest.TestCase):

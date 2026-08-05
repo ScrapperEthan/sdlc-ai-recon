@@ -47,7 +47,7 @@ two can disagree. Where the topology knows a carrier the diagram never drew, it 
 import json
 import os
 
-from . import config, usecase_catalog, usecase_router
+from . import config, traffic, usecase_catalog, usecase_router
 from .vendors import KNOWN_VENDORS, UNKNOWN_VENDOR, canon_vendor, vendors_in
 
 # Raw DB channel value -> the delivery channel the architecture actually has an exit for.
@@ -322,6 +322,17 @@ def _authoritative_rows(channel, rules, business_category, router_index):
     return out
 
 
+def _channel_traffic(channel, rules):
+    """This channel's traffic verdict across its rule rows, or a clean 'unknown' with no rules.
+
+    Matched on the canonical channel so the raw DB spellings (`PUSH+INBOX` vs `PUSH_INBOX`) collapse
+    the same way they do everywhere else here.
+    """
+    matching = [rule for rule in rules or []
+                if isinstance(rule, dict) and canonical_channel(rule.get("channel")) == channel]
+    return traffic.verdict(matching, channel)
+
+
 def _channel_path(catalog, channel, declared_as, topology, topics, hints,
                   rules=None, business_category="", router_index=None):
     channel_hints = hints.get(channel) or {}
@@ -351,6 +362,12 @@ def _channel_path(catalog, channel, declared_as, topology, topics, hints,
     result = {
         "channel": channel,
         "declared_as": sorted(set(declared_as)),
+        # Configured != sending. A rule row at traffic_percentage 0 does not send (owner-confirmed
+        # 2026-08-05), so the path below is what WOULD be used, not what is being used. Kept as a
+        # separate field rather than dropping the channel: the exit path is still the right answer
+        # to "where would this go", and an idle channel is still the right answer to "what is
+        # configured" — only "what is live right now" changes.
+        "traffic": _channel_traffic(channel, rules),
         "stages": stages,
         "vendors": vendors,
         "vendors_off_diagram": sorted(off_diagram),
@@ -475,6 +492,24 @@ def exit_path(channels, rules=None, topics=None, business_category=""):
     result["vendors"] = sorted({v for item in result["by_channel"] for v in item["vendors"]})
     for item in result["by_channel"]:
         result["terminals"].extend(t for t in item["terminals"] if t not in result["terminals"])
+
+    # Configured channels that are not actually sending. Surfaced at the top level because this is
+    # a correction to the headline number ("this use case reaches N channels"), not a footnote on
+    # one channel's path.
+    idle = [item["channel"] for item in result["by_channel"] if item["traffic"]["sends"] is False]
+    sending = [item["channel"] for item in result["by_channel"] if item["traffic"]["sends"] is True]
+    result["traffic"] = {
+        "sending_channels": sending,
+        "idle_channels": idle,
+        "unknown_channels": [item["channel"] for item in result["by_channel"]
+                             if item["traffic"]["sends"] is None],
+    }
+    if idle:
+        result["caveats"].append(
+            "configured but NOT sending (traffic_percentage 0, owner-confirmed 2026-08-05): "
+            + ", ".join(idle)
+            + " — these channels have a valid exit path but carry no traffic, so they must not be "
+              "counted as live when answering 'which channels are affected'.")
 
     methods = {item["vendor_selection"]["method"] for item in result["by_channel"]}
     if "channel_upper_bound" in methods:

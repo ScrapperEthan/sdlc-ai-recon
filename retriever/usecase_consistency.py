@@ -45,6 +45,23 @@ _SEVERITY_RANK = {"error": 3, "warning": 2, "info": 1}
 _PUSH_INBOX_KEY = "PUSHINBOX"
 
 
+def _range_text(codes):
+    """`0-7` / `8, 10-21, 32, 34-35` — compact, so a finding can name what IS defined without
+    printing twenty numbers. Empty map -> "none"."""
+    values = sorted(codes)
+    if not values:
+        return "none"
+    spans, start, prev = [], values[0], values[0]
+    for value in values[1:]:
+        if value == prev + 1:
+            prev = value
+            continue
+        spans.append((start, prev))
+        start = prev = value
+    spans.append((start, prev))
+    return ", ".join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in spans)
+
+
 def _finding(check, severity, use_case_id, message, citations, resolution=None):
     payload = {
         "check": check, "severity": severity, "use_case_id": use_case_id, "message": message,
@@ -145,11 +162,52 @@ def _priority_vs_confirmed_order(uc_id, interpretation, rules, citations):
     return []
 
 
-def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
+def _send_mode_finding(uc_id, ast, identity, citations):
+    """tbl_use_case.send_mode vs rule_text — a THIRD independent statement of the send semantics.
+
+    The dictionary's send_mode (1 same time / 2 by priority / 3 single channel) describes exactly
+    what rule_text's `&` / `>` / (no operator or `|`) describe. So it is a free cross-check on an
+    answer we otherwise take entirely on rule_text's word.
+
+    It is a CHECK, never an override: rule_text stays authoritative per the 2026-07-27 owner answer.
+    A disagreement is reported the same way the rule_text-vs-priority one is — as a data-quality
+    finding naming both sides, with rule_text named as the winner.
+
+    Absent column, blank cell, or an unrecognised code -> no finding at all. We have only seen this
+    column in a data dictionary, not in an export header, so "not there" must cost nothing.
+    """
+    if not identity:
+        return None
+    resolved = uc.resolve_send_mode(identity.get("send_mode_code"))
+    if not resolved["known"] or not resolved["rule_text_equivalent"]:
+        return None
+    if not ast.get("operator_tree"):
+        return None
+
+    expected = resolved["rule_text_equivalent"]
+    actual = {"PARALLEL": "parallel_all", "FALLBACK": "ordered_precedence",
+              "UPSTREAM_SELECTED": "exclusive_choice", "SINGLE": "exclusive_choice"}.get(ast["mode"])
+    # MIXED genuinely combines operators, so a single send_mode code cannot contradict it — a use
+    # case whose expression nests `>` inside `&` is not "wrong" for either code.
+    if actual is None or actual == expected:
+        return None
+    return _finding(
+        "send_mode_vs_rule_text", "warning", uc_id,
+        f"tbl_use_case.send_mode={resolved['code']} ({resolved['label']}) implies {expected}, but "
+        f"rule_text {ast['normalized_expression']!r} is {ast['mode']} ({actual})",
+        citations,
+        resolution=("rule_text is authoritative (owner-confirmed 2026-07-27) — the effective "
+                    "behaviour is the expression's. send_mode is a second registration of the same "
+                    "intent and disagrees, which is a data-quality problem in its own right."))
+
+
+def check_use_case(use_case_id, rules_idx=None, ext_idx=None, identity_idx=None):
     """Findings for ONE use case, comparing rule_text (B1 AST) against channel_rule facts.
     `rules_idx`/`ext_idx` are optional pre-built {lower_id: ...} indices — pass them when checking
     many use cases in a loop (e.g. from quality_findings()) to avoid rebuilding the full-table
-    index on every call. Always returns a list (possibly empty) — never raises."""
+    index on every call. `identity_idx` is the same for master rows and enables the send_mode
+    cross-check; omitted -> that check simply does not run. Always returns a list (possibly empty) —
+    never raises."""
     uc_id = (use_case_id or "").strip()
     if not uc_id:
         return []
@@ -167,6 +225,10 @@ def check_use_case(use_case_id, rules_idx=None, ext_idx=None):
     rule_text_raw = (ext.get("rule_text") or "").strip() if ext else ""
     ast = rt.parse(rule_text_raw)
     authoritative = _authoritative_source()
+
+    send_mode = _send_mode_finding(uc_id, ast, (identity_idx or {}).get(key), [ext_citation])
+    if send_mode:
+        findings.append(send_mode)
 
     if not rule_text_raw and rules:
         # Owner-confirmed 2026-07-27: a blank rule_text is the DOCUMENTED case for falling back to
@@ -259,7 +321,7 @@ def quality_findings(severity=None, offset=0, limit=50):
     result, not the grand total. `limit=0` means unlimited. Missing dataset -> a clean
     available:False payload, not a crash."""
     manifest = uc.snapshot_manifest()
-    _dataset, _path, rows, cols = uc._master_rows()
+    _dataset, master_path, rows, cols = uc._master_rows()
     if not rows:
         return {"available": False, "source": manifest, "total_findings": 0,
                 "counts_by_severity": {}, "findings": [], "returned": 0, "truncated": False,
@@ -270,12 +332,17 @@ def quality_findings(severity=None, offset=0, limit=50):
     status_col = bound.get("status")
 
     active_by_id = {}
-    for _line_no, row in rows:
+    # Built in the SAME pass as active_by_id — the send_mode cross-check needs the master identity,
+    # and re-reading the master table for it would double the cost of the sweep on a 2,810-row UAT
+    # export. Empty when the master snapshot is absent, which switches the check off cleanly.
+    identity_idx = {}
+    for line_no, row in rows:
         raw_id = (row.get(id_col) or "").strip() if id_col else ""
         if not raw_id:
             continue
         status_raw = (row.get(status_col) or "").strip() if status_col else ""
         active_by_id[raw_id] = (status_raw.upper() == "Y") if status_col else True
+        identity_idx[raw_id.lower()] = uc._identity(master_path, line_no, row, bound)
     master_ids_lower = {rid.lower() for rid in active_by_id}
 
     rules_idx = uc.rules_by_use_case_id()
@@ -350,16 +417,25 @@ def quality_findings(severity=None, offset=0, limit=50):
 
     base_quality = uc.quality_report()
     if base_quality.get("available"):
+        dictionary, code_only = uc.business_category_sources()
         for code in base_quality["illegal_enum"]["codes"]:
+            # Provenance changes what this finding MEANS, so it changes what the message says.
+            # Before 2026-08-05 all three sources were flattened into one "known enum", which is
+            # how 33/37 got described as unregistered-but-real categories. They are not registered
+            # anywhere: not in the data dictionary (0-7), not in BusinessCategoryEnum.java.
             findings.append({
                 "check": "illegal_business_category", "severity": "warning", "use_case_id": None,
-                "message": f"business_category code {code} is not in the known enum "
-                           "(data-contract drift) — official name/topic pending owner confirmation",
+                "message": (
+                    f"business_category code {code} is defined NOWHERE — not in the data dictionary "
+                    f"({_range_text(dictionary)}) and not in BusinessCategoryEnum.java "
+                    f"({_range_text(code_only)}). The runtime validator rejects unrecognised "
+                    "codes, so active use cases carrying it may be failing config validation."),
                 "citations": [], "code": code,
             })
 
     for lower_id in sorted(set(rules_idx) & set(ext_idx)):
-        findings.extend(check_use_case(lower_id.upper(), rules_idx=rules_idx, ext_idx=ext_idx))
+        findings.extend(check_use_case(lower_id.upper(), rules_idx=rules_idx, ext_idx=ext_idx,
+                                        identity_idx=identity_idx))
 
     findings.sort(key=lambda f: (-_SEVERITY_RANK.get(f["severity"], 0), f["check"],
                                   f.get("use_case_id") or ""))

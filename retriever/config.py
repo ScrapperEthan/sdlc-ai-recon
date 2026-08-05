@@ -57,6 +57,13 @@ USECASE_DATASET_DIR = _p("SDLC_USECASE_DATASET", "index", "usecase-snapshots", "
 RULE_TEXT_SEMANTICS_JSON = _cfg(
     "SDLC_RULE_TEXT_SEMANTICS", "rule_text_semantics.json", "index", "rule_text_semantics.json"
 )
+# Integer code tables for tbl_use_case (business_category, send_mode), owner-relayed from the data
+# dictionary 2026-08-05. Committed rather than box-local: these are business semantics, not the
+# box's real schema. Each code records WHICH source defines it — the data dictionary and
+# BusinessCategoryEnum.java disagree about the range, and only a code defined by neither is a
+# defect. Missing file -> the built-in seed in retriever/usecase_catalog.py, unchanged behaviour.
+BUSINESS_ENUMS_JSON = _cfg("SDLC_BUSINESS_ENUMS", "business_enums.json", "index",
+                           "business_enums.json")
 # Incident (AIOps) alert-text vocabulary: environment/resource/severity/metric tokens, timezone
 # aliases, and the not-yet-supplied delivery_path name->id map. Committed knob dir, intranet-owned
 # (AGENTS.md §2) — an AWS renaming should never require an engine edit. Missing file is harmless:

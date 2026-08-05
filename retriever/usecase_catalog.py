@@ -22,12 +22,18 @@ from datetime import datetime, timezone
 
 from . import config
 
-# Seed dict for business_category — source of truth is BusinessCategoryEnum.java on the mirror.
-# Any CSV code missing from this dict (e.g. 33, 37) is a data-contract drift alarm, not a bug here.
-BUSINESS_CATEGORY_ENUM = {
+# business_category codes DEFINED BY THE DATA DICTIONARY (owner-relayed screenshot, 2026-08-05).
+# This is the authoritative spec for the column and it stops at 7.
+BUSINESS_CATEGORY_DICTIONARY = {
     0: "WPB_REALTIME_MARKETING", 1: "WPB_REALTIME_SERVICING", 2: "WPB_BATCH_SERVICING",
     3: "WPB_BATCH_MARKETING", 4: "WPB_HR_REALTIME_SERVICING", 5: "WPB_SEC_REALTIME_SERVICING",
-    6: "CMB", 7: "WPB_HS_REALTIME_SERVICING", 8: "WPB_TC_REALTIME_SERVICING",
+    6: "CMB", 7: "WPB_HS_REALTIME_SERVICING",
+}
+# Codes defined by BusinessCategoryEnum.java on the mirror but ABSENT from the dictionary excerpt.
+# "Defined in code, not in the dictionary we were shown" is a weaker statement than "undefined" and
+# must not be reported as drift — the excerpt may simply be narrower or older than the code.
+BUSINESS_CATEGORY_CODE_ONLY = {
+    8: "WPB_TC_REALTIME_SERVICING",
     10: "HASE_WPB_SERVICING_REALTIME_GENERAL", 11: "HASE_WPB_SERVICING_REALTIME_HIGHRISK",
     12: "HASE_WPB_SERVICING_BATCH", 13: "HASE_WPB_MARKETING_REALTIME_GENERAL",
     14: "HASE_WPB_MARKETING_BATCH", 15: "HASE_CMB_SERVICING_REALTIME_GENERAL",
@@ -36,6 +42,20 @@ BUSINESS_CATEGORY_ENUM = {
     20: "HASE_WPB_SERVICING_TIMECRITICAL", 21: "HASE_CMB_SERVICING_TIMECRITICAL",
     32: "HSBC_WPB_SERVICING_BATCH",
     34: "HSBC_WPB_SERVICING_TIMECRITICAL", 35: "HSBC_WPB_SERVICING_REALTIME_HIGHRISK",
+}
+# The union, preserved under its original name so every existing caller keeps working. A code in
+# NEITHER half (33 and 37 in the real UAT export, both status=Y) is the genuine data-contract
+# defect: nothing anywhere defines it.
+BUSINESS_CATEGORY_ENUM = {**BUSINESS_CATEGORY_DICTIONARY, **BUSINESS_CATEGORY_CODE_ONLY}
+
+# send_mode — the same data dictionary. An independent third statement of the send semantics that
+# rule_text and channel_rule.priority also describe; used to CROSS-CHECK rule_text, never to
+# override it (rule_text is authoritative per the 2026-07-27 owner answer).
+SEND_MODE_ENUM = {
+    1: "Send at the same time", 2: "Send by priority", 3: "Send by single channel",
+}
+SEND_MODE_RULE_TEXT_EQUIVALENT = {
+    1: "parallel_all", 2: "ordered_precedence", 3: "exclusive_choice",
 }
 
 _JUNK_WORK_STREAM = {"invalid", "test", "n/a", "na", "null", "none", "-", "tbd", "xxx", "unknown", ""}
@@ -69,6 +89,10 @@ _FIELD_SPECS = {
     # exact-only: "status" must win over "unknown_bounce_back_status" (defect #3). A fuzzy
     # ("status",) fallback would match either — only offered when the literal column is absent.
     "status": {"exact": {"status"}, "needles": ("status",)},
+    # exact-only for the same reason as `status`: a fuzzy ("send",) fallback would also match
+    # `send_policy` on the channel-rule table, and binding one column as the other is precisely the
+    # first-column-wins defect that made `status` bind to `unknown_bounce_back_status`.
+    "send_mode": {"exact": {"sendmode"}, "needles": ()},
 
     # Consent / opt-in flags — matched on the FULL flattened name; several are near-duplicates
     # (push_optin_flag vs marketing_push_optin_flag vs high_risk_push_optin_flag …) so no fuzzy
@@ -157,6 +181,10 @@ _IDENTITY_FIELDS = (
     "use_case_id", "use_case_name", "project_name", "source_system", "work_stream_name",
     "line_of_business", "business_category", "country_code", "group_member", "app_name",
     "created_by", "created_time", "modified_by", "last_modified_time", "status",
+    # Bound OPTIMISTICALLY, same as business_category on _RULE_FIELDS: the data dictionary lists
+    # send_mode on this table, but we have only seen the dictionary, not the export's header.
+    # Present -> the rule_text cross-check runs; absent -> `_field` yields "" and nothing changes.
+    "send_mode",
 )
 _CONSENT_FIELDS = tuple(_CONSENT_FIELD_LABELS)
 _RULE_FIELDS = ("use_case_id", "channel", "priority", "route", "router", "traffic_percentage",
@@ -465,19 +493,124 @@ def _is_stale(last_modified_time, created_time, reference=None):
     return (reference - dt).days > _STALE_DAYS
 
 
-def _category_label(code_raw):
-    if not code_raw:
-        return "UNKNOWN()"
+def _enums_config():
+    """config/business_enums.json, or {} when absent/unreadable. Never raises."""
     try:
-        code = int(float(code_raw))
+        with open(config.BUSINESS_ENUMS_JSON, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _int_keyed(section, key):
+    """{int code: label} from one `<section>.<key>` block, ignoring `_`-prefixed metadata keys."""
+    block = (section or {}).get(key)
+    if not isinstance(block, dict):
+        return None
+    out = {}
+    for code, label in block.items():
+        text = str(code).strip()
+        if text.startswith("_") or not str(label).strip():
+            continue
+        try:
+            out[int(text)] = str(label).strip()
+        except ValueError:
+            continue
+    return out or None
+
+
+def business_category_sources():
+    """({dictionary codes}, {code-only codes}) — config wins per half, else the built-in seed.
+
+    Two dicts rather than one because the whole point is that a code's SOURCE changes what an
+    unrecognised value means. Merging them here would throw away the distinction the config exists
+    to record.
+    """
+    section = _enums_config().get("business_category")
+    section = section if isinstance(section, dict) else {}
+    dictionary = _int_keyed(section, "data_dictionary") or dict(BUSINESS_CATEGORY_DICTIONARY)
+    code_only = _int_keyed(section, "code_enum") or dict(BUSINESS_CATEGORY_CODE_ONLY)
+    # A code promoted into the dictionary must not also count as code-only.
+    return dictionary, {code: label for code, label in code_only.items() if code not in dictionary}
+
+
+def resolve_business_category(code_raw):
+    """Raw cell -> {code, label, source, known}.
+
+    `source` is `data_dictionary` (authoritative), `code_enum` (defined in BusinessCategoryEnum.java
+    only — reportable, NOT a defect), `undefined` (defined nowhere — the real data-contract defect),
+    `unparseable`, or `absent`.
+    """
+    text = str(code_raw or "").strip()
+    if not text:
+        return {"code": None, "raw": "", "label": "UNKNOWN()", "source": "absent", "known": False}
+    try:
+        code = int(float(text))
     except ValueError:
-        return f"UNKNOWN({code_raw})"
-    return BUSINESS_CATEGORY_ENUM.get(code) or f"UNKNOWN({code})"
+        return {"code": None, "raw": text, "label": f"UNKNOWN({text})", "source": "unparseable",
+                "known": False}
+    dictionary, code_only = business_category_sources()
+    if code in dictionary:
+        return {"code": code, "raw": text, "label": dictionary[code],
+                "source": "data_dictionary", "known": True}
+    if code in code_only:
+        return {"code": code, "raw": text, "label": code_only[code],
+                "source": "code_enum", "known": True}
+    return {"code": code, "raw": text, "label": f"UNKNOWN({code})", "source": "undefined",
+            "known": False}
+
+
+def _category_label(code_raw):
+    """Back-compat label only — `resolve_business_category` is what carries the provenance."""
+    return resolve_business_category(code_raw)["label"]
+
+
+def send_mode_enum():
+    """{int code: label} for tbl_use_case.send_mode; config wins, else the built-in dictionary map."""
+    section = _enums_config().get("send_mode")
+    section = section if isinstance(section, dict) else {}
+    return _int_keyed(section, "data_dictionary") or dict(SEND_MODE_ENUM)
+
+
+def send_mode_rule_text_equivalent():
+    """{int code: rule_text meaning} — the cross-check map, config-overridable."""
+    section = _enums_config().get("send_mode")
+    section = section if isinstance(section, dict) else {}
+    block = (section or {}).get("rule_text_equivalent")
+    if not isinstance(block, dict):
+        return dict(SEND_MODE_RULE_TEXT_EQUIVALENT)
+    out = {}
+    for code, meaning in block.items():
+        text = str(code).strip()
+        if text.startswith("_") or not str(meaning).strip():
+            continue
+        try:
+            out[int(text)] = str(meaning).strip()
+        except ValueError:
+            continue
+    return out or dict(SEND_MODE_RULE_TEXT_EQUIVALENT)
+
+
+def resolve_send_mode(code_raw):
+    """Raw cell -> {code, label, rule_text_equivalent, known}. Absent column yields a clean blank."""
+    text = str(code_raw or "").strip()
+    if not text:
+        return {"code": None, "raw": "", "label": "", "rule_text_equivalent": "", "known": False}
+    try:
+        code = int(float(text))
+    except ValueError:
+        return {"code": None, "raw": text, "label": "", "rule_text_equivalent": "", "known": False}
+    label = send_mode_enum().get(code, "")
+    return {"code": code, "raw": text, "label": label,
+            "rule_text_equivalent": send_mode_rule_text_equivalent().get(code, ""),
+            "known": bool(label)}
 
 
 def _identity(path, line_no, row, bound):
     code_raw = _field(row, bound, "business_category")
     status_raw = _field(row, bound, "status")
+    send_mode_raw = _field(row, bound, "send_mode")
     return {
         "use_case_id": _field(row, bound, "use_case_id"),
         "name": _field(row, bound, "use_case_name"),
@@ -487,6 +620,12 @@ def _identity(path, line_no, row, bound):
         "line_of_business": _field(row, bound, "line_of_business"),
         "business_category_code": code_raw,
         "business_category_label": _category_label(code_raw),
+        # Which source defines this code — see resolve_business_category. Reported so a consumer
+        # can say "defined in code but not in the data dictionary" instead of flattening that into
+        # the same bucket as "defined nowhere".
+        "business_category_source": resolve_business_category(code_raw)["source"],
+        "send_mode_code": send_mode_raw,
+        "send_mode_label": resolve_send_mode(send_mode_raw)["label"],
         "country": _field(row, bound, "country_code"),
         "group_member": _field(row, bound, "group_member"),
         "app": _field(row, bound, "app_name"),

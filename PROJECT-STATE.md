@@ -3,7 +3,14 @@
 Living status doc: **where we are across the full SDLC lifecycle**, updated as we go.
 Pairs with `BACKLOG.md` (what to build next) and `docs/specs/*.md` (build-ready specs).
 
-**Last updated:** 2026-07-08
+**Last updated:** 2026-08-05
+
+> ⚠️ **Honesty note about this file (2026-08-05).** The milestone log below stops at 2026-07-21
+> while the repo is at 2026-08-05 — RUNBOOK-46 through RUNBOOK-75 (MDC grouping, the AIOps/MCP
+> incident chain, the answer-quality evals, the read-only DB layer, and today's owner answers) are
+> **not** recorded here. The stage table above is therefore also behind. Bringing this file back in
+> line is tracked work, not a formality: it is the document used to explain the project upward, and
+> quoting it today would understate the estate by roughly two weeks of shipped capability.
 
 > Legend: 🟢 live / done · 🟡 in progress (beachhead) · ⚪ not started · 🔵 TBD / optional
 > Rule: keep it honest — "compiling-shaped" ≠ "builds"; don't mark 🟢 until it actually runs.
@@ -130,3 +137,11 @@ is solid.
 When a stage changes status: update its row (Status / Reached / What we have / Next)
 **and** append a dated line to the Milestone log. Record the date a stage is first
 reached so we can see the pace over time. Keep the honesty rule at the top.
+
+- **2026-08-05 — Three owner answers landed and were implemented at three different strengths; the glossary stopped faking decodings.** The DB connection work is parked (waiting on the DB owner), so this round is everything that does not depend on it.
+  - **`business_category` — the data dictionary defines 0–7 and stops there.** This makes the 33/37 finding *stronger*, not weaker: three sources now disagree (dictionary 0–7 / `BusinessCategoryEnum.java` also 8, 10–21, 32, 34, 35 / real UAT rows also **33** and **37**, all `status=Y`). Flattening those into one "known enum" is exactly what produced the earlier wrong claim that 33/37 were unregistered *new* categories — they are registered nowhere. `resolve_business_category()` now returns a `source` (`data_dictionary` / `code_enum` / `undefined`) and only `undefined` is a defect; codes defined in code but absent from the dictionary excerpt are reported, never alarmed. Enums moved out of code into `config/business_enums.json`.
+  - **`>` right-hand side = 左边失败了才发.** Closes the one follow-up 2026-07-27 left open. `stage_transition` = `fallback_on_failure`, validated fail-closed like the operator meanings (an unrecognised value reads as unconfirmed, never passed through). The **second** reading matters more than the outage one and is now explicit as `stages_are_live`: while the earlier stage is healthy the later channels are **not sending**, so an impact answer must not count every channel in a `>` expression as live traffic.
+  - **Blank `vendor` ↔ `traffic_percentage`, deliberately implemented as a CHECK not a rule.** The owner said blank vendor is "**基本上**" a 0% route. `traffic_percentage = 0` → does not send is definite and the engine acts on it (new `retriever/traffic.py`, tri-state `sends` where blank is **unknown, not zero**); the vendor correlation is verified per row (`vendor_blank_explained`), because a blank carrier on a route that *is* carrying traffic is the residue worth seeing and a rule would have deleted it from view. Idle channels now surface at the `exit_path` top level so blast radius stops over-counting.
+  - **Glossary: unfilled entries no longer render as decodings.** A live screenshot showed `mc-hk-hase-api-common (mc=TBC ? ???????, …)` — the box's hand-authored `index/glossary.json` had placeholder values and `expand()` printed whatever it was given, indistinguishable from a real decoding (the same shape as reporting a log tail as a keyword hit). Placeholders and `???` runs are now dropped; a non-UTF-8 file degrades instead of raising `UnicodeDecodeError` straight through every impact report; and `refresh.py` emits `index/reports/GLOSSARY_COVERAGE.md`, a fill list ranked by how many real repo names each token appears in — the box had ~209 unfilled tokens and no way to know which mattered.
+  - **Bonus from the same data dictionary: `send_mode` (1 same time / 2 by priority / 3 single channel) is an INDEPENDENT third registration of the semantics `rule_text` and `channel_rule.priority` also describe.** Bound optimistically (we have seen the dictionary, not the export header) and wired as a free cross-check on `rule_text` — never an override, since rule_text stays authoritative. Disagreements are reported like the existing rule_text-vs-priority ones.
+  - 1425 tests pass. Box verification is **RUNBOOK-75** (not yet run): it measures how often "基本上" actually holds, whether `send_mode` exists in the real export, how many use cases change blast-radius shape under fallback semantics, and walks the glossary fill.

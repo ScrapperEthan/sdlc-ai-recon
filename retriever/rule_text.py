@@ -22,6 +22,10 @@ tbl_use_case_channel_rule.priority**, which is the fallback used only when rule_
 module reports (e.g. I0141/I0142) therefore remain real DATA-QUALITY findings, but they are no
 longer open questions about which side is right.
 
+FOLLOW-UP CLOSED 2026-08-05: the one thing 2026-07-27 left open — whether a later `>` stage always
+sends or only on failure — is answered. 左边失败了才发: `stage_transition = "fallback_on_failure"`.
+See `_STAGE_TRANSITIONS`; it changes blast-radius answers in both directions, not just outage ones.
+
 Grammar (EBNF, from the UAT rule_text corpus — operator counts on real data: non-blank 2,640;
 no-operator 1,977; `>` 310; `&` 193; `|` 52; mixed 108):
 
@@ -249,6 +253,32 @@ _MEANINGS = {
     "|": {"exclusive_choice"},
 }
 
+# What a later '>' stage waits for. Same fail-closed rule as _MEANINGS: a config value that is not
+# one of these is treated as still-unconfirmed, so a future redefinition can never be read with
+# today's assumptions.
+#
+#   fallback_on_failure — 左边失败了才发 (owner-confirmed 2026-08-05)
+#   always_follows      — the later stage sends regardless of the earlier one's outcome
+#
+# The distinction is not cosmetic and it cuts BOTH ways:
+#   * outage direction — "the LETTER vendor is down, do EMAIL/SMS still go out?" is yes under
+#     fallback_on_failure (that is precisely the trigger) and also yes under always_follows, but for
+#     opposite reasons, so the explanation differs even where the verdict matches.
+#   * steady-state direction — under fallback_on_failure the later stages are NOT sending while the
+#     earlier stage is healthy. A blast radius that lists every channel in the expression as live
+#     traffic is therefore WRONG under this answer, and right under the other one.
+_STAGE_TRANSITIONS = {"fallback_on_failure", "always_follows"}
+
+_STAGE_TRANSITION_NOTES = {
+    "fallback_on_failure": (
+        "'>' stages are FALLBACK: a later stage fires only when the earlier one failed "
+        "(左边失败了才发, owner-confirmed 2026-08-05). Two consequences — during an outage of an "
+        "earlier channel the later channels are exactly what takes over; in steady state those "
+        "later channels are NOT carrying traffic and must not be counted as live."),
+    "always_follows": (
+        "'>' stages always send, in order, regardless of whether the earlier stage succeeded."),
+}
+
 
 def load_semantics():
     """config/rule_text_semantics.json, merged over the safe default. Missing/invalid file -> the
@@ -272,6 +302,22 @@ def _op_confirmed(semantics, op):
     if meaning in (None, "unconfirmed"):
         return False
     return meaning in _MEANINGS.get(op, set())
+
+
+def stage_transition(semantics=None):
+    """What a later '>' stage waits for: `fallback_on_failure`, `always_follows`, or `unconfirmed`.
+
+    Fails closed on any other value — an unrecognised transition is reported as unconfirmed rather
+    than passed through, so a consumer can never branch on a string this module does not implement.
+    """
+    semantics = load_semantics() if semantics is None else semantics
+    declared = str((semantics or {}).get("stage_transition") or "").strip()
+    return declared if declared in _STAGE_TRANSITIONS else "unconfirmed"
+
+
+def stage_transition_note(value):
+    """The one-line operational consequence of a transition, or the honest blank."""
+    return _STAGE_TRANSITION_NOTES.get(value, "")
 
 
 def source_precedence(semantics=None):
@@ -397,10 +443,11 @@ def interpret(ast, semantics=None):
     AND its declared meaning is one this module implements. Otherwise returns
     `{"available": False, "reason": ..., "unconfirmed_operators": [...]}`. Never guesses.
 
-    `stage_transition` rides along on an available interpretation: `>` is confirmed to mean the left
-    stage sends FIRST, but whether the next stage always follows or only fires on failure was not
-    confirmed — so consumers answering outage questions ("is EMAIL still sent when LETTER fails?")
-    must check it rather than assume."""
+    `stage_transition` rides along on an available interpretation. Owner-confirmed 2026-08-05 as
+    `fallback_on_failure` (左边失败了才发), which is what outage questions turn on — and, in the other
+    direction, means the later stages of a `>` are NOT live traffic while the earlier stage is
+    healthy. `stages_are_live` carries that second reading explicitly so a consumer counting blast
+    radius does not have to re-derive it: True/False when confirmed, None while unconfirmed."""
     semantics = load_semantics() if semantics is None else semantics
     tree = (ast or {}).get("operator_tree")
     if not tree:
@@ -410,5 +457,9 @@ def interpret(ast, semantics=None):
         return {"available": False, "reason": "operator semantics not owner-confirmed",
                 "unconfirmed_operators": unconfirmed}
     result = _build_interpretation(tree, semantics)
-    result["stage_transition"] = (semantics or {}).get("stage_transition") or "unconfirmed"
+    transition = stage_transition(semantics)
+    result["stage_transition"] = transition
+    result["stage_transition_note"] = stage_transition_note(transition)
+    result["stages_are_live"] = (
+        None if transition == "unconfirmed" else transition == "always_follows")
     return result

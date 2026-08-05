@@ -10,10 +10,12 @@
     "retriever/rule_text.py). An unrecognised meaning keeps interpretation switched OFF rather than",
     "silently producing the wrong shape — so renaming a meaning here is safe, it fails closed.",
     "",
-    "STILL OPEN (narrow follow-up, does NOT block interpretation): for '>', the owner confirmed the",
-    "left side sends FIRST. Whether the right side then always sends, or only after the left side",
-    "fails, was not stated — so stage_transition stays 'unconfirmed' and is reported as such.",
-    "It matters only for outage questions ('LETTER vendor is down — do EMAIL+SMS still go out?')."
+    "CLOSED 2026-08-05: the follow-up on '>' is answered. 左边失败了才发 — the right side fires ONLY",
+    "when the left side fails, so stage_transition is 'fallback_on_failure'. This is the answer that",
+    "outage questions turn on: 'the LETTER vendor is down — do EMAIL and SMS still go out?' is now",
+    "'yes, that is exactly when they go out', not 'unconfirmed'. Note the inverse also becomes",
+    "sayable and matters more for blast radius: while the left channel is HEALTHY the right-hand",
+    "channels are NOT sending, so they must not be counted as live traffic."
   ],
 
   ">": {
@@ -31,7 +33,8 @@
 
   "precedence": ["|", ">", "&"],
 
-  "stage_transition": "unconfirmed",
+  "stage_transition": "fallback_on_failure",
+  "stage_transition_note": "左边失败了才发 — a '>' stage fires only when the preceding stage FAILED. Owner-confirmed 2026-08-05. Must be one of the values retriever/rule_text.py implements (_STAGE_TRANSITIONS); anything else falls back to 'unconfirmed' rather than being interpreted.",
 
   "source_precedence": {
     "order": ["rule_text", "channel_rule_priority"],
@@ -44,5 +47,6 @@
   },
 
   "confirmed_by": "business owner (relayed by the project owner)",
-  "confirmed_at": "2026-07-27"
+  "confirmed_at": "2026-07-27",
+  "stage_transition_confirmed_at": "2026-08-05"
 }

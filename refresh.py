@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from retriever import config, usecase_master
+from retriever import config, glossary, usecase_master
 
 
 def _now():
@@ -175,6 +175,25 @@ def write_usecase_quality(index_dir):
     return {"cmd": ["usecase_master.quality_report"], "returncode": 0, "wrote": [md_path, json_path]}
 
 
+def write_glossary_coverage(index_dir):
+    """`index/reports/GLOSSARY_COVERAGE.{md,json}` — the prioritised fill list for the box.
+
+    Never a failure: no repo_tags yet, or no glossary file at all, both produce a report that says
+    so. "Unreadable" is reported distinctly from "absent" because the remedies differ (re-save as
+    UTF-8 vs author the file).
+    """
+    report = glossary.write_coverage(index_dir)
+    step = {"cmd": ["glossary.coverage"], "returncode": 0,
+            "wrote": [os.path.join(index_dir, "reports", "GLOSSARY_COVERAGE.md"),
+                      os.path.join(index_dir, "reports", "GLOSSARY_COVERAGE.json")]}
+    if not report["file_readable"]:
+        step["note"] = f"no usable glossary at {report['path']} (absent or not UTF-8)"
+    elif report["totals"]["placeholder"]:
+        step["note"] = (f"{report['totals']['placeholder']} placeholder entries are dropped at "
+                        "render time — they need real meanings")
+    return step
+
+
 def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None):
     root = root or os.getcwd()
     mirror = mirror or config.MIRROR
@@ -284,6 +303,11 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
     # Use Case master data quality (Tier 0) — additive, box-local export; absent snapshot is a
     # clean skip, not a failure.
     report["steps"].append(write_usecase_quality(index_dir))
+
+    # Glossary coverage — the hand-authored index/glossary.json is the ONE artefact here that no
+    # script can generate, so the only useful thing we can do for it is tell the box which tokens
+    # are worth filling. Ranked by how many real repo names each token appears in.
+    report["steps"].append(write_glossary_coverage(index_dir))
 
     summary_path = os.path.join(index_dir, "reports", "REFRESH-SUMMARY.md")
     try:

@@ -926,9 +926,23 @@ def render_rule_text_ast(ast, interpretation=None):
             if interpretation.get("selectable_channels"):
                 lines.append("  - exactly one of: "
                              + ", ".join(interpretation["selectable_channels"]))
-            if interpretation.get("stage_transition") == "unconfirmed":
-                lines.append("  - NOTE: whether a later stage always sends or only on failure of the "
-                             "earlier one is NOT owner-confirmed")
+            transition = interpretation.get("stage_transition")
+            if interpretation.get("fallback_edges"):
+                if transition == "fallback_on_failure":
+                    # Both readings, because answers here split by which one the question is about:
+                    # an outage question wants the takeover, a blast-radius question wants to know
+                    # the later channels are idle right now.
+                    lines.append("  - later stages are **fallback only** — they send when the "
+                                 "earlier stage FAILS (owner-confirmed 2026-08-05), so in steady "
+                                 "state they carry no traffic")
+                    for frm, to in interpretation["fallback_edges"]:
+                        lines.append(f"    - {to} sends only if {frm} fails")
+                elif transition == "always_follows":
+                    lines.append("  - later stages **always send**, in order, regardless of whether "
+                                 "the earlier stage succeeded")
+                else:
+                    lines.append("  - NOTE: whether a later stage always sends or only on failure "
+                                 "of the earlier one is NOT owner-confirmed")
     if ast["parse_warnings"]:
         lines.append("- parse warnings:")
         lines.extend(f"  - {w['type']}: {w.get('detail') or w.get('token') or w.get('channel') or ''}"

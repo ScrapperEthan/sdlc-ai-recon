@@ -29,6 +29,15 @@ The four values are `AWS HK SNS` (7 rows), `AWS SG SNS` (16), `HTCL` (70), `HTCL
 entirely empty, so the channel-level upper bound in `delivery_chain` is not a stopgap for those
 channels; it is the only answer that exists.
 
+## Why a blank `vendor` is now less alarming than it reads — but only sometimes
+
+The owner explained the blanks on 2026-08-05: a blank `vendor` is **基本上** there because the
+matching channel rule's `traffic_percentage` is 0, i.e. the route is configured but sends nothing.
+"基本上" is the operative word. `_explain_blank_vendor` therefore CHECKS that explanation per row
+instead of applying it, and the rows where it fails — blank carrier on a route that *is* carrying
+traffic — are the ones worth anyone's attention. Encoding the owner's sentence as a rule would have
+deleted precisely those rows from view.
+
 ## Why the vendor strings are NOT run through the repo-name parser
 
 `retriever/vendors.pick_vendor` takes the RIGHTMOST known token, which is correct for repo names
@@ -67,7 +76,7 @@ import json
 import os
 import re
 
-from . import config
+from . import config, traffic
 from .usecase_catalog import (
     _ROUTER_FIELDS,
     _column_map,
@@ -323,7 +332,9 @@ def resolve_vendor(raw):
                 "provider_family": "", "region": "", "lifecycle": "",
                 "note": ("tbl_use_case_router.vendor is blank on the matched row (58.70% of the "
                           "table is). The authoritative carrier is simply not recorded — that is "
-                          "not the same as 'no carrier'.")}
+                          "not the same as 'no carrier'. The owner's usual explanation is a 0% "
+                          "route; whether it holds for a given row is checked, not assumed — see "
+                          "`vendor_blank_explained` on the router_for_rule result.")}
     described = _describe_display_name(text)
     token = vendor_display_aliases().get(text.casefold())
     out = {"raw": text, "token": token, "confirmed": bool(token), "present": True, **described}
@@ -341,6 +352,35 @@ def resolve_vendor(raw):
                             "same carrier as the un-marked value, which would assert that a legacy "
                             "route is live.")
     return out
+
+
+def _explain_blank_vendor(rule_traffic):
+    """Does the owner's explanation for a blank `vendor` actually hold on THIS row?
+
+    The owner's 2026-08-05 answer was "vendor 是空基本上也是因为 percentage 为 0" — *mostly*. So the
+    explanation is CHECKED per row rather than applied. `holds: False` is the valuable output: a
+    blank vendor on a rule that IS carrying traffic is a route with real volume and no recorded
+    carrier, which is a genuinely different (and worse) situation from a blank on an idle route.
+
+    Implementing the owner's sentence as a rule would have erased exactly those rows — the same
+    shape as every defect the intranet caught in the incident chain: asserting something about their
+    data instead of verifying it.
+    """
+    if rule_traffic.get("sends") is False:
+        return {"holds": True, "reason": "traffic_percentage is 0",
+                "note": ("blank vendor on a rule that carries no traffic — consistent with the "
+                          "owner's explanation (2026-08-05) that blank vendor is usually a 0% "
+                          "route. Nothing is missing here.")}
+    if rule_traffic.get("sends") is True:
+        return {"holds": False, "reason": f"traffic_percentage is {rule_traffic['value']:g}",
+                "note": ("blank vendor on a rule that IS carrying traffic — the owner's usual "
+                          "explanation (0% route) does NOT apply to this row. Either the "
+                          "authoritative carrier is genuinely unrecorded for a live route, or the "
+                          "two tables come from different export runs. Report it; do not fill it in.")}
+    return {"holds": None, "reason": "traffic_percentage unknown",
+            "note": ("blank vendor and an unreadable traffic_percentage — the owner's explanation "
+                      "can be neither confirmed nor ruled out for this row. A blank percentage is "
+                      "not 0.")}
 
 
 def router_for_rule(rule, business_category="", index=None):
@@ -405,9 +445,11 @@ def router_for_rule(rule, business_category="", index=None):
         return result
 
     row = matches[0]
+    rule_traffic = traffic.read(rule.get("traffic_percentage"))
     result.update({
         "matched": True,
         "router_id": row.get("id") or "",
+        "traffic": rule_traffic,
         "vendor": resolve_vendor(row.get("vendor")),
         "delivery_path": row.get("delivery_path") or "",
         "message_process_sla": row.get("message_process_sla") or "",
@@ -415,6 +457,8 @@ def router_for_rule(rule, business_category="", index=None):
         "business_category": row.get("business_category") or "",
         "citation": row.get("citation") or "",
     })
+    if not result["vendor"]["present"]:
+        result["vendor_blank_explained"] = _explain_blank_vendor(rule_traffic)
     if result["message_process_sla"] or result["message_delivery_sla"]:
         result["sla_note"] = _SLA_NOTE
         result["sla_unit"] = SLA_UNIT

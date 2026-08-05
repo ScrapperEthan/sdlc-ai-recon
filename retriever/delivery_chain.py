@@ -327,13 +327,17 @@ def _vendor_verification(by_channel):
 
     The intranet's RUNBOOK-75 run measured the owner's "基本上" on the real UAT export and it does
     NOT hold as a rule: of the blank-vendor rows it could decide, roughly half were 0% routes and
-    roughly half were carrying live traffic. `fails` is therefore the number that matters — routes
-    with real volume and no authoritative carrier — and it is exactly the population a rule-shaped
-    implementation would have erased.
+    roughly half were carrying live traffic.
 
-    The caveat travels with the count on purpose: a failed explanation is EITHER a real data gap OR
-    an artefact of the four tables coming from different export runs. Neither reading licenses
-    inferring a carrier.
+    OWNER DECISION 2026-08-06: those rows are **NOT a data-quality exception**. The messaging team's
+    routing rules make several of them expected — whole router families are deliberately skipped
+    when a use case is provisioned (`would NOT choose ICCM related router`; `can ignore the ICCM
+    related routers, and HUTCHISON_GW related router`), and a channel's carrier can be decided by
+    the app name or the delivery mode rather than recorded on the row. So this reports a COUNT and
+    nothing more: no severity, no finding, no "unexplained".
+
+    The caveat still travels with the count, because the one inference that stays forbidden is
+    unchanged: a blank carrier is never evidence of which carrier it is.
     """
     counts = {"holds": 0, "fails": 0, "undecidable": 0}
     for item in by_channel:
@@ -349,12 +353,13 @@ def _vendor_verification(by_channel):
     if not total:
         return out
     out["headline"] = (
-        f"{counts['fails']} matched router row(s) have a blank vendor on a rule that IS carrying "
-        f"traffic — the owner's usual explanation (0% route) does not apply to them "
-        f"({counts['holds']} row(s) it does apply to, {counts['undecidable']} undecidable). "
-        "That is either a genuine gap in the authoritative carrier record or an artefact of the "
-        "tables being exported at different moments — it is NOT evidence that a carrier can be "
-        "inferred.")
+        f"{counts['fails']} matched router row(s) carry traffic with no vendor recorded "
+        f"({counts['holds']} are standby 0% rows, {counts['undecidable']} undecidable). "
+        "Owner-decided 2026-08-06: this is NOT a data-quality exception — the routing rules skip "
+        "whole router families for a given use case (ICCM, HUTCHISON_GW) and decide some carriers "
+        "by app name or delivery mode rather than by this column, so a live route with no recorded "
+        "carrier is an expected shape. Reported as a count only. What remains forbidden either way: "
+        "a blank vendor is NOT evidence of which carrier it is.")
     return out
 
 
@@ -398,11 +403,10 @@ def _channel_path(catalog, channel, declared_as, topology, topics, hints,
     result = {
         "channel": channel,
         "declared_as": sorted(set(declared_as)),
-        # Configured != sending. A rule row at traffic_percentage 0 does not send (owner-confirmed
-        # 2026-08-05), so the path below is what WOULD be used, not what is being used. Kept as a
-        # separate field rather than dropping the channel: the exit path is still the right answer
-        # to "where would this go", and an idle channel is still the right answer to "what is
-        # configured" — only "what is live right now" changes.
+        # A 0% row is provisioned but not carrying traffic right now — and per the messaging team's
+        # routing rules that is usually a dual-vendor STANDBY (high-risk SMS = 100% HTCL + 0% CSL),
+        # i.e. exactly who takes over during an outage. Never a reason to drop the channel from the
+        # chain; only a reason to say "not live right now" when that is the question being asked.
         "traffic": _channel_traffic(channel, rules),
         "stages": stages,
         "vendors": vendors,
@@ -532,20 +536,35 @@ def exit_path(channels, rules=None, topics=None, business_category=""):
     # Configured channels that are not actually sending. Surfaced at the top level because this is
     # a correction to the headline number ("this use case reaches N channels"), not a footnote on
     # one channel's path.
-    idle = [item["channel"] for item in result["by_channel"] if item["traffic"]["sends"] is False]
+    standby = [item["channel"] for item in result["by_channel"]
+               if item["traffic"]["sends"] is False]
     sending = [item["channel"] for item in result["by_channel"] if item["traffic"]["sends"] is True]
+    # A channel that IS sending can still have a 0% row behind it — that is the dual-vendor pair,
+    # and it is invisible in the channel-level verdict alone.
+    with_standby = [item["channel"] for item in result["by_channel"]
+                    if item["traffic"].get("has_standby")]
     result["traffic"] = {
         "sending_channels": sending,
-        "idle_channels": idle,
+        "standby_channels": standby,
+        "channels_with_a_standby_route": with_standby,
+        # Old key, same values. "idle" is the word that produced the wrong reading; kept only so
+        # existing consumers do not break.
+        "idle_channels": standby,
         "unknown_channels": [item["channel"] for item in result["by_channel"]
                              if item["traffic"]["sends"] is None],
     }
-    if idle:
+    if standby or with_standby:
         result["caveats"].append(
-            "configured but NOT sending (traffic_percentage 0, owner-confirmed 2026-08-05): "
-            + ", ".join(idle)
-            + " — these channels have a valid exit path but carry no traffic, so they must not be "
-              "counted as live when answering 'which channels are affected'.")
+            "traffic_percentage 0 means **provisioned but not carrying traffic right now** — it is "
+            "NOT 'switched off'. The messaging team's routing rules create 0% rows deliberately as "
+            "the second carrier of a dual-vendor pair (high-risk SMS = primary 100% HTCL + 0% CSL; "
+            "CN = primary 100% CM + 0% LX). "
+            + (f"Standby-only channel(s): {', '.join(standby)}. " if standby else "")
+            + (f"Channel(s) with a standby route behind a live one: {', '.join(with_standby)}. "
+               if with_standby else "")
+            + "When the question is an OUTAGE ('the primary carrier is down — what takes over?'), "
+              "these are the answer and must be included. Only exclude them when the question is "
+              "specifically 'what is carrying traffic right now'.")
 
     result["vendor_verification"] = _vendor_verification(result["by_channel"])
     if result["vendor_verification"]["fails"]:

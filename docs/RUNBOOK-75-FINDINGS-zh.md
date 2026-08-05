@@ -140,7 +140,51 @@ stages_are_live: False
 
 ---
 
-## 六、⚠️ 需要问业主的两个问题
+## 六、⭐ 2026-08-06 更新:两个问题都答了,而且答案纠正了我一个危险的实现
+
+### 问题 A(244 行)—— 业主决定:**不报成数据质量异常**
+
+理由在 `docs/ROUTER-SELECTION-RULES-zh.md`:整族 router 是**刻意跳过**的
+(`would NOT choose ICCM related router`、`can ignore ... HUTCHISON_GW related router`),
+而且有些渠道的厂商**根本不由这一列决定**(PUSH 看 app name,SMS 看 telecom/delivery mode)。
+
+**所以"有流量但 vendor 空"是预期形状。** 已改成:只报计数,无严重级,措辞里删掉 "unexplained"。
+唯一保留的禁止项不变:**空 vendor 永远不构成"可以推断出是哪家"的证据。**
+
+### 问题 B(`send_mode` 0/4/5)—— 完整字典页到手,4 和 5 解决了
+
+| code | 含义 | 说明 |
+| ---: | --- | --- |
+| 4 | Send by separately | 第一份节选被截断了,所以看起来"没定义" |
+| 5 | **Mixed mode** | ⭐ 正是 `rule_text` 的 MIXED —— **交叉验证第一次能正面比对混合表达式** |
+| **0** | 🔴 **仍然不知道** | 903 行。记为**已知的未知**,不是漂移 |
+
+`send_mode` 的三态处理已实现:`known`(1–5)/ `pending`(0,legitimate 但读不懂)/
+`unexpected`(真漂移)。**0 报 info 不报 warning** —— 一个 903 行都在用的值,叫它"数据契约漂移"
+是过度指控。
+
+**代码 4 故意不给 `rule_text_equivalent`**:表达式语法里没有"separately"这个操作符,
+硬映射到最像的那个,会凭空制造出一致或不一致。
+
+### 🔴 但最重要的是:这批资料推翻了我对 `traffic_percentage = 0` 的实现
+
+> `if message is high-risk, choose dual vendor with HTCL and CSL,`
+> **`primary 100% HTCL & 0% for CSL`**
+
+**0% 是「双厂商的备用方」,不是"关掉了"。** CSL 挂着 0%,正是 HTCL 挂掉时接管的那一家。
+
+我上一轮把 0% 写成 "must not be counted as live" —— 问"HTCL 挂了谁接管",
+**我会把唯一的答案删掉**。这比多算更糟。
+
+已修正:0% 的语义改为「已配置、当前不承载流量」,三种可能(双厂商备用 / 已登记未就绪 /
+真停用)**无法从这一列区分**;新增 `standby` 和 `has_standby` 两个字段;报告措辞改成
+**故障问题必须包含 0% 渠道**。详见 `docs/ROUTER-SELECTION-RULES-zh.md`。
+
+> 这和 `>` fallback 是**同一个形状**:平时不发、故障时正是它接管。同一个原则第二次出现。
+
+---
+
+## 七(历史)、当时提出的两个问题原文
 
 这两条**我不能替业主决定**,而且都会改变引擎的默认行为。
 
@@ -167,7 +211,7 @@ stages_are_live: False
 
 ---
 
-## 七、协作边界(内网提的,我同意)
+## 八、协作边界(内网提的,我同意)
 
 | 归内网 / 摄取侧 | 归外部 / 引擎侧 |
 | --- | --- |

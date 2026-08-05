@@ -93,6 +93,77 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(merged[0]["rules"], 2)
 
 
+class StandbyNotOffTest(unittest.TestCase):
+    """0% is a provisioned SECOND CARRIER, not a switched-off route.
+
+    The messaging team's routing rules create 0% rows deliberately:
+
+        if message is high-risk, choose dual vendor with HTCL and CSL,
+        primary 100% HTCL & 0% for CSL
+
+        if need to send to CN, choose LX (not yet ready) and CM routers,
+        primary 100% CM & 0% for LX
+
+    The first version of this module read 0% as "does not send, do not count as live". That answers
+    "the HTCL vendor is down, what takes over?" by deleting CSL — the only correct answer. These
+    tests pin the corrected reading, because the failure only shows up during a real outage, which
+    is the worst possible time to discover it.
+    """
+
+    def test_zero_is_flagged_as_standby_not_merely_absent(self):
+        reading = traffic.read("0")
+        self.assertIs(reading["sends"], False)
+        self.assertIs(reading["standby"], True)
+
+    def test_the_note_says_an_outage_answer_must_include_it(self):
+        note = traffic.read("0")["note"]
+        self.assertIn("takes over", note)
+        self.assertIn("MUST include it", note)
+        # And it must not claim to know WHICH of the three causes applies.
+        self.assertIn("cannot tell the three apart", note)
+
+    def test_unknown_percentage_is_not_standby_either(self):
+        # standby is a positive claim about a provisioned route; a blank supports no claim at all.
+        for value in ("", "n/a", None):
+            self.assertIsNone(traffic.read(value)["standby"], repr(value))
+
+    def test_a_live_channel_with_a_zero_pct_row_still_reports_its_standby(self):
+        # The dual-vendor case: 100% HTCL + 0% CSL is ONE channel that IS sending. A channel-level
+        # verdict alone hides the standby completely.
+        rows = [{"traffic_percentage": "100"}, {"traffic_percentage": "0"}]
+        entry = traffic.verdict(rows, "SMS")
+        self.assertIs(entry["sends"], True)
+        self.assertTrue(entry["has_standby"])
+        self.assertEqual(entry["standby_rules"], 1)
+
+    def test_standby_channels_is_the_honest_name_and_idle_still_works(self):
+        rows = [{"channel": "SMS", "traffic_percentage": "0"}]
+        self.assertEqual(traffic.standby_channels(rows), ["SMS"])
+        self.assertEqual(traffic.idle_channels(rows), ["SMS"])   # old name, same rows
+
+    def test_exit_path_caveat_tells_the_reader_to_include_them_in_an_outage(self):
+        by_channel = [{"channel": "sms",
+                       "traffic": {"sends": False, "has_standby": True},
+                       "vendor_selection": {"method": "channel_upper_bound"},
+                       "vendors": [], "vendors_off_diagram": [], "terminals": []}]
+        standby = [c["channel"] for c in by_channel if c["traffic"]["sends"] is False]
+        self.assertEqual(standby, ["sms"])   # the population the caveat is built from
+
+    def test_report_tells_the_reader_to_include_standby_in_a_blast_radius(self):
+        import impact_report
+        lines = impact_report.render_delivery_chain({
+            "available": True, "channel_source": "declared", "by_channel": [],
+            "traffic": {"standby_channels": ["sms"], "channels_with_a_standby_route": ["email"],
+                        "sending_channels": [], "unknown_channels": []},
+        })
+        text = chr(10).join(lines)
+        self.assertIn("standby", text.lower())
+        self.assertIn("include", text.lower())
+        self.assertIn("dual-vendor", text.lower())
+        # The old wording actively told the reader to exclude them. It must be gone.
+        self.assertNotIn("do not count these as live", text.lower())
+
+
 class BlankVendorExplanationTest(unittest.TestCase):
     """`vendor` blank + `traffic_percentage` 0 = explained. Blank + real traffic = the residue."""
 
@@ -237,6 +308,29 @@ class SendModeTest(unittest.TestCase):
         self.assertEqual(resolved["label"], "")
         self.assertFalse(resolved["known"])
 
+    def test_shipped_config_matches_the_built_in_send_mode_seed(self):
+        # The config WINS when present, so a code added only to the in-code seed silently does
+        # nothing. That is exactly what happened while wiring codes 4/5 — caught by a test, which
+        # is the point. Any drift between the two must fail here.
+        self.assertEqual(usecase_catalog.send_mode_enum(), usecase_catalog.SEND_MODE_ENUM)
+        self.assertEqual(usecase_catalog.send_mode_rule_text_equivalent(),
+                         usecase_catalog.SEND_MODE_RULE_TEXT_EQUIVALENT)
+        self.assertEqual(sorted(usecase_catalog.send_mode_pending()),
+                         sorted(usecase_catalog.SEND_MODE_PENDING_MEANING))
+
+    def test_code_zero_is_pending_not_undefined(self):
+        # Two different statements. "Undefined" means drift; "pending" means a legitimate value we
+        # cannot read yet. 903 rows makes the second one the honest description.
+        resolved = usecase_catalog.resolve_send_mode("0")
+        self.assertFalse(resolved["known"])
+        self.assertTrue(resolved["pending"])
+        self.assertIn("903", resolved["note"])
+
+    def test_a_genuinely_unexpected_code_is_neither_known_nor_pending(self):
+        resolved = usecase_catalog.resolve_send_mode("99")
+        self.assertFalse(resolved["known"])
+        self.assertFalse(resolved["pending"])
+
     def test_send_mode_binds_exact_only_so_it_cannot_take_send_policy(self):
         # A fuzzy ("send",) fallback would let send_policy bind here — the first-column-wins defect
         # that made `status` bind to `unknown_bounce_back_status`.
@@ -272,10 +366,22 @@ class SendModeCrossCheckTest(unittest.TestCase):
         self.assertIn("PARALLEL", finding["message"])
         self.assertIn("rule_text is authoritative", finding["resolution"])
 
-    def test_mixed_expressions_cannot_contradict_a_single_code(self):
-        # "(SMS > EMAIL) & PUSH" genuinely combines operators — no single send_mode is wrong for it.
-        self.assertIsNone(self._check("(SMS > EMAIL) & PUSH", "1"))
-        self.assertIsNone(self._check("(SMS > EMAIL) & PUSH", "2"))
+    def test_mixed_mode_became_comparable_when_code_5_arrived(self):
+        # Before 2026-08-06 a MIXED expression could not be checked at all: no code named that
+        # shape, so it could neither agree nor disagree. The full dictionary gave 5 = "Mixed mode",
+        # which is literally what rule_text calls MIXED — so it now checks positively.
+        self.assertIsNone(self._check("(SMS > EMAIL) & PUSH", "5"))
+        finding = self._check("(SMS > EMAIL) & PUSH", "1")
+        self.assertIsNotNone(finding)
+        self.assertIn("MIXED", finding["message"])
+
+    def test_code_4_has_no_rule_text_equivalent_so_nothing_is_compared(self):
+        # "Send by separately" has no operator in the expression grammar. Mapping it to the
+        # nearest-looking one would manufacture agreement or disagreement out of nothing.
+        self.assertEqual(usecase_catalog.resolve_send_mode("4")["label"], "Send by separately")
+        self.assertEqual(usecase_catalog.resolve_send_mode("4")["rule_text_equivalent"], "")
+        for expression in ("EMAIL & SMS", "LETTER > EMAIL", "EMAIL | SMS"):
+            self.assertIsNone(self._check(expression, "4"), expression)
 
     def test_absent_column_costs_nothing(self):
         # We have only seen send_mode in a data dictionary, never in an export header.
@@ -426,35 +532,44 @@ class LocalEnumOverrideTest(unittest.TestCase):
                                  "data_dictionary")
 
 
-class UndefinedSendModeVisibilityTest(unittest.TestCase):
-    """Codes 0/4/5 exist in the real export and the dictionary defines none of them.
+class UnreadableSendModeVisibilityTest(unittest.TestCase):
+    """Code 0 covers ~903 rows and nobody has explained it.
 
-    The per-use-case cross-check correctly SKIPS unknown codes — it cannot compare a meaning it does
-    not have. That is right, and it is also why a dataset-wide finding is needed: without one, ~978
-    rows carrying an undefined code would leave no trace anywhere, which is the same "silence reads
-    as fine" shape this codebase keeps closing.
+    The per-use-case cross-check correctly SKIPS a code it cannot read — it has no meaning to
+    compare against. That is right, and it is also why a dataset-wide finding is needed: without
+    one, those rows leave no trace anywhere, which is the same "silence reads as fine" shape this
+    codebase keeps closing.
     """
 
-    def test_undefined_codes_are_reported_with_their_row_counts(self):
-        identity_idx = {
-            "a": {"use_case_id": "A", "send_mode_code": "0"},
-            "b": {"use_case_id": "B", "send_mode_code": "0"},
-            "c": {"use_case_id": "C", "send_mode_code": "5"},
-            "d": {"use_case_id": "D", "send_mode_code": "3"},   # defined -> not reported
-            "e": {"use_case_id": "E", "send_mode_code": ""},    # absent  -> not reported
-        }
-        undefined = {}
-        for identity in identity_idx.values():
+    def _bucket(self, identities):
+        pending, unexpected = {}, {}
+        for identity in identities:
             resolved = usecase_catalog.resolve_send_mode(identity["send_mode_code"])
-            if resolved["code"] is not None and not resolved["known"]:
-                undefined[resolved["code"]] = undefined.get(resolved["code"], 0) + 1
-        self.assertEqual(undefined, {0: 2, 5: 1})
+            if resolved["code"] is None or resolved["known"]:
+                continue
+            target = pending if resolved["pending"] else unexpected
+            target[resolved["code"]] = target.get(resolved["code"], 0) + 1
+        return pending, unexpected
 
-    def test_the_cross_check_skips_undefined_codes_rather_than_guessing(self):
+    def test_pending_and_unexpected_codes_are_counted_separately(self):
+        pending, unexpected = self._bucket([
+            {"send_mode_code": "0"},    # pending — 903 real rows, meaning not supplied
+            {"send_mode_code": "0"},
+            {"send_mode_code": "99"},   # unexpected — genuine drift
+            {"send_mode_code": "5"},    # defined since 2026-08-06 -> neither
+            {"send_mode_code": "4"},    # defined since 2026-08-06 -> neither
+            {"send_mode_code": ""},     # absent -> neither
+        ])
+        self.assertEqual(pending, {0: 2})
+        self.assertEqual(unexpected, {99: 1})
+
+    def test_the_cross_check_skips_a_code_it_cannot_read(self):
         ast = rt.parse("EMAIL & SMS")
-        for code in ("0", "4", "5"):
-            self.assertIsNone(
-                ucc._send_mode_finding("X", ast, {"send_mode_code": code}, []), code)
+        self.assertIsNone(ucc._send_mode_finding("X", ast, {"send_mode_code": "0"}, []))
+
+    def test_codes_4_and_5_are_no_longer_unreadable(self):
+        for code in ("4", "5"):
+            self.assertTrue(usecase_catalog.resolve_send_mode(code)["known"], code)
 
 
 class VendorVerificationSummaryTest(unittest.TestCase):
@@ -473,11 +588,19 @@ class VendorVerificationSummaryTest(unittest.TestCase):
         self.assertEqual(summary["undecidable"], 1)
         self.assertEqual(summary["blank_vendor_rows"], 4)
 
-    def test_headline_names_the_failures_and_refuses_to_license_an_inference(self):
+    def test_headline_reports_a_count_and_refuses_to_license_an_inference(self):
+        # Owner-decided 2026-08-06: these are NOT a data-quality exception. The routing rules skip
+        # whole router families per use case, so a live route with no recorded carrier is an
+        # expected shape — count it, do not flag it.
         summary = delivery_chain._vendor_verification(self._channels([False, True]))
         self.assertIn("1 matched router row", summary["headline"])
-        self.assertIn("NOT evidence that a carrier can be inferred", summary["headline"])
-        self.assertIn("exported at different moments", summary["headline"])
+        self.assertIn("NOT a data-quality exception", summary["headline"])
+        # The one inference that stays forbidden regardless.
+        self.assertIn("NOT evidence of which carrier it is", summary["headline"])
+
+    def test_headline_never_calls_the_rows_unexplained(self):
+        summary = delivery_chain._vendor_verification(self._channels([False, False]))
+        self.assertNotIn("unexplained", summary["headline"].lower())
 
     def test_rows_with_a_present_vendor_are_not_counted(self):
         channels = [{"authoritative_router": [{"matched": True}]}]
@@ -494,8 +617,9 @@ class VendorVerificationSummaryTest(unittest.TestCase):
                                     "blank_vendor_rows": 1339, "headline": ""},
         })
         text = chr(10).join(lines)
-        self.assertIn("244 unexplained", text)
-        self.assertIn("283 explained", text)
+        self.assertIn("244 carrying traffic with no carrier recorded", text)
+        self.assertIn("283 standby", text)
+        self.assertIn("not a data-quality exception", text)
 
 
 if __name__ == "__main__":

@@ -80,37 +80,56 @@
 
     "_measured_2026_08_05": [
       "CONFIRMED PRESENT in the real UAT master export (the column bound successfully), so the",
-      "optimistic binding paid off. But the dictionary is INCOMPLETE against its own data:",
+      "optimistic binding paid off. Observed distribution:",
       "",
-      "  code 3 -> 1,435 rows      defined: send by single channel",
-      "  code 0 ->   903 rows      *** NOT DEFINED — and the second most common value ***",
-      "  code 2 ->   249 rows      defined: send by priority",
-      "  code 1 ->   148 rows      defined: send at the same time",
-      "  code 5 ->    72 rows      *** NOT DEFINED ***",
-      "  code 4 ->     3 rows      *** NOT DEFINED ***",
+      "  code 3 -> 1,435 rows      send by single channel",
+      "  code 0 ->   903 rows      *** STILL UNEXPLAINED — and the second most common value ***",
+      "  code 2 ->   249 rows      send by priority",
+      "  code 1 ->   148 rows      send at the same time",
+      "  code 5 ->    72 rows      mixed mode        (supplied 2026-08-06)",
+      "  code 4 ->     3 rows      send by separately (supplied 2026-08-06)",
       "",
-      "Undefined codes stay undefined — resolve_send_mode() reports them as unknown rather than",
-      "guessing, and they are excluded from the cross-check because a comparison it does not",
-      "understand is worse than no comparison. `usecase_consistency` raises an `undefined_send_mode`",
-      "finding so those ~978 rows leave a trace rather than vanishing.",
+      "2026-08-06: the full dictionary page arrived and closed 4 and 5. The first excerpt had been",
+      "cut off after 3, which is why they looked undefined. Code 0 remains genuinely unexplained.",
       "",
-      "OWNER QUESTION OPEN: what do 0, 4 and 5 mean? Add them to `data_dictionary` and",
-      "`rule_text_equivalent` below when the answer arrives — no engine change is needed. On the box,",
-      "write them to config/business_enums.local.json (gitignored, auto-preferred) rather than here.",
+      "Note what 5 unlocked: 'Mixed mode' is the dictionary's own name for what rule_text calls",
+      "MIXED, so a mixed expression can now be checked POSITIVELY instead of being skipped as",
+      "uncomparable. Code 4 gets NO rule_text_equivalent on purpose — the expression grammar has no",
+      "operator for 'separately', and mapping it to the nearest-looking one would manufacture",
+      "agreement or disagreement out of nothing.",
       "",
-      "The cross-check found 30 rule_text disagreements on the real export. ALSO an open owner",
-      "question: expected historic drift, or a data-quality exception? Until answered they are",
-      "reported at warning severity with rule_text named as the winner, which is the safe reading."
+      "The cross-check found 30 rule_text disagreements on the real export. OPEN owner question:",
+      "expected historic drift, or a data-quality exception? Until answered they are reported at",
+      "warning severity with rule_text named as the winner, which is the safe reading.",
+      "",
+      "KEEP IN SYNC with SEND_MODE_ENUM / SEND_MODE_RULE_TEXT_EQUIVALENT / SEND_MODE_PENDING_MEANING",
+      "in retriever/usecase_catalog.py — a test asserts they match, because this file WINS when",
+      "present and a code added only to the seed would silently do nothing."
     ],
     "data_dictionary": {
       "1": "Send at the same time",
       "2": "Send by priority",
-      "3": "Send by single channel"
+      "3": "Send by single channel",
+      "4": "Send by separately",
+      "5": "Mixed mode"
     },
     "rule_text_equivalent": {
       "1": "parallel_all",
       "2": "ordered_precedence",
-      "3": "exclusive_choice"
+      "3": "exclusive_choice",
+      "5": "mixed"
+    },
+    "pending_meaning": {
+      "_README": [
+        "Codes seen in the real data whose meaning has not been supplied. This is a THIRD state,",
+        "deliberately not merged with 'undefined': code 0 covers ~903 rows, so it is plainly a",
+        "legitimate and widely used value that we simply cannot read yet. Calling that",
+        "data-contract drift overstates the problem; saying nothing understates it. Rows carrying a",
+        "pending code are excluded from the cross-check and reported at INFO, not WARNING.",
+        "",
+        "Move a code from here into `data_dictionary` the moment the owner explains it."
+      ],
+      "0": "appears on ~903 rows of the real UAT export — a legitimate, widely used value whose meaning the data dictionary does not give. Owner question outstanding since 2026-08-06. Rows carrying it are excluded from the rule_text cross-check; their send semantics rest on rule_text alone, which is authoritative anyway."
     }
   }
 }

@@ -185,10 +185,12 @@ def _send_mode_finding(uc_id, ast, identity, citations):
         return None
 
     expected = resolved["rule_text_equivalent"]
+    # `mixed` became comparable on 2026-08-06: the dictionary's code 5 is literally "Mixed mode",
+    # which is the same thing rule_text calls MIXED. Before that, a MIXED expression could not be
+    # checked at all — a single code could neither agree nor disagree with it.
     actual = {"PARALLEL": "parallel_all", "FALLBACK": "ordered_precedence",
-              "UPSTREAM_SELECTED": "exclusive_choice", "SINGLE": "exclusive_choice"}.get(ast["mode"])
-    # MIXED genuinely combines operators, so a single send_mode code cannot contradict it — a use
-    # case whose expression nests `>` inside `&` is not "wrong" for either code.
+              "UPSTREAM_SELECTED": "exclusive_choice", "SINGLE": "exclusive_choice",
+              "MIXED": "mixed"}.get(ast["mode"])
     if actual is None or actual == expected:
         return None
     return _finding(
@@ -421,24 +423,43 @@ def quality_findings(severity=None, offset=0, limit=50):
     # the per-use-case cross-check skips unknown codes (correctly, it cannot compare what it does
     # not understand), so without this dataset-wide finding an undefined code that covers hundreds
     # of rows would leave no trace anywhere.
-    undefined_modes = {}
+    # Two different situations, kept apart: a code we have RECOGNISED as pending an explanation
+    # (0, on ~903 rows — plainly legitimate, just unread) and a code that is genuinely unexpected.
+    # Calling the first "undefined" overstates it; calling either one nothing understates both.
+    pending_modes, unexpected_modes = {}, {}
     for uc_id_lower, identity in identity_idx.items():
         resolved = uc.resolve_send_mode(identity.get("send_mode_code"))
-        if resolved["code"] is not None and not resolved["known"]:
-            undefined_modes[resolved["code"]] = undefined_modes.get(resolved["code"], 0) + 1
-    if undefined_modes:
-        defined = ", ".join(str(code) for code in sorted(uc.send_mode_enum()))
+        if resolved["code"] is None or resolved["known"]:
+            continue
+        bucket = pending_modes if resolved["pending"] else unexpected_modes
+        bucket[resolved["code"]] = bucket.get(resolved["code"], 0) + 1
+
+    defined = ", ".join(str(code) for code in sorted(uc.send_mode_enum()))
+    if pending_modes:
+        findings.append({
+            "check": "send_mode_pending_meaning", "severity": "info", "use_case_id": None,
+            "message": (
+                "tbl_use_case.send_mode carries code(s) known to be in use but not yet explained: "
+                + ", ".join(f"{code} ({count} row(s))"
+                            for code, count in sorted(pending_modes.items()))
+                + ". This is a KNOWN UNKNOWN, not data-contract drift — the value is legitimate and "
+                  "widely used, the meaning simply has not been supplied. Those rows are excluded "
+                  "from the send_mode/rule_text cross-check, so their send semantics rest on "
+                  "rule_text, which is authoritative anyway. The answer goes in "
+                  "config/business_enums.json (or business_enums.local.json on the box) and needs "
+                  "no code change."),
+            "citations": [], "codes": sorted(pending_modes),
+        })
+    if unexpected_modes:
         findings.append({
             "check": "undefined_send_mode", "severity": "warning", "use_case_id": None,
             "message": (
-                "tbl_use_case.send_mode carries code(s) the data dictionary does not define: "
+                "tbl_use_case.send_mode carries unexpected code(s): "
                 + ", ".join(f"{code} ({count} row(s))"
-                            for code, count in sorted(undefined_modes.items()))
-                + f" — defined codes are {defined}. These rows are excluded from the "
-                  "send_mode/rule_text cross-check, so their send semantics rest on rule_text "
-                  "alone. Ask the owner what the codes mean; the answer goes in "
-                  "config/business_enums.json and needs no code change."),
-            "citations": [], "codes": sorted(undefined_modes),
+                            for code, count in sorted(unexpected_modes.items()))
+                + f" — defined codes are {defined}, and these are not among the values already "
+                  "recognised as pending an explanation. Treat as data-contract drift."),
+            "citations": [], "codes": sorted(unexpected_modes),
         })
 
     base_quality = uc.quality_report()

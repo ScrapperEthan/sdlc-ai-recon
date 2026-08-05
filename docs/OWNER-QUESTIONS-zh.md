@@ -16,10 +16,31 @@
 | 二之补、`>` 右边何时发 | ✅ **已回答并落地**(2026-08-05) | 同上,`stage_transition` ✅ |
 | 三、`source_system` 归并 | ✅ **已回答并落地** | `config/source_system_aliases.json` ✅ |
 | 四、`vendor` 空值的含义 | ✅ 已回答;⚠️ **真机实测只成立 53.7%**,见下 | `retriever/traffic.py` + 逐行复核 |
-| **五、`send_mode` 0 / 4 / 5** | 🔴 **待办**(真机验证暴露) | `config/business_enums.json` |
-| **六、244 行「有流量无厂商」的处理策略** | 🔴 **待办**(需要一个决定) | 引擎默认行为 |
+| 五、`send_mode` 0 / 4 / 5 | ✅ **4/5 已答并落地**(2026-08-06);🔴 **0 仍未知**(903 行,记为「已知的未知」) | `config/business_enums.json` ✅ |
+| 六、244 行「有流量无厂商」的处理策略 | ✅ **已决定**(2026-08-06):**不报成数据质量异常** | 已实现:只报计数 |
+| **七、`send_mode` = 0 是什么意思** | 🔴 **唯一待办** —— 903 行在用 | `config/business_enums.json` 的 `pending_meaning` → `data_dictionary` |
 
-### 🔴 真机验证后新增的两个待办(2026-08-05 晚)
+### ✅ 2026-08-06:上面两条都答了,而且纠正了我一个危险的实现
+
+**① 244 行 → 不报成数据质量异常。** 原因见 [`ROUTER-SELECTION-RULES-zh.md`](ROUTER-SELECTION-RULES-zh.md):
+整族 router 是**刻意跳过**的,而且有些渠道的厂商**根本不由那一列决定**(PUSH 看 app name、
+SMS 看 telecom/delivery mode)。所以"有流量但 vendor 空"是**预期形状**。已改成只报计数、无严重级。
+
+**② `send_mode` 4 = Send by separately,5 = Mixed mode。** 第一份字典节选被截断了,所以它俩
+看起来"没定义"。**5 特别有价值** —— 它就是 `rule_text` 的 MIXED,交叉验证第一次能正面比对
+混合表达式。**0 仍然不知道**(903 行),现在记为「**已知的未知**」报 info,不当漂移报 warning。
+
+**🔴 ③ 最重要:`traffic_percentage = 0` 我原来实现错了。**
+
+> `if message is high-risk, choose dual vendor with HTCL and CSL,`
+> **`primary 100% HTCL & 0% for CSL`**
+
+**0% 是「双厂商的备用方」,不是"关掉了"。** CSL 挂着 0%,正是 HTCL 挂掉时接管的那一家。
+我原来写成"不算活跃渠道" —— 问"HTCL 挂了谁接管",**会把唯一的答案删掉**。已修正。
+
+---
+
+### (历史)真机验证后新增的两个待办(2026-08-05 晚)
 
 内网在真实 UAT 数据上跑完 RUNBOOK-75 后,**又冒出两个只有业主能答的问题**。
 完整数据见 [`RUNBOOK-75-FINDINGS-zh.md`](RUNBOOK-75-FINDINGS-zh.md)。

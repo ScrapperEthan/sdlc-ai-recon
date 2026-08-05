@@ -53,9 +53,30 @@ BUSINESS_CATEGORY_ENUM = {**BUSINESS_CATEGORY_DICTIONARY, **BUSINESS_CATEGORY_CO
 # override it (rule_text is authoritative per the 2026-07-27 owner answer).
 SEND_MODE_ENUM = {
     1: "Send at the same time", 2: "Send by priority", 3: "Send by single channel",
+    # Supplied 2026-08-06 from the full dictionary page. 4 and 5 were the codes the first excerpt
+    # cut off; 0 (903 rows) is still unexplained and deliberately stays out of this map.
+    4: "Send by separately", 5: "Mixed mode",
 }
 SEND_MODE_RULE_TEXT_EQUIVALENT = {
     1: "parallel_all", 2: "ordered_precedence", 3: "exclusive_choice",
+    # 5 "Mixed mode" is the dictionary's own name for what rule_text calls MIXED — an expression
+    # combining operators, e.g. `(SMS > EMAIL) & PUSH`. This is the one code that can now be
+    # checked POSITIVELY against a mixed expression instead of being skipped.
+    5: "mixed",
+    # 4 "Send by separately" has NO rule_text operator. Whatever it denotes, the expression grammar
+    # has no way to say it, so there is nothing to compare — omitted rather than mapped to the
+    # nearest-looking operator, which would manufacture agreement or disagreement out of nothing.
+}
+
+# Codes that appear in the real export but whose meaning nobody has supplied. Distinct from "not in
+# the enum at all": 0 covers 903 rows, i.e. it is plainly a legitimate, widely-used value that we
+# simply cannot read yet. Reporting it as drift would be wrong; reporting it as understood would be
+# worse. It is carried here so the data-quality output can name it as a KNOWN UNKNOWN.
+SEND_MODE_PENDING_MEANING = {
+    0: ("appears on ~903 rows of the real UAT export — a legitimate, widely used value whose "
+        "meaning the data dictionary does not give. Owner question outstanding since 2026-08-06. "
+        "Rows carrying it are excluded from the rule_text cross-check; their send semantics rest "
+        "on rule_text alone, which is authoritative anyway."),
 }
 
 _JUNK_WORK_STREAM = {"invalid", "test", "n/a", "na", "null", "none", "-", "tbd", "xxx", "unknown", ""}
@@ -592,19 +613,51 @@ def send_mode_rule_text_equivalent():
     return out or dict(SEND_MODE_RULE_TEXT_EQUIVALENT)
 
 
+def send_mode_pending():
+    """{code: why it is pending} — codes seen in the data whose meaning is not yet supplied."""
+    section = _enums_config().get("send_mode")
+    section = section if isinstance(section, dict) else {}
+    block = (section or {}).get("pending_meaning")
+    if not isinstance(block, dict):
+        return dict(SEND_MODE_PENDING_MEANING)
+    out = {}
+    for code, note in block.items():
+        text = str(code).strip()
+        if text.startswith("_"):
+            continue
+        try:
+            out[int(text)] = str(note).strip()
+        except ValueError:
+            continue
+    return out
+
+
 def resolve_send_mode(code_raw):
-    """Raw cell -> {code, label, rule_text_equivalent, known}. Absent column yields a clean blank."""
+    """Raw cell -> {code, label, rule_text_equivalent, known, pending, note}.
+
+    `known` and `pending` are NOT opposites. A code can be:
+      * known      — the dictionary gives a meaning (1-5)
+      * pending    — it is all over the real data and nobody has explained it yet (0). A recognised
+                     gap, not drift: saying "undefined" about a value on 903 rows overstates the
+                     problem, and saying nothing understates it.
+      * neither    — genuinely unexpected; report it plainly.
+    """
     text = str(code_raw or "").strip()
+    blank = {"code": None, "raw": "", "label": "", "rule_text_equivalent": "", "known": False,
+             "pending": False, "note": ""}
     if not text:
-        return {"code": None, "raw": "", "label": "", "rule_text_equivalent": "", "known": False}
+        return blank
     try:
         code = int(float(text))
     except ValueError:
-        return {"code": None, "raw": text, "label": "", "rule_text_equivalent": "", "known": False}
+        return dict(blank, raw=text)
     label = send_mode_enum().get(code, "")
+    pending = send_mode_pending()
     return {"code": code, "raw": text, "label": label,
             "rule_text_equivalent": send_mode_rule_text_equivalent().get(code, ""),
-            "known": bool(label)}
+            "known": bool(label),
+            "pending": not label and code in pending,
+            "note": "" if label else pending.get(code, "")}
 
 
 def _identity(path, line_no, row, bound):

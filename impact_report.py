@@ -987,20 +987,28 @@ def render_delivery_chain(payload):
                 bits.append(row["citation"])
             lines.append(" | ".join(bits))
     traffic_summary = payload.get("traffic") or {}
-    if traffic_summary.get("idle_channels"):
-        lines.append("- **configured but not sending** (traffic_percentage 0): "
-                     + ", ".join(traffic_summary["idle_channels"]).upper()
-                     + " — do not count these as live when answering 'which channels are affected'")
+    if traffic_summary.get("standby_channels"):
+        lines.append("- **standby** (traffic_percentage 0 — provisioned, not carrying traffic "
+                     "right now): "
+                     + ", ".join(traffic_summary["standby_channels"]).upper()
+                     + " — during an outage of the primary these are what takes over, so **include "
+                       "them** in a blast radius; exclude them only when the question is literally "
+                       "'what is sending right now'")
+    if traffic_summary.get("channels_with_a_standby_route"):
+        lines.append("- **dual-vendor** (a live route with a 0% second carrier behind it): "
+                     + ", ".join(traffic_summary["channels_with_a_standby_route"]).upper())
 
     # The aggregate the intranet asked for: without it, the live-traffic/no-carrier rows are only
-    # visible by walking every router row, which nobody reading a report does.
+    # visible by walking every router row, which nobody reading a report does. Owner-decided
+    # 2026-08-06: report the split, do NOT raise it as a data-quality exception.
     verification = payload.get("vendor_verification") or {}
     if verification.get("blank_vendor_rows"):
         lines.append(
             f"- blank-vendor rows checked against traffic_percentage: "
-            f"**{verification['fails']} unexplained** (live traffic, no carrier) / "
-            f"{verification['holds']} explained (0% route) / "
-            f"{verification['undecidable']} undecidable")
+            f"{verification['fails']} carrying traffic with no carrier recorded / "
+            f"{verification['holds']} standby (0%) / "
+            f"{verification['undecidable']} undecidable — **not a data-quality exception**; the "
+            "routing rules allow a live route to have no authoritative carrier recorded")
     if payload.get("note"):
         lines.append(f"- note: {payload['note']}")
     lines.extend(f"- caveat: {caveat}" for caveat in payload.get("caveats") or [])

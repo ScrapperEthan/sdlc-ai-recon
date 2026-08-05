@@ -268,6 +268,30 @@ print('send_mode 0 ->', repr(uc.resolve_send_mode('0')['label']))
 
 ---
 
+## G —— LogDream 应用映射:我只需要一个数字
+
+我这边**看不到** `config/logdream_app_map.json`(盒子本地、gitignored),所以我文档里写的
+"只有 1 个 app"可能早就过期了。引擎侧是**纯配置驱动**的 —— 文件在就生效,不在也不报错,
+**不需要我改任何代码**。接受两种文件名(`logdream_app_map.json` / `logdream_apps.json`)和
+三种键名(`repo_to_app` / `repo_to_logdream_app` / `mapping`,或直接一层 `{repo: app}`)。
+
+```bash
+python -c "
+from webapp import incident_plan
+m = incident_plan._app_map()
+print('mapped repos:', len(m))
+print('distinct apps:', len(set(m.values())))
+"
+```
+
+**回报:** 两个数字。**不要贴仓库名或应用名** —— 我只需要知道规模,好把文档里那句过期的话改对。
+
+如果 `mapped repos: 0` 而你们确信已经填了,那就是**文件名或键名没对上** —— 这正是我接受多种
+写法的原因,但如果两种都不匹配就会**静默失效**(知识库里最糟糕的失败模式)。这种情况请把
+文件的**第一层键名**贴回来(不要贴值),我加一种写法。
+
+---
+
 ## 回报模板
 
 ```
@@ -283,6 +307,7 @@ D undefined_send_mode:      [ 原样 ]
 E slots / fully / any:      [ ... ]
 E 可选 再填 10 个后:         [ slots 从 X 到 Y, fully 从 X 到 Y ]
 F local 出口验证:            [ 三行 ×2 ]
+G LogDream mapped / apps:   [ ... / ... ]
 ```
 
 ---

@@ -1154,6 +1154,14 @@ class ServerEndpointHttpTests(unittest.TestCase):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        # Join the serving thread rather than leaving a daemon behind. ThreadingHTTPServer also
+        # spawns a thread per REQUEST, and several tests here flip a module-level config flag with
+        # mock.patch while that server is live -- so a handler still running after its test has
+        # finished reads whatever the NEXT test patched. `test_routes_404_when_flag_off` failed once
+        # in a full-suite run and has not reproduced since, which is the signature of exactly that
+        # kind of overlap. Joining is correct regardless of whether it was the cause; it is not
+        # offered as a diagnosed fix.
+        self.thread.join(timeout=5)
 
     def _post(self, path, payload, headers=None):
         data = json.dumps(payload).encode("utf-8")
@@ -1332,6 +1340,14 @@ class DynamicModelSelectorTests(unittest.TestCase):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        # Join the serving thread rather than leaving a daemon behind. ThreadingHTTPServer also
+        # spawns a thread per REQUEST, and several tests here flip a module-level config flag with
+        # mock.patch while that server is live -- so a handler still running after its test has
+        # finished reads whatever the NEXT test patched. `test_routes_404_when_flag_off` failed once
+        # in a full-suite run and has not reproduced since, which is the signature of exactly that
+        # kind of overlap. Joining is correct regardless of whether it was the cause; it is not
+        # offered as a diagnosed fix.
+        self.thread.join(timeout=5)
         for p in self._patches:
             p.stop()
         self._tmp.cleanup()

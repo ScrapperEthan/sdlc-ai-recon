@@ -6,8 +6,8 @@ import csv
 import os
 import re
 
-from retriever import (config, delivery_chain, flow, glossary, graph, messages, repo_tags,
-                        rule_text, usecase_consistency, usecase_master)
+from retriever import (blast_radius, config, delivery_chain, flow, glossary, graph, messages,
+                       repo_tags, rule_text, usecase_consistency, usecase_master)
 
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
 EDGE_FIELDS = ("producer_repo", "destination", "consumer_repo", "routing_source", "evidence")
@@ -440,6 +440,10 @@ def build_repo_report(repo, tags):
         },
         "upstream": upstream,
         "downstream": downstream,
+        # Additive: `downstream` above is untouched and still holds every repo. This is the summary
+        # that decides HOW to read it — for shared infrastructure the raw count describes the repo,
+        # not the change, and enumerating 376 entries is what makes the answer unusable.
+        "blast_radius": blast_radius.summarise(repo, downstream, tags),
         "async_routes": routes,
         "channel_chain": chain,
         "risk_callouts": risk_callouts(relevant_repos, upstream, downstream, routes),
@@ -1060,7 +1064,20 @@ def render_markdown(report):
     lines.extend(["", "## Upstream (what it depends on)"])
     lines.extend(render_repo_items(report["upstream"]))
     lines.extend(["", "## Downstream (who's affected)"])
-    lines.extend(render_repo_items(report["downstream"]))
+    # The verdict comes FIRST. A reader who sees 376 rows before being told the repo is shared
+    # infrastructure has already drawn the wrong conclusion by the time the caveat arrives.
+    if report.get("blast_radius"):
+        lines.extend(blast_radius.render_markdown(report["blast_radius"]))
+        lines.append("")
+    if (report.get("blast_radius") or {}).get("is_hub"):
+        lines.append("<details><summary>full downstream list "
+                     f"({report['blast_radius']['total']} repos)</summary>")
+        lines.append("")
+        lines.extend(render_repo_items(report["downstream"]))
+        lines.append("")
+        lines.append("</details>")
+    else:
+        lines.extend(render_repo_items(report["downstream"]))
     lines.extend(["", "## Async Routes"])
     lines.extend(render_routes(report["async_routes"]))
     lines.extend(["", "## Channel Chain"])

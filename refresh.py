@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from retriever import config, glossary, usecase_master
+from retriever import channel_evidence, config, glossary, usecase_master
 
 
 def _now():
@@ -194,6 +194,35 @@ def write_glossary_coverage(index_dir):
     return step
 
 
+def write_channel_evidence(index_dir):
+    """`index/reports/CHANNEL_EVIDENCE.{md,json}` — coverage, conflicts and citation freshness.
+
+    Never a failure. The three interesting outcomes are reported distinctly because the remedies
+    differ: no evidence file (the box has not generated it), no scope file (generated, but "no
+    evidence" cannot be told apart from "never scanned"), and stale citations (the mirror moved
+    under a citation that used to resolve).
+    """
+    report = channel_evidence.write_report(index_dir)
+    step = {"cmd": ["channel_evidence.report"], "returncode": 0,
+            "wrote": [os.path.join(index_dir, "reports", "CHANNEL_EVIDENCE.md"),
+                      os.path.join(index_dir, "reports", "CHANNEL_EVIDENCE.json")]}
+    notes = []
+    if not report["evidence"]["readable"]:
+        notes.append(f"no usable evidence at {report['evidence']['path']} (absent or not UTF-8)")
+    if not report["coverage"]["scope_known"]:
+        notes.append("no scan-scope file: 'scanned and clean' cannot be told from 'never scanned'")
+    if report["evidence"].get("dropped_total"):
+        notes.append(f"{report['evidence']['dropped_total']} record(s) rejected on load")
+    if report["verification"].get("stale"):
+        notes.append(f"{report['verification']['stale']} citation(s) no longer resolve — the "
+                     "mirror has moved under them")
+    if report["conflicts"]:
+        notes.append(f"{len(report['conflicts'])} repo(s) where code and name disagree")
+    if notes:
+        step["note"] = "; ".join(notes)
+    return step
+
+
 def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None):
     root = root or os.getcwd()
     mirror = mirror or config.MIRROR
@@ -308,6 +337,10 @@ def refresh(fetch=False, root=None, mirror=None, index_dir=None, recon_dir=None)
     # script can generate, so the only useful thing we can do for it is tell the box which tokens
     # are worth filling. Ranked by how many real repo names each token appears in.
     report["steps"].append(write_glossary_coverage(index_dir))
+
+    # Channel evidence (RUNBOOK-77) — box-local like the glossary, and like it the useful thing we
+    # can do here is report what the file does and does not let us conclude.
+    report["steps"].append(write_channel_evidence(index_dir))
 
     summary_path = os.path.join(index_dir, "reports", "REFRESH-SUMMARY.md")
     try:

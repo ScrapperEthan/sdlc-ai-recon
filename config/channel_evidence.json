@@ -1,0 +1,77 @@
+{
+  "_README": [
+    "CONTRACT for the channel-evidence layer (RUNBOOK-77/78). This file is the knob the",
+    "intranet edits; retriever/channel_evidence.py should not need editing when the box's",
+    "generator changes its field names, adds a channel, or reorders the evidence hierarchy.",
+    "",
+    "Two DIFFERENT files feed this layer, and the difference is load-bearing:",
+    "  evidence_file  — what was FOUND. Per repo: which channels, on what basis, with a citation.",
+    "  scope_file     — what was LOOKED AT. Without it, 'no evidence' is ambiguous: the engine",
+    "                   cannot tell 'scanned and genuinely clean' from 'never scanned', and it",
+    "                   will say so out loud rather than pick the flattering reading.",
+    "",
+    "The reader accepts three evidence shapes so a generator change never needs an engine",
+    "release (see retriever/channel_evidence.py normalise()):",
+    "  v1   {\"<repo>\": {\"channels\": [..], \"basis\": .., \"confidence\": .., \"citation\": ..}}",
+    "  v2   {\"<repo>\": {\"channels\": {\"<channel>\": [{\"basis\":..,\"citation\":..}, ..]}}}",
+    "  list [{\"repo\": .., \"channel\": .., \"basis\": .., \"citation\": ..}, ..]",
+    "",
+    "field_aliases lets the box keep its own column names. Matching ignores case, spaces,",
+    "underscores and hyphens, so 'citation', 'Citation' and 'cite_ref' all resolve if listed.",
+    "Any value outside the enums below is DROPPED with a counted reason, never coerced into",
+    "something plausible — an invented channel is worse than a missing one."
+  ],
+
+  "evidence_file": "index/repo_channel_evidence.json",
+  "scope_file": "index/repo_channel_scan_scope.json",
+
+  "channels": ["sms", "email", "push", "whatsapp", "wechat", "letter"],
+  "basis": ["code", "config", "doc", "owner"],
+  "confidence": ["high", "low"],
+
+  "field_aliases": {
+    "repo": ["repo", "repository", "repo_name"],
+    "channels": ["channels", "channel"],
+    "basis": ["basis", "source_type", "evidence_type"],
+    "confidence": ["confidence", "conf"],
+    "citation": ["citation", "cite", "ref", "reference"],
+    "note": ["note", "comment", "remark"]
+  },
+
+  "scope_aliases": {
+    "scanned": ["scanned", "scanned_repos", "in_scope", "repos"],
+    "unresolved": ["unresolved", "unresolved_repos", "found_but_uncitable"],
+    "generated_at": ["generated_at", "timestamp", "created_at"],
+    "codegraph_manifest": ["codegraph_manifest", "manifest", "snapshot"]
+  },
+
+  "_relation_order_README": [
+    "Strongest evidence first. This is the order answers and UI are ranked by, and it is data",
+    "rather than code so the box can reorder it after seeing real results.",
+    "",
+    "low-confidence direct evidence is DEMOTED to just below message_carried: a weak code hit",
+    "(a channel word in a class name, say) is a worse reason to name a channel than a topic",
+    "that demonstrably carries it. Set demote_low_confidence to false to rank purely by basis.",
+    "",
+    "transitive_dependency is LAST and is never ownership. It answers 'this would be affected',",
+    "not 'this sends on that channel'."
+  ],
+  "relation_order": [
+    "direct_code_evidence",
+    "direct_config_evidence",
+    "business_declared",
+    "name_derived",
+    "message_carried",
+    "transitive_dependency"
+  ],
+  "demote_low_confidence": true,
+
+  "_notes_README": [
+    "The generator's free-text `note` is produced by scanning source, so it can carry code",
+    "fragments, vendor identifiers or endpoints. It is therefore NOT returned by default: the",
+    "citation is the evidence, and the note is commentary. A caller that wants notes must ask",
+    "for them explicitly AND put them through the egress gate that already exists for the",
+    "incident line. Flip this to true only after the box has confirmed what notes contain."
+  ],
+  "include_notes_by_default": false
+}

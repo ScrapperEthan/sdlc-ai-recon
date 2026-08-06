@@ -138,14 +138,36 @@ class CatalogTests(ConsoleTestCase):
         self.assertIn("SDLC_MCP_ENABLED", catalog["calling_note"])
 
     def test_every_operation_carries_a_purpose(self):
-        """A row with no sentence under it is a row nobody can act on. The built-in purposes cover
-        every operation the committed config declares; config may override, never fill a blank."""
+        """A row with no sentence under it is a row nobody can act on.
+
+        Checks the RESOLVED purpose — the config's own `purpose` field, falling back to the built-in
+        `_PURPOSE` — not `_PURPOSE` alone. That distinction is the whole test: `config/mcp_tools.json`
+        is committed but the box edits it in place, so asserting that OUR dictionary covers THEIR
+        working-tree file made a legitimate box edit turn the suite red. The intranet hit exactly
+        that on 2026-08-06 after adding an operation locally, and reported it as an
+        "out of sync with the external purpose registry" — which is not a thing they can fix, and
+        not what the invariant is about.
+
+        The invariant that matters is per-row and holds for both sides: an operation that will be
+        rendered must have a sentence from somewhere. A box adding an operation supplies its own
+        `purpose` in the same edit — the seam every other name, shape and format already goes
+        through — and the failure message says so instead of pointing at this repo.
+        """
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "config", "mcp_tools.json"), encoding="utf-8-sig") as handle:
             shipped = json.load(handle)
-        declared = [name for name in shipped["operations"] if not name.startswith("_")]
-        missing = [name for name in declared if not mcp_registry._PURPOSE.get(name)]
-        self.assertEqual(missing, [], f"operations with no purpose text: {missing}")
+        operations = shipped.get("operations") or {}
+        missing = []
+        for name, spec in operations.items():
+            if name.startswith("_"):
+                continue
+            declared = (spec or {}).get("purpose") if isinstance(spec, dict) else None
+            if not (str(declared or "").strip() or mcp_registry._PURPOSE.get(name)):
+                missing.append(name)
+        self.assertEqual(missing, [], (
+            f"operations that would render with no description: {missing}. Add a `purpose` string "
+            "to the operation in config/mcp_tools.json (box-editable, no push needed), or add it to "
+            "webapp/mcp_registry._PURPOSE if the operation ships from here."))
 
 
 class InvocationGateTests(ConsoleTestCase):

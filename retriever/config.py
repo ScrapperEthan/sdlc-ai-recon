@@ -103,6 +103,13 @@ ALARM_PATTERNS_JSON = _cfg("SDLC_ALARM_PATTERNS", "alarm_patterns.json")
 # overwritten on their next pull. Consumers read it when present and fall back to built-in defaults
 # mirrored from what the intranet reported — see retriever/usecase_router.py.
 USECASE_COLUMNS_JSON = _cfg("SDLC_USECASE_COLUMNS", "usecase_columns.json")
+# The channel-evidence layer (RUNBOOK-77/78). The CONTRACT is a committed config knob so a
+# generator-side rename never needs an engine release; the DATA is box-local and gitignored.
+# Two files, deliberately: the evidence says what was found, the scope says what was looked at,
+# and without the second one "no evidence" cannot be distinguished from "never scanned".
+CHANNEL_EVIDENCE_CONTRACT_JSON = _cfg("SDLC_CHANNEL_EVIDENCE_CONTRACT", "channel_evidence.json")
+CHANNEL_EVIDENCE_JSON = _p("SDLC_CHANNEL_EVIDENCE", "index", "repo_channel_evidence.json")
+CHANNEL_SCAN_SCOPE_JSON = _p("SDLC_CHANNEL_SCAN_SCOPE", "index", "repo_channel_scan_scope.json")
 BUNDLES_JSON = _p("SDLC_BUNDLES", "index", "bundles.json")
 # Per-bundle CodeGraph indexes: staging roots live under CODEGRAPH_ROOT/<bundle>/ and the
 # build manifest records what got indexed (see build_codegraph.py).

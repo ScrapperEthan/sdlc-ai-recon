@@ -6,8 +6,8 @@ import csv
 import os
 import re
 
-from retriever import (blast_radius, config, delivery_chain, flow, glossary, graph, messages,
-                       repo_tags, rule_text, usecase_consistency, usecase_master)
+from retriever import (blast_radius, channel_evidence, config, delivery_chain, flow, glossary,
+                       graph, messages, repo_tags, rule_text, usecase_consistency, usecase_master)
 
 CHANNEL_KEYWORDS = ("sms", "email", "push", "whatsapp", "wechat", "letter")
 EDGE_FIELDS = ("producer_repo", "destination", "consumer_repo", "routing_source", "evidence")
@@ -424,6 +424,7 @@ def build_repo_report(repo, tags):
     routes = route_groups(messages.routes_for_repo(repo), tags)
     route_rows = messages.routes_for_repo(repo)
     chain = channel_chain(tags, {repo}, [route["destination"] for route in routes], route_rows)
+    channel_view = channel_evidence.for_repo(repo, tags=tags)
     relevant_repos = {repo}
     for route in routes:
         relevant_repos.update(route["producers"])
@@ -438,6 +439,12 @@ def build_repo_report(repo, tags):
             "channels": [item["channel"] for item in chain],
             "citations": glossary_citations(repo),
         },
+        # Ownership vs propagation, kept apart on purpose. `direct_channels` is what THIS repo
+        # handles; `affected_channels` is everything that could be hit including what it merely
+        # depends on or is depended on by. Answering both from one list is what made "影响哪些渠道"
+        # read as a claim that the repo sends on all of them.
+        "channel_relations": channel_view,
+        **channel_evidence.split_channels(channel_view),
         "upstream": upstream,
         "downstream": downstream,
         # Additive: `downstream` above is untouched and still holds every repo. This is the summary
@@ -895,6 +902,43 @@ def render_risk_callouts(items):
     return lines
 
 
+_CHANNEL_RELATION_PROSE = {
+    "direct_code_evidence": "its source code does this — cited",
+    "direct_config_evidence": "its configuration does this — cited",
+    "business_declared": "the business sheet declares it",
+    "name_derived": "the repo NAME contains the channel word — nothing else",
+    "message_carried": "a topic it touches carries this channel",
+    "transitive_dependency": "it would be AFFECTED through the dependency graph; it does not send "
+                             "on this channel itself",
+}
+
+
+def render_channel_relations(view):
+    """One block per channel: the conclusion, then why, then the citations.
+
+    Written so the four cases can never collapse into the same sentence. "This repo sends SMS" and
+    "this repo would be affected if SMS broke" are different facts that used to arrive as one word,
+    and a notification list built from the second is a list of teams who did not need telling —
+    while the ones who did are missing.
+    """
+    if not view:
+        return ["- no channel relation of any kind is known for this repo"]
+    lines = []
+    for row in view:
+        kind = "**direct**" if row["direct"] else "indirect"
+        why = _CHANNEL_RELATION_PROSE.get(row["relation"], row["relation"])
+        graded = "" if row["confidence"] in ("structural", "derived") \
+            else f", {row['confidence']} confidence"
+        lines.append(f"- **{row['channel'].upper()}** — {kind} ({why}{graded})")
+        for extra in row["relations"][1:]:
+            also = _CHANNEL_RELATION_PROSE.get(extra["relation"], extra["relation"])
+            lines.append(f"  - also: {also}")
+        for item in row["evidence"]:
+            lines.append(f"  - evidence: `{item['citation']}` ({item['basis']}, "
+                         f"{item['confidence']} confidence)")
+    return lines
+
+
 def render_endpoint_repos(segments):
     """RUNBOOK-45 Part A follow-up #3: the structured `endpoint_repos` (resolved repo + confidence
     from tbl_use_case_ext.endpoint) was computed but never rendered in markdown — only a bare
@@ -1060,6 +1104,10 @@ def render_markdown(report):
     if "validation_findings" in report:
         lines.extend(["", "## Validation Findings"])
         lines.extend(render_validation_findings(report["validation_findings"]))
+
+    if report.get("channel_relations"):
+        lines.extend(["", "## Channels — what this repo handles, and why we think so"])
+        lines.extend(render_channel_relations(report["channel_relations"]))
 
     lines.extend(["", "## Upstream (what it depends on)"])
     lines.extend(render_repo_items(report["upstream"]))

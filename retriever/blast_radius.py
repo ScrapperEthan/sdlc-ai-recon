@@ -24,11 +24,27 @@ as before — this is an additional summary, so a caller that wants the full lis
 change is what the *narrative* leads with.
 
 It also does not invent a channel. A repo whose channel is unknown is counted as unknown and said
-out loud, because repo_tags channel coverage has been measured at ~35% and quietly reporting
-"3 channels affected" out of a set where two thirds have no channel tag would be a confident
-undercount. That is the same failure this codebase keeps closing: silence reading as absence.
+out loud, because quietly reporting "3 channels affected" out of a set where most repos have no
+channel tag would be a confident undercount. That is the same failure this codebase keeps closing:
+silence reading as absence.
+
+## The evidence layer (RUNBOOK-77)
+
+The channel spread used to be name-plus-sheet only, so it was a string match on a repo name wearing
+the authority of a business statement. `retriever/channel_evidence.py` adds scanned source/config
+evidence with a citation, which changes two things here:
+
+* a channel can now be reported with **why** — `direct_code_evidence` reads differently from
+  `name_derived`, and collapsing them back into one list is what made the old answer feel general;
+* the unknown count splits into states with different remedies — *scanned and clean* is a finding,
+  *outside the scan's scope* is not a gap, and *no scope file* means we cannot tell. A single
+  "unknown" number bundles a fact, a non-issue and an ignorance together.
+
+`transitive_dependency` and `message_carried` stay OUT of the spread count. The first is derived
+from the very graph relationship being measured, so counting it lets a repo inherit a channel from
+the edge under test and hand it back as independent evidence. The second is coupling, not ownership.
 """
-from . import criticality, graph, repo_tags
+from . import channel_evidence, criticality, graph, repo_tags
 
 # A repo reaching this share of the estate is telling you about ITSELF (it is shared), not about the
 # change you asked about. Not a magic constant so much as the point where enumerating stops helping:
@@ -41,26 +57,30 @@ SMALL_ENOUGH_TO_LIST = 25
 _UNKNOWN = "unknown"
 
 
-def _channels_of(entry):
-    """The repo's OWN channels: structural tokens plus the business sheet's declaration.
+def _owned_channels(repo, tags, evidence):
+    """The repo's OWN channels, each with the strongest relation that says so.
 
-    `serves_channels` is deliberately excluded — it is itself computed from graph blast radius, so
-    folding it in here would let a repo inherit a channel from the very relationship being measured
-    and report it back as independent evidence.
+    Ownership only: `message_carried` (coupling) and `transitive_dependency` (the graph edge being
+    measured) are filtered out — see the module docstring for why the second would be circular.
+    Returns `{channel: {"relation": ..., "confidence": ...}}`.
     """
-    channels = {c.strip().lower() for c in entry.get("channel") or [] if c.strip()}
-    channels.update(c.strip().lower() for c in entry.get("channel_declared") or [] if c.strip())
-    return channels
+    view = channel_evidence.for_repo(repo, tags=tags, evidence=evidence)
+    return {
+        row["channel"]: {"relation": row["relation"], "confidence": row["confidence"]}
+        for row in view if row["direct"]
+    }
 
 
-def summarise(repo, downstream, tags=None, top_critical=10):
+def summarise(repo, downstream, tags=None, top_critical=10, evidence=None, scope=None):
     """Blast radius for one repo -> a shape verdict plus the three things worth acting on.
 
     `downstream` is the report's existing list of `{repo, relation, ...}` items; nothing is removed
-    from it. Returns a dict that is safe to render even when repo_tags or the criticality inputs are
-    absent (both degrade to "unknown", never to a smaller-looking number).
+    from it. Returns a dict that is safe to render even when repo_tags, the evidence file or the
+    criticality inputs are absent (each degrades to "unknown", never to a smaller-looking number).
     """
     tags = repo_tags.load() if tags is None else tags
+    evidence = channel_evidence.load() if evidence is None else evidence
+    scope = channel_evidence.load_scope() if scope is None else scope
     items = [item for item in downstream or [] if isinstance(item, dict) and item.get("repo")]
     direct = [item["repo"] for item in items if item.get("relation") == "direct"]
     transitive = [item["repo"] for item in items if item.get("relation") != "direct"]
@@ -72,13 +92,38 @@ def summarise(repo, downstream, tags=None, top_critical=10):
 
     by_channel = {}
     unknown_channel = 0
+    # The unknown count is only honest if it says WHICH kind of unknown. "Scanned and clean" is a
+    # finding, "outside the scan scope" is not a defect, and without a scope file the two cannot be
+    # told apart at all — three different sentences, not one number.
+    unknown_kinds = {"scanned_clean": 0, "out_of_scope": 0, "scope_unknown": 0}
     for item in items:
-        channels = _channels_of(repo_tags.for_repo(item["repo"], tags))
+        channels = _owned_channels(item["repo"], tags, evidence)
         if not channels:
             unknown_channel += 1
+            if not scope.get("known"):
+                unknown_kinds["scope_unknown"] += 1
+            elif item["repo"] in scope["scanned"]:
+                unknown_kinds["scanned_clean"] += 1
+            else:
+                unknown_kinds["out_of_scope"] += 1
             continue
-        for channel in channels:
-            by_channel[channel] = by_channel.get(channel, 0) + 1
+        for channel, how in channels.items():
+            bucket = by_channel.setdefault(channel, {"repos": 0, "relations": {}})
+            bucket["repos"] += 1
+            bucket["relations"][how["relation"]] = bucket["relations"].get(how["relation"], 0) + 1
+
+    channels_out = []
+    for name, bucket in by_channel.items():
+        strongest = min(bucket["relations"], key=lambda rel: _RELATION_STRENGTH.get(rel, 99))
+        channels_out.append({
+            "channel": name,
+            "repos": bucket["repos"],
+            "strongest_relation": strongest,
+            "by_relation": dict(sorted(bucket["relations"].items())),
+            "code_backed": bucket["relations"].get("direct_code_evidence", 0)
+            + bucket["relations"].get("direct_config_evidence", 0),
+        })
+    channels_out.sort(key=lambda row: (-row["repos"], row["channel"]))
 
     return {
         "repo": repo,
@@ -89,12 +134,35 @@ def summarise(repo, downstream, tags=None, top_critical=10):
         "estate": estate,
         "share_of_estate": round(share, 4) if share is not None else None,
         "is_hub": is_hub,
-        "channels": [{"channel": name, "repos": count}
-                     for name, count in sorted(by_channel.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "channels": channels_out,
         "channel_unknown_repos": unknown_channel,
+        "channel_unknown_breakdown": unknown_kinds,
+        "evidence_available": bool(evidence.get("readable")),
+        "scope_known": bool(scope.get("known")),
         "notable": _notable(items, top_critical),
-        "reading": _reading(repo, total, len(direct), is_hub, share, unknown_channel),
+        "reading": _reading(repo, total, len(direct), is_hub, share, unknown_channel,
+                            unknown_kinds, bool(scope.get("known"))),
     }
+
+
+# Ordering used only to pick the label for a channel that several repos reach in different ways.
+# The authoritative hierarchy lives in config/channel_evidence.json; this mirrors its default order
+# and is a display concern, so a box that reorders the contract does not silently change counts.
+_RELATION_STRENGTH = {
+    "direct_code_evidence": 0,
+    "direct_config_evidence": 1,
+    "business_declared": 2,
+    "name_derived": 3,
+}
+
+# Prose, because "name_derived" on a page reads as a field name and a reader has to be told that the
+# strongest thing behind a channel is a substring of a repo name.
+_RELATION_LABEL = {
+    "direct_code_evidence": "cited source evidence",
+    "direct_config_evidence": "cited config evidence",
+    "business_declared": "declared by the business sheet",
+    "name_derived": "inferred from the repo name only",
+}
 
 
 def _notable(items, top_critical):
@@ -130,7 +198,8 @@ def _notable(items, top_critical):
     return sorted(out, key=lambda entry: (entry.get("rank") or 10**6, entry["repo"]))
 
 
-def _reading(repo, total, direct_count, is_hub, share, unknown_channel):
+def _reading(repo, total, direct_count, is_hub, share, unknown_channel,
+             unknown_kinds=None, scope_known=False):
     """The sentence that tells a reader what the number is and is not.
 
     Written as prose because the number alone has repeatedly been misread — a big count reads as
@@ -152,9 +221,17 @@ def _reading(repo, total, direct_count, is_hub, share, unknown_channel):
             f"teams to talk to, and the channel spread as what could stop working. Enumerating all "
             f"{total} is what makes this answer unusable.")
     if unknown_channel:
+        kinds = unknown_kinds or {}
         base += (f" Channel coverage caveat: {unknown_channel} of the {total} downstream repos have "
-                 "no channel tag, so the channel spread below is a LOWER bound, not the full "
-                 "picture.")
+                 "no channel of their own, so the spread below is a LOWER bound.")
+        if not scope_known:
+            base += (" No scan-scope file is present, so it cannot be said which of those were "
+                     "checked and found clean and which were never looked at — the lower bound "
+                     "cannot be tightened without it.")
+        else:
+            base += (f" Of those: {kinds.get('scanned_clean', 0)} were scanned and nothing was "
+                     f"found (a real finding), and {kinds.get('out_of_scope', 0)} were outside the "
+                     "scan's scope by design — the second group is NOT evidence of no channel.")
     return base
 
 
@@ -176,12 +253,24 @@ def render_markdown(summary):
                      f"{summary['transitive_count']}")
 
     if summary["channels"]:
-        spread = ", ".join(f"{item['channel'].upper()} ({item['repos']})"
-                           for item in summary["channels"])
-        lines.append(f"- channels represented downstream: {spread}")
+        lines.append("- channels represented downstream (strongest evidence per channel):")
+        for item in summary["channels"]:
+            label = _RELATION_LABEL.get(item.get("strongest_relation"), "related")
+            detail = f"{item['repos']} repo(s), strongest: {label}"
+            if item.get("code_backed"):
+                detail += f"; {item['code_backed']} backed by code/config evidence"
+            lines.append(f"  - **{item['channel'].upper()}** — {detail}")
     if summary["channel_unknown_repos"]:
-        lines.append(f"- no channel tag: {summary['channel_unknown_repos']} repo(s) — the spread "
-                     "above is a lower bound")
+        kinds = summary.get("channel_unknown_breakdown") or {}
+        lines.append(f"- no channel of their own: {summary['channel_unknown_repos']} repo(s) — the "
+                     "spread above is a lower bound")
+        if not summary.get("scope_known"):
+            lines.append("  - scan scope unknown (no scope file): cannot separate *checked and "
+                         "clean* from *never checked*")
+        else:
+            lines.append(f"  - scanned, nothing found: {kinds.get('scanned_clean', 0)}")
+            lines.append(f"  - outside the scan scope by design: {kinds.get('out_of_scope', 0)} "
+                         "— not evidence of no channel")
     if summary["notable"]:
         lines.append("- independently critical repos in the affected set:")
         for entry in summary["notable"]:

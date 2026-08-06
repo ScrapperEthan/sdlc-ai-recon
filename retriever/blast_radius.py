@@ -57,20 +57,6 @@ SMALL_ENOUGH_TO_LIST = 25
 _UNKNOWN = "unknown"
 
 
-def _owned_channels(repo, tags, evidence):
-    """The repo's OWN channels, each with the strongest relation that says so.
-
-    Ownership only: `message_carried` (coupling) and `transitive_dependency` (the graph edge being
-    measured) are filtered out — see the module docstring for why the second would be circular.
-    Returns `{channel: {"relation": ..., "confidence": ...}}`.
-    """
-    view = channel_evidence.for_repo(repo, tags=tags, evidence=evidence)
-    return {
-        row["channel"]: {"relation": row["relation"], "confidence": row["confidence"]}
-        for row in view if row["direct"]
-    }
-
-
 def summarise(repo, downstream, tags=None, top_critical=10, evidence=None, scope=None):
     """Blast radius for one repo -> a shape verdict plus the three things worth acting on.
 
@@ -90,40 +76,15 @@ def summarise(repo, downstream, tags=None, top_critical=10, evidence=None, scope
     share = (total / estate) if estate else None
     is_hub = bool(share is not None and share >= HUB_SHARE and total > SMALL_ENOUGH_TO_LIST)
 
-    by_channel = {}
-    unknown_channel = 0
     # The unknown count is only honest if it says WHICH kind of unknown. "Scanned and clean" is a
     # finding, "outside the scan scope" is not a defect, and without a scope file the two cannot be
-    # told apart at all — three different sentences, not one number.
-    unknown_kinds = {"scanned_clean": 0, "out_of_scope": 0, "scope_unknown": 0}
-    for item in items:
-        channels = _owned_channels(item["repo"], tags, evidence)
-        if not channels:
-            unknown_channel += 1
-            if not scope.get("known"):
-                unknown_kinds["scope_unknown"] += 1
-            elif item["repo"] in scope["scanned"]:
-                unknown_kinds["scanned_clean"] += 1
-            else:
-                unknown_kinds["out_of_scope"] += 1
-            continue
-        for channel, how in channels.items():
-            bucket = by_channel.setdefault(channel, {"repos": 0, "relations": {}})
-            bucket["repos"] += 1
-            bucket["relations"][how["relation"]] = bucket["relations"].get(how["relation"], 0) + 1
-
-    channels_out = []
-    for name, bucket in by_channel.items():
-        strongest = min(bucket["relations"], key=lambda rel: _RELATION_STRENGTH.get(rel, 99))
-        channels_out.append({
-            "channel": name,
-            "repos": bucket["repos"],
-            "strongest_relation": strongest,
-            "by_relation": dict(sorted(bucket["relations"].items())),
-            "code_backed": bucket["relations"].get("direct_code_evidence", 0)
-            + bucket["relations"].get("direct_config_evidence", 0),
-        })
-    channels_out.sort(key=lambda row: (-row["repos"], row["channel"]))
+    # told apart at all — three different sentences, not one number. Computed by channel_evidence so
+    # the inline view and this summary can never disagree about the same set of repos.
+    spread = channel_evidence.aggregate([item["repo"] for item in items], tags=tags,
+                                        evidence=evidence, scope=scope)
+    channels_out = spread["channels"]
+    unknown_channel = spread["unknown_repos"]
+    unknown_kinds = spread["unknown_breakdown"]
 
     return {
         "repo": repo,
@@ -144,16 +105,6 @@ def summarise(repo, downstream, tags=None, top_critical=10, evidence=None, scope
                             unknown_kinds, bool(scope.get("known"))),
     }
 
-
-# Ordering used only to pick the label for a channel that several repos reach in different ways.
-# The authoritative hierarchy lives in config/channel_evidence.json; this mirrors its default order
-# and is a display concern, so a box that reorders the contract does not silently change counts.
-_RELATION_STRENGTH = {
-    "direct_code_evidence": 0,
-    "direct_config_evidence": 1,
-    "business_declared": 2,
-    "name_derived": 3,
-}
 
 # Prose, because "name_derived" on a page reads as a field name and a reader has to be told that the
 # strongest thing behind a channel is a substring of a repo name.

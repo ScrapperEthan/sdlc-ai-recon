@@ -349,6 +349,37 @@ the proof second:
 
 Keep the top Answer tight; push detail and every citation under `## Evidence`.
 
+## Channels — never say "affects SMS" without saying which KIND of affects
+
+A repo relates to a channel in five different ways, and they are NOT
+interchangeable. The tools return them separately (`direct_channels` vs
+`affected_channels`, and a `relation` per channel). **Do not merge them back into
+one list** — that is precisely what made this answer useless before.
+
+| relation | what it means | how to word it |
+| --- | --- | --- |
+| `direct_code_evidence` | its source does this, with a cited line | "**发送** SMS（代码证据 `repo/path:line`）" |
+| `direct_config_evidence` | its config does this, cited | "配置里配置了 SMS（`repo/path:line`）" |
+| `business_declared` | the MDC sheet ticked it | "业务表声明它用于 SMS" |
+| `name_derived` | the repo NAME contains the word — nothing else | "**仅从仓库名推断**是 SMS 相关" |
+| `message_carried` | a topic it touches carries the channel | "通过消息 topic 与 SMS 相连" |
+| `transitive_dependency` | it would be AFFECTED through the graph | "SMS **会被连累**；它自己不发 SMS" |
+
+Rules, in order of how badly breaking them misleads someone:
+
+1. **Never describe `transitive_dependency` as ownership.** "会受影响" and "它发这个"
+   are different facts, and a notification list built from the wrong one names the
+   wrong teams.
+2. **Never present `name_derived` as evidence.** Say it is inferred from the name.
+   It is a substring match; dressing it as a finding is how a guess acquires
+   authority.
+3. **Quote the caveat with its breakdown.** When a channel count is a lower bound,
+   say which kind of unknown the rest are: *scanned and nothing found* is a
+   finding, *outside the scan scope* is not, and *no scope file* means it cannot be
+   told. Never report "outside the scan scope" as "no channel".
+4. **A channel with several reasons is ONE channel.** Lead with the strongest,
+   list the rest as supporting — do not emit the same channel several times.
+
 ## Diagrams — mermaid only, never ASCII art
 
 When the question asks for a call chain / flowchart / 流程图, draw it as a fenced

@@ -1318,6 +1318,65 @@
   .inline-impact .ii-row b { color:#152033; margin-right:2px; }
   .inline-impact .ii-repos .ichip { background:#e7f0ff; color:#0057d9; }
   .ichip { display:inline-block; padding:2px 9px; border-radius:999px; background:#eef3f9; color:#41506a; font-weight:600; word-break:break-all; }
+
+  /* Channel tiers (RUNBOOK-77/78).
+     The visual job here is one thing: make "its source code does this, here is the line" LOOK
+     different from "the repo name contains the word". They used to render as the same chip, which
+     is how a substring match ended up wearing the authority of a business fact.
+     Every tier carries TEXT as well as colour — a badge that is only a colour is not a label, and
+     the difference being encoded here is the difference between notifying a team and not. */
+  .inline-channels { padding:10px 12px; border-top:1px solid #eef3f9; font-size:12.5px; color:#41506a; }
+  .ch-summary { margin-bottom:8px; line-height:1.7; }
+  .ch-summary b { color:#152033; }
+  .ch-summary .ch-sep { color:#b6c2d4; margin:0 4px; }
+  .ch-none { color:#8b98ad; font-style:italic; }
+
+  .ch-card { border:1px solid var(--line,#d9e1ee); border-radius:10px; padding:8px 10px; margin:6px 0; background:#fff; }
+  /* Dashed, because an indirect relation is a different KIND of statement, not a weaker one of the
+     same kind: this repo would be affected, it does not send on the channel. */
+  .ch-card-indirect { background:#fbfcfe; border-style:dashed; }
+  .ch-head { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .ch-name { font-weight:700; color:#152033; letter-spacing:.02em; }
+  .ch-kind { font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
+  .ch-direct { background:var(--success-soft,#e7f7f3); color:var(--success,#0f766e); }
+  .ch-indirect { background:#eef3f9; color:#5b6b85; }
+  .ch-why { margin-top:4px; color:#5b6b85; }
+  .ch-also { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+
+  .ev-badge { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; border:1px solid transparent; white-space:nowrap; }
+  .ev-code     { background:#e7f7f3; color:#0f766e; border-color:#b9e6dc; }
+  .ev-config   { background:#e8f2ff; color:#1d4ed8; border-color:#bfd2f8; }
+  .ev-declared { background:#eef0ff; color:#4338ca; border-color:#c9cdfa; }
+  /* Outline only. The weakest reason must not look like a stamped fact. */
+  .ev-name     { background:#fff; color:#78859b; border-color:#d9e1ee; border-style:dashed; }
+  .ev-msg      { background:#f4f0ff; color:#6b46c1; border-color:#ddd0f7; }
+  .ev-trans    { background:#f3f5f9; color:#67758d; border-color:#dbe2ec; border-style:dashed; }
+  .ev-low      { background:#fff7ed; color:#b45309; border-color:#fed7aa; }
+
+  .ev-drawer { margin-top:7px; }
+  .ev-drawer > summary { cursor:pointer; color:#5b6b85; font-size:12px; user-select:none; }
+  .ev-drawer > summary:hover { color:var(--accent-strong,#1d4ed8); }
+  .ev-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:5px 0 0 4px; }
+  .ev-row-meta { color:#8b98ad; font-size:11.5px; }
+  /* The bubble's citation pill styling is scoped to .bubble; these live in the view container, so
+     they need their own copy or a citation here would render as plain text and look unclickable. */
+  .inline-channels code.cite { display:inline-block; max-width:100%; background:var(--accent-soft,#eaf1ff); color:var(--accent-strong,#1d4ed8); border:1px solid #bfd2f8; border-radius:6px; padding:1px 6px; font-size:11.5px; cursor:pointer; word-break:break-all; }
+  .inline-channels code.cite::before { content:"\1F4CE"; margin-right:4px; opacity:.75; }
+  .inline-channels code.cite:hover { background:#dce8ff; }
+
+  .ch-tail { margin:6px 0; }
+  .ch-tail > summary { cursor:pointer; color:#5b6b85; user-select:none; }
+  .ch-tail > summary:hover { color:var(--accent-strong,#1d4ed8); }
+
+  .ch-spread { margin-top:9px; border-top:1px dashed #e3e9f2; padding-top:8px; }
+  .ch-spread-cap { color:#8b98ad; font-size:11.5px; margin-bottom:4px; }
+  .ch-spread-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0; }
+
+  .ch-cov { margin-top:8px; color:#67758d; line-height:1.6; }
+  .ch-cov b { color:#152033; }
+  /* Amber, not red: "we could not tell" is not an error, and styling it as one trains people to
+     dismiss it. It still has to be impossible to skim past. */
+  .ch-warn { margin-top:8px; padding:6px 9px; border-radius:8px; background:var(--warning-soft,#fff7ed); border:1px solid #fed7aa; color:#8a4c07; line-height:1.6; }
   .feedback-bar { display:flex; align-items:center; gap:8px; margin-top:8px; }
   .fb-btn { min-height:28px; padding:2px 10px; border:1px solid var(--line,#d9e1ee); border-radius:999px; background:#fff; cursor:pointer; font-size:14px; line-height:1.2; opacity:.72; transition:opacity .15s ease, border-color .15s ease, background .15s ease; }
   .fb-btn:hover { opacity:1; border-color:#9bb7ea; }

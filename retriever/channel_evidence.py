@@ -550,6 +550,67 @@ def split_channels(view):
             "affected_channels": sorted({row["channel"] for row in view})}
 
 
+# Display ordering for a channel that several repos reach in different ways: which relation gets to
+# label the channel. Ownership relations only — `message_carried` and `transitive_dependency` never
+# label a channel because neither means the repo handles it.
+RELATION_STRENGTH = {
+    "direct_code_evidence": 0,
+    "direct_config_evidence": 1,
+    "business_declared": 2,
+    "name_derived": 3,
+}
+
+
+def aggregate(repos, tags=None, evidence=None, scope=None, contract_path=None):
+    """Channel spread across a SET of repos, plus which kind of unknown the rest are.
+
+    One implementation, used by both the blast-radius summary and the inline view, because two
+    copies of "how many repos own SMS" would drift and only one of them would be the one on screen.
+
+    Ownership only. `transitive_dependency` is excluded because it is derived from the very graph
+    relationship being measured — counting it lets a repo inherit a channel from the edge under test
+    and hand it back as independent evidence. `message_carried` is excluded because it is coupling.
+    """
+    tags = repo_tags.load() if tags is None else tags
+    evidence = load(contract_path=contract_path) if evidence is None else evidence
+    scope = load_scope(contract_path=contract_path) if scope is None else scope
+
+    by_channel = {}
+    unknown = 0
+    kinds = {"scanned_clean": 0, "out_of_scope": 0, "scope_unknown": 0}
+    for repo in repos:
+        owned = {row["channel"]: row for row
+                 in for_repo(repo, tags=tags, evidence=evidence, contract_path=contract_path)
+                 if row["direct"]}
+        if not owned:
+            unknown += 1
+            if not scope.get("known"):
+                kinds["scope_unknown"] += 1
+            elif repo in scope["scanned"]:
+                kinds["scanned_clean"] += 1
+            else:
+                kinds["out_of_scope"] += 1
+            continue
+        for channel, row in owned.items():
+            bucket = by_channel.setdefault(channel, {"repos": 0, "relations": {}})
+            bucket["repos"] += 1
+            bucket["relations"][row["relation"]] = bucket["relations"].get(row["relation"], 0) + 1
+
+    channels = []
+    for name, bucket in by_channel.items():
+        strongest = min(bucket["relations"], key=lambda rel: RELATION_STRENGTH.get(rel, 99))
+        channels.append({
+            "channel": name,
+            "repos": bucket["repos"],
+            "strongest_relation": strongest,
+            "by_relation": dict(sorted(bucket["relations"].items())),
+            "code_backed": bucket["relations"].get("direct_code_evidence", 0)
+            + bucket["relations"].get("direct_config_evidence", 0),
+        })
+    channels.sort(key=lambda row: (-row["repos"], row["channel"]))
+    return {"channels": channels, "unknown_repos": unknown, "unknown_breakdown": kinds}
+
+
 def coverage(tags=None, evidence=None, scope=None, contract_path=None):
     """Estate-wide accounting of what is known, in the states that have different remedies.
 

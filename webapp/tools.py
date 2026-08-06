@@ -40,6 +40,41 @@ def _schema(name, desc, props, required=()):
         "parameters": {"type": "object", "properties": props, "required": list(required)}}}
 
 
+def _channel_block(repo, downstream):
+    """The tiered channel payload the inline view renders: conclusion, why, and the citations.
+
+    Two separate questions, kept separate on the wire because collapsing them is what made the old
+    answer read as a claim: `own` is what THIS repo handles (with the evidence that says so), and
+    `downstream` is the spread across the repos that depend on it — affected, not owners.
+
+    Best-effort throughout: a missing evidence file, an absent repo_tags or an unreadable scope file
+    each degrade to "we cannot say", never to a smaller-looking number. Returns {} only when nothing
+    at all could be computed, which the frontend renders as absence rather than as "no channels".
+    """
+    try:
+        from retriever import channel_evidence
+        tags = repo_tags.load()
+        evidence = channel_evidence.load()
+        scope = channel_evidence.load_scope()
+        own = channel_evidence.for_repo(repo, tags=tags, evidence=evidence)
+        spread = channel_evidence.aggregate(downstream or (), tags=tags, evidence=evidence,
+                                            scope=scope)
+    except Exception:  # noqa: BLE001 — the diagram and the counts must survive this being absent
+        return {}
+    return {
+        "own": own,
+        **channel_evidence.split_channels(own),
+        "downstream": spread,
+        # Provenance travels with the numbers. "There is evidence" and "the evidence covers this
+        # repo" are different claims, and a UI that cannot tell them apart will imply the stronger.
+        "evidence_available": bool(evidence.get("readable")),
+        "evidence_records": evidence.get("records_loaded", 0),
+        "scope_known": bool(scope.get("known")),
+        "scanned_count": scope.get("scanned_count", 0),
+        "unresolved_uncitable": scope.get("unresolved_count", 0),
+    }
+
+
 def _impact_view(repo):
     """Dependency blast-radius as an INLINE view dict (used by `show_impact` and `impact(inline=1)`).
     Downstream = repos that DEPEND ON this one and break if it changes (graph.impact's
@@ -76,6 +111,10 @@ def _impact_view(repo):
                              "by_relation": {"dependency-downstream": len(downstream),
                                              "dependency-upstream": len(upstream)},
                              "sample": sorted(downstream)[:6]}},
+        # Rides the existing inline-view channel rather than opening a second one: the frontend
+        # already receives this dict, and "which channels does this affect" is the question the
+        # dependency picture is usually being asked in service of.
+        "channels": _channel_block(repo, downstream),
     }
 
 

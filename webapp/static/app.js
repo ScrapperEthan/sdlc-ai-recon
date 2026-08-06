@@ -1553,6 +1553,134 @@ function inlineImpactHtml(impact) {
   return '<div class="inline-impact">' + rows.join('') + '</div>';
 }
 
+// ---------------------------------------------------------------------------------------------
+// Channel tiers (RUNBOOK-77/78). The point of this block is that four different facts used to
+// arrive as the same word. "This repo sends SMS" and "this repo would be affected if SMS broke"
+// are not the same claim, and a notification list built from the second is a list of teams who did
+// not need telling — while the ones who did are missing. So every channel here states WHY, and the
+// weakest reason (a channel word in the repo NAME) is styled as the weakest thing on the card
+// rather than looking identical to a cited line of source.
+const CH_RELATION = {
+  direct_code_evidence:  {badge: '代码证据', cls: 'ev-code',    why: '它的源码在做这件事'},
+  direct_config_evidence:{badge: '配置证据', cls: 'ev-config',  why: '它的配置在做这件事'},
+  business_declared:     {badge: '业务声明', cls: 'ev-declared',why: '业务表里声明的'},
+  name_derived:          {badge: '名称推断', cls: 'ev-name',    why: '仅凭仓库名里有这个词 —— 没有别的依据'},
+  message_carried:       {badge: '消息链路', cls: 'ev-msg',     why: '它接触的 topic 携带这个渠道'},
+  transitive_dependency: {badge: '依赖传播', cls: 'ev-trans',   why: '它会被连累 —— 它自己不发这个渠道'}
+};
+
+function chBadge(relation, confidence) {
+  const meta = CH_RELATION[relation] || {badge: relation, cls: 'ev-name'};
+  let html = '<span class="ev-badge ' + meta.cls + '">' + escapeHtml(meta.badge) + '</span>';
+  // Low confidence gets its OWN badge rather than a lighter shade of the same one: colour alone is
+  // not a label, and "code evidence" at low confidence must not read as "code evidence".
+  if (confidence === 'low') html += '<span class="ev-badge ev-low">低置信</span>';
+  return html;
+}
+
+function chEvidenceRows(row) {
+  if (!row.evidence || !row.evidence.length) return '';
+  const rows = row.evidence.map((item) => (
+    '<div class="ev-row">' +
+      '<code class="cite">' + escapeHtml(item.citation || '') + '</code>' +
+      '<span class="ev-row-meta">' + escapeHtml(item.basis || '') + ' · ' +
+        escapeHtml(item.confidence || '') + '</span>' +
+    '</div>'
+  )).join('');
+  // <details> rather than always-open: the default answer stays short, and the audit trail is one
+  // click away instead of burying the conclusion under citations.
+  return '<details class="ev-drawer"><summary>证据 ' + row.evidence.length + ' 条（点引用看源码）</summary>' +
+         rows + '</details>';
+}
+
+function chCard(row) {
+  const meta = CH_RELATION[row.relation] || {why: row.relation};
+  const kind = row.direct
+    ? '<span class="ch-kind ch-direct">直接</span>'
+    : '<span class="ch-kind ch-indirect">间接</span>';
+  const also = (row.relations || []).slice(1)
+    .map((extra) => chBadge(extra.relation, extra.confidence)).join('');
+  return '<div class="ch-card' + (row.direct ? '' : ' ch-card-indirect') + '">' +
+    '<div class="ch-head">' +
+      '<span class="ch-name">' + escapeHtml((row.channel || '').toUpperCase()) + '</span>' +
+      kind + chBadge(row.relation, row.confidence) +
+    '</div>' +
+    '<div class="ch-why">' + escapeHtml(meta.why || '') + '</div>' +
+    (also ? '<div class="ch-also">也有：' + also + '</div>' : '') +
+    chEvidenceRows(row) +
+  '</div>';
+}
+
+function chCoverage(block) {
+  const down = block.downstream || {};
+  const kinds = down.unknown_breakdown || {};
+  const bits = [];
+  if (block.evidence_available === false) {
+    bits.push('<div class="ch-warn">没有可用的证据文件 —— 下面只有名称/业务表/依赖图这三层，' +
+              '代码层是空的（不是"没有证据"，是没查过）。</div>');
+  }
+  if (!block.scope_known) {
+    // The unflattering reading, on purpose: the output is a notification list somebody acts on.
+    bits.push('<div class="ch-warn">没有扫描范围文件 —— 无法区分「查过了确实干净」和「压根没查」，' +
+              '所以下面的未知数不能收紧。</div>');
+  }
+  if (down.unknown_repos) {
+    let line = '下游 ' + down.unknown_repos + ' 个仓库没有自己的渠道 —— 上面的渠道分布是<b>下界</b>';
+    if (block.scope_known) {
+      line += '（其中查过没发现 ' + (kinds.scanned_clean || 0) + ' 个；' +
+              '本轮范围外 ' + (kinds.out_of_scope || 0) + ' 个 —— <b>范围外不等于没有渠道</b>）';
+    }
+    bits.push('<div class="ch-cov">' + line + '</div>');
+  }
+  if (block.unresolved_uncitable) {
+    bits.push('<div class="ch-cov">另有 ' + block.unresolved_uncitable +
+              ' 个仓库查到了线索但存不下引用 —— 既不是干净也不是未知。</div>');
+  }
+  return bits.join('');
+}
+
+function inlineChannelsHtml(block) {
+  if (!block || (!block.own && !block.downstream)) return '';
+  const own = block.own || [];
+  const direct = own.filter((row) => row.direct);
+  const indirect = own.filter((row) => !row.direct);
+  const parts = [];
+
+  parts.push('<div class="ch-summary">' +
+    '<b>它自己处理：</b>' + (direct.length
+      ? direct.map((r) => escapeHtml(r.channel.toUpperCase())).join('、')
+      : '<span class="ch-none">无（或未知）</span>') +
+    ' <span class="ch-sep">·</span> <b>可能受影响：</b>' + (own.length
+      ? own.map((r) => escapeHtml(r.channel.toUpperCase())).join('、')
+      : '<span class="ch-none">未知</span>') +
+  '</div>');
+
+  if (direct.length) parts.push(direct.map(chCard).join(''));
+  // The long tail collapses. A shared library reaches most channels indirectly, and rendering ten
+  // identical "would be affected" cards buries the two that are actually its own.
+  if (indirect.length) {
+    parts.push('<details class="ch-tail"><summary>间接受影响的渠道 ' + indirect.length +
+               ' 个（它自己不发这些）</summary>' + indirect.map(chCard).join('') + '</details>');
+  }
+
+  const spread = (block.downstream || {}).channels || [];
+  if (spread.length) {
+    const rows = spread.map((item) => {
+      const meta = CH_RELATION[item.strongest_relation] || {badge: item.strongest_relation};
+      const backed = item.code_backed ? '，其中 ' + item.code_backed + ' 个有代码/配置证据' : '';
+      return '<div class="ch-spread-row"><span class="ch-name">' +
+        escapeHtml(item.channel.toUpperCase()) + '</span> ' + item.repos + ' 个仓库' +
+        escapeHtml(backed) + ' <span class="ev-badge ' + (meta.cls || 'ev-name') + '">最强：' +
+        escapeHtml(meta.badge || '') + '</span></div>';
+    }).join('');
+    parts.push('<div class="ch-spread"><div class="ch-spread-cap">下游仓库的渠道分布</div>' +
+               rows + '</div>');
+  }
+
+  parts.push(chCoverage(block));
+  return '<div class="inline-channels">' + parts.join('') + '</div>';
+}
+
 function renderInlineView(container, view) {
   if (!container || !view || !view.url) return;
   if (container.querySelector('.inline-view[data-url="' + view.url + '"]')) return;  // no dupes
@@ -1570,6 +1698,7 @@ function renderInlineView(container, view) {
   wrap.appendChild(cap);
   wrap.appendChild(frame);
   if (view.impact) wrap.insertAdjacentHTML('beforeend', inlineImpactHtml(view.impact));
+  if (view.channels) wrap.insertAdjacentHTML('beforeend', inlineChannelsHtml(view.channels));
   container.appendChild(wrap);
   if (typeof log !== 'undefined' && log) log.scrollTop = log.scrollHeight;
 }

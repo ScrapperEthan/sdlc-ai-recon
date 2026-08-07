@@ -8,8 +8,20 @@ from . import config
 # csv/gradle/txt matter here specifically: the retrieval tools cite their own evidence files
 # (message_edges.csv, the use-case snapshot csv, build.gradle, repos.txt). Without these
 # extensions the citation was extracted as bare text and silently skipped verification.
+#
+# js/jsx/ts/tsx/groovy were added 2026-08-07 off a real measurement: the intranet's channel-evidence
+# run produced 5 citations this could not check (3 `.js`, 2 `.groovy`), and an extension missing here
+# does NOT fail — it yields no match at all, so the reference is skipped and the report says
+# "0 citations" instead of "1 unverified". Under-inclusion is therefore the dangerous direction: an
+# answer citing a Groovy build script or a portal JS file was passing the citation guard by never
+# entering it. Over-inclusion only costs a false "not found in mirror", which is visible and loud.
+# The trailing `(?!\w)` is load-bearing, not tidiness. Alternation is ordered and has no implicit
+# boundary, so `jsx?` sitting before `json` would match `package.js` out of `package.json` and hand
+# back a path that does not exist — a REAL citation turned into a failed one by adding an unrelated
+# extension. The lookahead makes the list order-independent.
 _CITE = re.compile(
-    r"([\w./\-]+?\.(?:java|xml|ya?ml|properties|kts?|gradle|json|sql|csv|txt|md))(?::(\d+)(?:-\d+)?)?",
+    r"([\w./\-]+?\.(?:java|xml|ya?ml|properties|kts?|gradle|groovy|jsx?|tsx?|json|sql|csv|txt|md))"
+    r"(?!\w)(?::(\d+)(?:-\d+)?)?",
     re.IGNORECASE,
 )
 

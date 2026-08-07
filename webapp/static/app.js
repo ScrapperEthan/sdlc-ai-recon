@@ -1627,14 +1627,19 @@ function chCoverage(block) {
   if (down.unknown_repos) {
     let line = '下游 ' + down.unknown_repos + ' 个仓库没有自己的渠道 —— 上面的渠道分布是<b>下界</b>';
     if (block.scope_known) {
-      line += '（其中查过没发现 ' + (kinds.scanned_clean || 0) + ' 个；' +
-              '本轮范围外 ' + (kinds.out_of_scope || 0) + ' 个 —— <b>范围外不等于没有渠道</b>）';
+      // "查过没发现" and "范围外" are both CONDITIONAL counts (no other layer either), so they are
+      // worded as subsets. The intranet caught the earlier wording quoting the conditional number
+      // as if it were the population — an undercount of what was never looked at, phrased as a
+      // report of it.
+      line += '（其中<b>查过没发现</b> ' + (kinds.scanned_clean || 0) + ' 个；' +
+              '<b>在本轮扫描范围外、且没有其他线索</b> ' + (kinds.out_of_scope || 0) +
+              ' 个 —— <b>范围外不等于没有渠道</b>）';
     }
     bits.push('<div class="ch-cov">' + line + '</div>');
   }
-  if (block.unresolved_uncitable) {
-    bits.push('<div class="ch-cov">另有 ' + block.unresolved_uncitable +
-              ' 个仓库查到了线索但存不下引用 —— 既不是干净也不是未知。</div>');
+  if (block.scanned_without_evidence) {
+    bits.push('<div class="ch-cov">全库另有 ' + block.scanned_without_evidence +
+              ' 个仓库<b>扫过、读了源码和配置、没找到渠道标记</b> —— 这是一个结论,不是未知。</div>');
   }
   return bits.join('');
 }

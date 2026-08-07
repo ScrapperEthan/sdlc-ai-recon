@@ -390,9 +390,17 @@ def load_scope(path=None, contract_path=None):
     scanned = {str(name).strip() for name in _as_list(_pick(raw, aliases, "scanned"))
                if str(name).strip()}
 
-    # `unresolved` = looked at, something matched, no citation could be produced (the intranet
-    # reported 55). Accepts a bare list of names or a list of {repo, reason} objects, because the
-    # reason is worth having and its absence must not reject the list.
+    # `unresolved` = in scope, eligible files were read, no evidence record came out.
+    #
+    # I had this WRONG and the intranet's 2026-08-07 run corrected it. RUNBOOK-77 reported "通过代码
+    # 但无法保存引用: 55", which I read as "matched something but could not cite it" and wrote into
+    # RUNBOOK-78 and the UI as such. Their reason string says otherwise, uniformly across all 55:
+    # `no_supported_channel_marker_in_eligible_source_or_config` — the files were eligible and
+    # nothing channel-shaped was in them. That is *scanned and clean*, which is a FINDING, not a
+    # third mystery state. So nothing here interprets the reason any more: it is carried verbatim
+    # and grouped, and the caller reports the generator's own words.
+    #
+    # Same shape as every earlier round: I assigned a meaning to their field instead of asking.
     unresolved = {}
     for item in _as_list(_pick(raw, aliases, "unresolved")):
         if isinstance(item, dict):
@@ -403,6 +411,11 @@ def load_scope(path=None, contract_path=None):
         if name:
             unresolved[name] = reason
 
+    reasons = {}
+    for reason in unresolved.values():
+        key = reason or "(no reason given)"
+        reasons[key] = reasons.get(key, 0) + 1
+
     return {
         "path": target,
         "known": bool(scanned),
@@ -410,6 +423,9 @@ def load_scope(path=None, contract_path=None):
         "scanned_count": len(scanned),
         "unresolved": unresolved,
         "unresolved_count": len(unresolved),
+        # Their words, grouped. One uniform reason across all of them is itself information — it
+        # says the set is one phenomenon rather than a bag of unrelated failures.
+        "unresolved_reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
         "generated_at": str(_pick(raw, aliases, "generated_at") or ""),
         "codegraph_manifest": str(_pick(raw, aliases, "codegraph_manifest") or ""),
     }
@@ -619,12 +635,19 @@ def coverage(tags=None, evidence=None, scope=None, contract_path=None):
       has_direct              some layer says this repo itself handles a channel
       relation_only           only propagation/message evidence — affected, ownership unknown
       unknown_scanned         looked at, nothing found: a real finding
-      unknown_unscanned       out of the scan's scope by design: NOT a finding, and not a defect
+      unknown_unscanned       out of scope AND nothing else explains it
       unknown_scope_unknown   no scope file, so 1 and 3 cannot be told apart
 
-    `unresolved_uncitable` is reported separately again: those repos were looked at and something
-    matched, but no citation could be produced. Folding them into "unknown" would report a sighting
-    as a blank.
+    Every bucket is CONDITIONAL on the repo having no other layer, so none of them is a population
+    count. `scanned_total` and `out_of_scope_total` are the populations, and both are returned
+    because the intranet caught the bucket being quoted as though it were the population: 48
+    out-of-scope-with-nothing-else read as "48 repos were out of scope" when 83 were. A number that
+    understates what was not looked at, while sounding like it reports it, is the same failure this
+    module exists to refuse — just pointed at our own arithmetic.
+
+    `scanned_without_evidence` is in-scope repos that produced no record, with the generator's own
+    reason. It OVERLAPS `unknown_scanned` (which additionally requires no name/sheet/propagation
+    layer), so the two must never be added together.
     """
     tags = repo_tags.load() if tags is None else tags
     evidence = load(contract_path=contract_path) if evidence is None else evidence
@@ -653,11 +676,23 @@ def coverage(tags=None, evidence=None, scope=None, contract_path=None):
         else:
             buckets["unknown_unscanned"] += 1
 
+    # The buckets above are DISJOINT and conditional: `unknown_unscanned` means "out of scope AND
+    # nothing else explains it". The intranet caught me reporting that number as if it were the
+    # out-of-scope population — 48 where the real figure is 83 — which understates how much was not
+    # looked at while sounding like it states it. Both are reported now, and the bucket keeps its
+    # narrower meaning rather than being widened to paper over the wording.
+    scanned_total = sum(1 for repo in (tags or {}) if repo in scope.get("scanned", ()))
+    out_of_scope_total = (len(tags or {}) - scanned_total) if scope.get("known") else 0
+
     return {
         "repos_measured": len(tags or {}),
         "scope_known": bool(scope.get("known")),
         "scanned_count": scope.get("scanned_count", 0),
-        "unresolved_uncitable": scope.get("unresolved_count", 0),
+        "scanned_total": scanned_total,
+        "out_of_scope_total": out_of_scope_total,
+        # Not "uncitable" — see load_scope(). In scope, files read, no channel marker found.
+        "scanned_without_evidence": scope.get("unresolved_count", 0),
+        "scanned_without_evidence_reasons": scope.get("unresolved_reasons") or {},
         "evidence_readable": bool(evidence.get("readable")),
         "evidence_records": evidence.get("records_loaded", 0),
         "evidence_repos": evidence.get("repos", 0),
@@ -737,11 +772,24 @@ def render_markdown(report):
         f"(of which **{cov['repos_explained_by_evidence_alone']}** are explained by this new "
         "evidence alone)",
         f"- affected only through propagation, ownership unknown: **{cov['relation_only']}**",
-        f"- scanned, nothing found: **{cov['unknown_scanned']}**",
-        f"- outside the scan scope by design: **{cov['unknown_unscanned']}** — this is not a gap "
-        "in the data and must never be read as 'no channel'",
+        "",
+        "Populations (what was and was not looked at) — NOT the same as the buckets below, which "
+        "each additionally require that nothing else explains the repo:",
+        "",
+        f"- in the scan scope: **{cov['scanned_total']}** · outside it by design: "
+        f"**{cov['out_of_scope_total']}**",
+        f"- in scope but producing no evidence record: **{cov['scanned_without_evidence']}**"
+        + (" — " + "; ".join(f"`{reason}`: {count}" for reason, count
+                             in cov["scanned_without_evidence_reasons"].items())
+           if cov.get("scanned_without_evidence_reasons") else ""),
+        "",
+        "Buckets (repos with NO channel from any layer):",
+        "",
+        f"- scanned, nothing found: **{cov['unknown_scanned']}** — a real finding",
+        f"- outside the scan scope AND nothing else explains it: **{cov['unknown_unscanned']}** — a "
+        f"subset of the {cov['out_of_scope_total']} out of scope, not the whole of it, and never to "
+        "be read as 'no channel'",
         f"- indistinguishable for want of a scope file: **{cov['unknown_scope_unknown']}**",
-        f"- looked at, matched, could not be cited: **{cov['unresolved_uncitable']}**",
     ]
 
     if report["conflicts"]:

@@ -187,6 +187,43 @@ class ScopeTests(unittest.TestCase):
         # A missing reason must not reject the entry: the name alone is still information.
         self.assertEqual(scope["unresolved"]["repo-a"], "")
 
+    def test_reasons_are_carried_verbatim_and_grouped_never_interpreted(self):
+        """The generator's reason string is theirs. I read RUNBOOK-77's "55 通过代码但无法保存引用"
+        as "matched but uncitable" and shipped that meaning into a runbook and the UI; their reason
+        string says the files were eligible and no channel marker was found, i.e. CLEAN. So the
+        reason is grouped and quoted, never mapped onto a state of my choosing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "scope.json", {
+                "scanned": ["a", "b", "c"],
+                "unresolved": [{"repo": "a", "reason": "no_marker"},
+                               {"repo": "b", "reason": "no_marker"},
+                               {"repo": "c", "reason": "binary"}],
+            })
+            scope = channel_evidence.load_scope(path=path, contract_path="does-not-exist.json")
+        self.assertEqual(scope["unresolved_reasons"], {"no_marker": 2, "binary": 1})
+
+    def test_out_of_scope_population_is_reported_separately_from_the_bucket(self):
+        """`unknown_unscanned` additionally requires that nothing else explains the repo, so it is a
+        SUBSET of what was not scanned. The intranet caught that subset being quoted as the
+        population (48 vs a real 83) — a number that understates what was never looked at while
+        sounding like it reports it."""
+        tags = {
+            "scanned-and-tagged": {"channel": ["sms"], "channel_declared": [],
+                                   "serves_channels": [], "msg_channels": []},
+            "unscanned-but-named": {"channel": ["email"], "channel_declared": [],
+                                    "serves_channels": [], "msg_channels": []},
+            "unscanned-and-dark": {"channel": [], "channel_declared": [],
+                                   "serves_channels": [], "msg_channels": []},
+        }
+        scope = {"known": True, "scanned": {"scanned-and-tagged"}, "scanned_count": 1,
+                 "unresolved": {}, "unresolved_count": 0, "unresolved_reasons": {}}
+        empty = {"readable": True, "records": {}, "repos": 0, "records_loaded": 0, "dropped": {},
+                 "shape": "v1"}
+        out = channel_evidence.coverage(tags=tags, evidence=empty, scope=scope)
+        self.assertEqual(out["out_of_scope_total"], 2)   # two repos were never scanned
+        self.assertEqual(out["unknown_unscanned"], 1)    # only one of them is otherwise unexplained
+        self.assertEqual(out["scanned_total"], 1)
+
 
 class CoverageTests(unittest.TestCase):
     """The three unknowns. Collapsing them is the failure this layer exists to prevent."""
@@ -311,6 +348,31 @@ class ConflictTests(unittest.TestCase):
         })
         self.assertEqual(channel_evidence.conflicts(tags=tags, evidence=evidence,
                                                     contract_path="does-not-exist.json"), [])
+
+
+class CitationExtensionTests(unittest.TestCase):
+    """Extensions the intranet's real run cited and the verifier could not check.
+
+    A missing extension does NOT fail loudly — it yields no match, so the reference never enters
+    the guard and the report says "0 citations" rather than "1 unverified". Under-inclusion is
+    therefore the dangerous direction, and it was silently exempting Groovy build scripts and
+    portal JS from the citation check entirely.
+    """
+
+    def test_groovy_and_js_are_extracted(self):
+        from retriever import citations
+        for ref in ("repo-a/build.groovy:12", "repo-a/static/app.js:7",
+                    "repo-a/src/main.ts:3", "repo-a/src/App.tsx:1"):
+            self.assertEqual([item[0] for item in citations.extract(ref)], [ref], ref)
+
+    def test_json_still_wins_over_the_js_prefix(self):
+        """Alternation is ordered and unanchored, so `jsx?` placed before `json` would capture
+        `package.js` out of `package.json` — turning a real citation into a missing file. The
+        trailing lookahead is what prevents it."""
+        from retriever import citations
+        found = citations.extract("repo-a/package.json:4")
+        self.assertEqual([item[0] for item in found], ["repo-a/package.json:4"])
+        self.assertEqual(found[0][1], "repo-a/package.json")
 
 
 class VerificationTests(unittest.TestCase):

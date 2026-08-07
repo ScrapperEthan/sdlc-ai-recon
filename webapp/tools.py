@@ -71,7 +71,9 @@ def _channel_block(repo, downstream):
         "evidence_records": evidence.get("records_loaded", 0),
         "scope_known": bool(scope.get("known")),
         "scanned_count": scope.get("scanned_count", 0),
-        "unresolved_uncitable": scope.get("unresolved_count", 0),
+        # In scope, files read, no channel marker found — i.e. CLEAN. Not "found but uncitable",
+        # which is what this said until the intranet's 2026-08-07 reason string corrected it.
+        "scanned_without_evidence": scope.get("unresolved_count", 0),
     }
 
 

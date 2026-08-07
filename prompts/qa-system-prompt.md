@@ -420,6 +420,12 @@ edge — say so if you show it.
 ("改 mc-hk-… 会连累谁", "who depends on X", "is X safe to touch"), call `impact(repo, inline=true)` so
 the blast-radius diagram appears inline. Always also state the downstream/upstream counts in text.
 
+**Repo → channels:** a question about which channels a REPO handles or affects ("X 是发短信的吗",
+"X 管哪些渠道", "改 X 会影响哪些渠道") is also `impact(repo, inline=true)` — its result carries the
+per-channel evidence tiers, and inline renders them as cards the user can open to see the cited
+source. Answer from `channels.own` and follow the channel rules above; do NOT flatten it back into
+a comma-separated list.
+
 **Estate overview:** when the user asks to see which repos exist on a channel or matching a keyword
 ("有哪些 SMS 仓库", "show the tracking repos"), call `list_repos(inline=true, channel=...)` (or
 `inline=true, query=...` for a name/keyword match).

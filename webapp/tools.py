@@ -539,7 +539,15 @@ def dispatch(name, a):
     if name == "impact":
         if a.get("inline"):
             return _impact_view(a["repo"])
-        return graph.impact(a["repo"], a.get("transitive", False))
+        # The channel tiers ride the non-inline result too. Otherwise the model can only SEE them
+        # when it happens to have asked for the diagram, and "which channels does this touch" would
+        # go back to a flat list on exactly the turns where nobody clicked anything — the evidence
+        # would be loaded, rendered nowhere, and absent from the sentence the user actually reads.
+        result = graph.impact(a["repo"], a.get("transitive", False))
+        channels = _channel_block(a["repo"], result.get("depended_on_by") or [])
+        if channels:
+            result = dict(result, channels=channels)
+        return result
     if name == "hubs":
         return graph.hubs(a.get("top", 20))
     if name == "consumers":

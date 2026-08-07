@@ -229,13 +229,24 @@ class ImpactInlineTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["view"], "impact")
 
-    def test_without_inline_returns_plain_graph_impact_result(self):
+    def test_without_inline_does_not_become_the_inline_view(self):
+        """The defect this guards is `impact` without `inline` returning the VIEW shape — a
+        `{ok, view, url, summary}` dict instead of the dependency lists the caller asked for.
+
+        It used to assert exact equality with graph.impact's return, which also froze out additive
+        keys. The channel tiers are now attached here on purpose: without them the model can only
+        see the evidence on turns where it happened to ask for a diagram, so "which channels does
+        this touch" would fall back to a flat list precisely when nobody clicked anything. The
+        dependency payload is still asserted byte-for-byte, and the view keys are still banned.
+        """
         dep = {"depended_on_by": ["a"], "depends_on": []}
         with mock.patch.object(tools.graph, "impact", return_value=dep) as fn:
             result = tools.dispatch("impact", {"repo": "core"})
         fn.assert_called_once_with("core", False)
-        self.assertEqual(result, dep)
-        self.assertNotIn("view", result)
+        self.assertEqual(result["depended_on_by"], dep["depended_on_by"])
+        self.assertEqual(result["depends_on"], dep["depends_on"])
+        for view_key in ("view", "url", "summary", "ok"):
+            self.assertNotIn(view_key, result)
 
 
 class ListReposInlineTests(unittest.TestCase):

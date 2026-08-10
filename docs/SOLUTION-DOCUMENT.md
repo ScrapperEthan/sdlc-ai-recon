@@ -324,21 +324,64 @@ All three services have been **live-verified with zero deviation in tool names**
 
 ## 7. Technology stack
 
-### 7.1 Selection overview
+### 7.1 In one line
 
-| Layer | Technology | Rationale |
+**Frontend: plain HTML / CSS / JavaScript. No framework, no build step.**
+**Backend: Python 3, standard library only. No third-party dependencies at all.**
+
+Nothing in this system needs to be installed — and nothing can be. That is not a convenience
+choice; it is what allows the assistant to run inside an air-gapped environment (see §7.5).
+
+### 7.2 Selection overview
+
+| Layer | What is used | Rationale |
 |---|---|---|
+| **Frontend** | Plain HTML / CSS / JavaScript; no framework, no build step, no npm | Deployment is a directory copy; the browser makes no external request |
 | **Backend** | Python 3, **standard library only, zero third-party dependencies** | Runs directly in an air-gapped environment: no pip, no dependency approval, no supply-chain exposure |
-| **Frontend** | Plain HTML / CSS / JS single page; no framework, no build step | As above. Deployment is a directory copy |
-| **Model** | Internal on-premises model, OpenAI-compatible interface | `webapp/llm.py` is the **single** model egress point (facade pattern) with three pluggable providers beneath it → **the model can be swapped with no change elsewhere** |
-| **Retrieval layer** | Pre-built index artifacts (dependency graph, message graph, repository tags, delivery topology) as JSON + CSV | Built offline, queried read-only. Build once, query many times |
-| **Call chains** | CodeGraph, indexed as per-domain bundles | A single graph cannot hold 460 repositories → the estate must be partitioned, paired with narrow-first retrieval |
+| **Model integration** | Internal on-premises model over an OpenAI-compatible HTTP interface | `webapp/llm.py` is the **single** model egress point (facade pattern) with three pluggable providers beneath it → **the model can be swapped with no change elsewhere** |
+| **Retrieval layer** | Pre-built index artifacts (dependency graph, message graph, repository tags, delivery topology) persisted as **JSON + CSV files** | Built offline, queried read-only. Build once, query many times; **we operate no database of our own** |
+| **Call chains** | CodeGraph (external CLI, indexed as per-domain bundles) | A single graph cannot hold 460 repositories → the estate must be partitioned, paired with narrow-first retrieval. When the CLI is absent from PATH the tool **degrades honestly** rather than fabricating results |
 | **Business data** | Exported configuration snapshot + direct read-only UAT database access | The snapshot guarantees offline availability; the direct connection guarantees currency |
 | **Runtime layer** | In-house MCP client (two transports, three gates) | Integrates the three colleague-owned MCP services |
-| **Database access** | **Named-query** mechanism | ⭐ **The model never writes SQL.** It may only select a predefined query name and pass bound parameters; the SQL text, table names and column allow-list live in configuration |
+| **Database access** | **Named-query** mechanism; **the driver does not live on our side** | ⭐ See §7.4 |
 | **Ownership seam** | Eight JSON configuration files under `config/` | ⭐ The intranet team adjusts behaviour by editing configuration — **without waiting for a code push** (see §9) |
 
-### 7.2 Quality assurance
+### 7.3 Frontend in detail
+
+| Item | Implementation |
+|---|---|
+| Page | Single-page application in three files: `index.html` (268 lines), `app.js` (2,162 lines), `app.css` (1,457 lines) |
+| Framework | **None.** No React / Vue / jQuery, no bundler, no npm, no build step |
+| Server communication | The browser's native `fetch()` |
+| **Streaming output** | `fetch()` + `ReadableStream.getReader()` reading the response body **incrementally** — the answer renders as it is generated, and tool-call progress appears in the UI in real time |
+| Only third-party front-end asset | **`mermaid.min.js`, vendored locally — never from a CDN** (renders the architecture diagrams the assistant emits) |
+| Behaviour without it | **Graceful degradation**: if the file is absent, diagram blocks render as their plain source text. No error, no code change required |
+
+> **Key point: the browser issues no external network request.** All static assets are served locally
+> by the backend.
+
+### 7.4 Backend in detail
+
+| Item | Implementation |
+|---|---|
+| HTTP service | Standard-library `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler`; routing is hand-written in `do_GET` / `do_POST` |
+| Concurrency | Thread per request (standard library) |
+| Outbound HTTP | Standard-library `urllib.request` (model calls, MCP calls, retrieval-service proxying) |
+| Persistence | **JSON / CSV files.** Sessions, feedback and index artifacts are all files on disk — **we run no database of our own** |
+| External processes | `subprocess` invocation of the `codegraph` CLI |
+| **Database driver** | ⭐ **There is no database driver in our code.** `webapp/db_readonly.py` imports the **intranet's own runner module** from a path supplied by an environment variable and calls only the two functions specified in their handoff — so a driver such as `psycopg` is **never imported by our core**, which remains standard-library only |
+| **The model never writes SQL** | The model may only select a predefined **query name** and pass bound parameters. SQL text, schema, table names and the **column allow-list** all live in configuration; **a PII column that is not on the allow-list can never leave** |
+
+### 7.5 Why zero dependencies — a deliberate decision worth stating
+
+| Benefit | Detail |
+|---|---|
+| **Runs air-gapped** | No pip, no internal package mirror, no dependency approval process |
+| **No supply-chain exposure** | No third-party packages means no third-party vulnerabilities to track, patch or clear through security scanning |
+| **Negligible deployment cost** | Deployment is a directory copy plus one Python command. Team access means setting host and port on one internal machine; colleagues open a browser and **install nothing** |
+| **Upgrades do not break** | No version conflicts, no failed `npm install`, no stale build artifacts |
+
+### 7.6 Quality assurance
 
 | | |
 |---|---|

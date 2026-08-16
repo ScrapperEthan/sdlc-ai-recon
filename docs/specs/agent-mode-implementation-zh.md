@@ -101,7 +101,7 @@ python -c "import json;ls=[json.loads(l) for l in open('evals/cases.jsonl',encod
 | **A5** | `plan` 上下文车道 | 🟡 | `webapp/config.py`, `webapp/context_budget.py` |
 | **A6** | ask 模式回归基线 | 🟡 | `evals/run.py`, `evals/cases.jsonl` |
 | **B1** | Plan 数据结构与校验 | 🟢 | `webapp/agent_plan.py` |
-| **B2** | 状态台账（facts/gaps/预算） | 🟢 | `webapp/agent_state.py` |
+| **B2** | 状态台账 **+ 三个状态原语**（只追加 / 检查点 / 可中断） | 🟢 | `webapp/agent_state.py`, `webapp/agent_checkpoint.py` |
 | **B3** | 角色→模型绑定（sol/terra） | 🟢+🟡 | `webapp/model_roles.py`（新）+ `config.py` 加一个读取函数 |
 | **B4** | 规划器 | 🟢 | `webapp/agent_planner.py`, `prompts/agent-planner-prompt.md` |
 | **B5** | 调度 + 执行 + 合成 | 🟢+🟡 | `webapp/agent_loop.py`（新）, `prompts/agent-synthesis-prompt.md`, agent.py 分岔 |
@@ -253,15 +253,84 @@ roles{planner,executor,validator,synthesizer}, stop_on
 - `apply_patch(plan, patch) -> plan`：只支持 `replace_task` / `add_task` / `drop_task` /
   `add_open_question`。**不提供「整份替换」的入口** —— 没有这个函数，就没人能走那条路。
 
-### B2 🟢 `webapp/agent_state.py` —— 台账
+### B2 🟢 状态台账 + 三个状态原语
 
-- `facts` / `gaps` / `assumptions` / `budget` / `task_status`，结构见设计文档 §5.3。
+**这一项是 LangGraph 那三样功能的自建版**（为什么不直接装框架，见 §11）。
+三样加起来约 200 行，都是我们自己的代码、能被现有测试框架覆盖、不引入任何依赖。
+
+#### B2.0 台账本体 —— `webapp/agent_state.py`
+
+- `facts` / `gaps` / `assumptions` / `evidence` / `task_events` / `notices` /
+  `budget` / `task_status`，结构见设计文档 §5.3。
 - `add_evidence(...)` 强制带 `tier` 和 `environment`，**两者都必须来自工具结果里已有的字段**，
   不接受调用方现编。取不到 → 记 gap，不许给默认值。
 - `gaps` 和 `facts` 平级；`summary_for_context()` 输出进上下文的摘要版。
 - `budget`：`tool_calls` / `production_calls` / `seconds` 三个计数器，
   **`production_calls` 独立**（`incident_investigate` 每次 sweep + `db_query` 各计一次；
   `dataset_query` 读本地 CSV，**不计入生产**）。
+
+#### B2.1 只追加的通道 + 显式 reducer（≈50 行）
+
+**问题**：一次 agent 调查里，后面的任务会看到前面任务的结论。
+**不做的后果**：后面的任务可以**悄悄改写**前面记下的东西 —— 最典型的就是把一条
+「我们不知道」升级成一条「事实」。这正是这个项目反复栽的那个形状（0% 被读成"关掉了"、
+55 被读成"存不下引用"），只不过换成发生在一次调查内部，而且**没有任何痕迹**。
+**做完的效果**：台账只能追加，改写这条路在 API 层面就不存在。
+
+- 上面那些通道**全部只追加**。`budget` 和 `task_status` 是仅有的两个可变项，
+  而且只能通过类型化的方法改（`spend(kind, n)` / `set_status(task_id, status)`）。
+- 每个通道一个显式 reducer：`facts`/`gaps` 用 `append_unique(key_fn)` 去重
+  （key = claim + 证据指针），事件类用纯 `append`。
+- **没有 update，没有 delete，没有 setter。** 要修正一条已有的结论，只能用
+  `supersede(entry_id, by=<新条目>, why="...")` —— 它**追加**一条新条目并指向旧的，
+  **两条都留着**。出处因此永远追得回去。
+- 单测必须锁住：`state` 对象上不存在任何能改写已有条目的公开方法（用 `dir()` 断言）。
+
+#### B2.2 每个任务结束后打一次检查点（≈80 行）—— `webapp/agent_checkpoint.py`
+
+**问题**：agent 模式一轮最长 180 秒。中间刷新页面、掉线、进程重启，全没了。
+**不做的后果**：用户白等 2 分钟，而且**生产日志的 sweep 白打了**（那是同事的服务器）。
+更麻烦的是出问题以后没法复盘 —— 只能看最终答案，看不到「第三个任务拿到什么才拐的弯」。
+**做完的效果**：刷新能续、崩了能查；每一轮的执行过程都是可回放的。
+
+- `checkpoint(turn_id, plan, state)`：**复用 `webapp/atomic_json.py`**
+  （它本来就是为了 Windows 上 `os.replace` 偶发失败写的，正好是这里要的东西）。
+- 位置 `webapp_data/agent_turns/`（`webapp_data/` 已在 .gitignore 里）；
+  **按 owner(uid) 隔离**，和原始日志侧存同一套规矩 —— 别的浏览器读不到。
+- TTL + 条数上限，照抄现有的 `INCIDENT_RAW_MAX_ENTRIES` / `INCIDENT_RAW_TTL_HOURS` 那对旋钮。
+- 🔴 **检查点里绝不允许出现原始工具返回包**，只存台账摘要 + 证据指针。
+  否则检查点文件就变成了生产日志在磁盘上的一份副本 —— 那正是出口脱敏闸门存在的理由。
+  单测要专门验这一条：把一个带 PII 的假 packet 灌进去，断言落盘文件里搜不到它。
+- ⚠️ **这一处是全项目唯一 fail-OPEN 的地方，要写注释说明为什么**：
+  检查点写失败**绝不能弄死正在跑的这一轮** —— 发一条 `notice` 然后继续。
+  别处一律 fail-closed，是因为「算不准就别发请求」；这里反过来，是因为
+  「丢掉续跑能力」不是安全问题，而「把一次已经打过生产的调查搞崩」是实实在在的损失。
+
+#### B2.3 `paused` / resume（≈60 行）
+
+**问题**：「缺时区就停下来问用户」这件事今天是**一次性**的 —— 问完，这一轮就结束了，
+用户回答之后是**从头再规划一遍**。
+**不做的后果**：前面已经查到的东西全部重来，包括已经打出去的生产查询。
+**做完的效果**：问完接着跑，不重来。
+
+- 轮次状态：`running` → `done` | `paused` | `failed`。
+- `paused` 带 `open_questions[]`，每条写明**是哪个字段导致的**、**缺的是哪一半**
+  （「这个 03:15 是 HKT 还是 UTC」而不是笼统的「信息不足」）。
+- **resume 契约**：同一个会话里，如果上一轮是 `paused`，用户的下一条消息按
+  「对未决问题的回答」路由到 `agent_loop.resume(turn_id, user_reply)`，
+  从检查点继续，**不重新规划**。
+- 🔴 **预算必须跨越 resume 累计**：`production_calls` 和 `tool_calls`
+  **接着上一段的数继续算**，不能重置 —— 否则「停一下再问」就成了绕过生产预算上限的后门。
+  `max_seconds` 可以为新的一段重新计时（人思考的时间不算在里面），这一点要在代码里写清楚。
+- 过期的 `paused` 轮次（超过 TTL）→ resume 明确拒绝并说明，改为重新规划。
+- **两个存储，不同寿命，别混**：`session_store` 存的是给人看和回放的**摘要**；
+  `agent_checkpoint` 存的是能**续跑**的执行状态。这正是设计文档 §3.1 第 7 条
+  「执行状态和聊天记忆分开」落到代码上的样子。
+
+**这三样的接线点**（各一行，别漏）：
+B5 的调度循环在每个 task 结束后调 `checkpoint()`；D2 遇到 BLOCKING 类拒绝时把轮次置为
+`paused` 而不是直接结束；E1 的面板要能渲染 `paused` 状态并给出「回答后继续」的入口；
+A2 的 `session_store` 只存摘要，**不要把检查点也塞进去**。
 
 ### B3 角色→模型绑定（`sol` / `terra`）
 
@@ -313,7 +382,10 @@ roles{planner,executor,validator,synthesizer}, stop_on
 `webapp/agent_loop.py`（新）+ `prompts/agent-synthesis-prompt.md`（新）+ `agent.py` 一个分岔。
 
 - **调度器纯代码**：算 ready 集合、查依赖、查三个预算、查停止条件。模型不参与
-  「T1 做完没有」这类判断。
+  「T1 做完没有」这类判断。**每个 task 结束后调一次 `checkpoint()`**（B2.2）。
+- **`resume(turn_id, user_reply)`** 与 `answer_events` 并列的第二个入口：从检查点接着跑，
+  不重新规划；预算按 B2.3 的规矩累计。`server.py` 侧：同一会话上一轮是 `paused` 时，
+  下一条消息路由到这里而不是新开一轮。
 - **执行器复用现有循环**：把 `agent.answer_events` 里那段「模型 ↔ 工具」的循环抽成
   `run_executor(objective, allowed_tools, budget, emit_kind) -> ToolResult[]`，
   agent 模式按 task 调用它，ask 模式原样调用它。**抽取要做到 ask 路径行为不变**
@@ -417,7 +489,8 @@ roles{planner,executor,validator,synthesizer}, stop_on
 把设计文档 §5.5 那张表实现成一个**纯数据的映射**（`config` 里可调），
 输入是工具返回包，输出是 patch。要点：
 
-- **BLOCKING 类的窗口拒绝 → 不重试**，转成 `add_open_question`（问用户）。
+- **BLOCKING 类的窗口拒绝 → 不重试**，转成 `add_open_question`（问用户），
+  并把这一轮置为 `paused`（B2.3）——**不是结束这一轮**，前面查到的东西要留着。
 - 补丁只有四种操作；**没有「重画」这个入口**。
 - 连续两次 replan 没有产生新证据 → 停，并在答案里说「换了两个方向仍无新证据」。
 
@@ -429,6 +502,10 @@ roles{planner,executor,validator,synthesizer}, stop_on
 
 任务树（状态 / 证据数 / gap 数 / 耗时 / 用了哪个模型）+ 顶部「已查 N 秒 / 预算 X-Y-Z」计时条。
 复用现有 subagent 面板的样式和折叠交互。**必须支持刷新回放**（数据来自 A2 落库的 `plan`）。
+
+**`paused` 状态要单独渲染**（B2.3）：把未决问题原样显示出来 —— 哪个字段导致的、缺的是哪一半 ——
+并明确告诉用户「回答后从这里继续，前面查到的不会重来」。这是这一版里用户最能直接感觉到的改进，
+不要把它藏在一句普通的追问里。
 
 ### E2 🟡 评测 + RUNBOOK-81
 
@@ -460,6 +537,10 @@ roles{planner,executor,validator,synthesizer}, stop_on
 - [ ] 没碰 `webapp/llm.py`（facade merge 规则）
 - [ ] 没碰 `incident_investigator` 的出口脱敏闸门、`db_readonly` 的 `caller_policy` 闸门
 - [ ] 预算是 fail-closed 的：算不出预算就不发请求，而不是「先发了再说」
+- [ ] 台账没有任何改写/删除的公开方法（要修正只能 `supersede`，两条都留着）
+- [ ] 检查点文件里没有原始工具返回包（灌一个带 PII 的假 packet，断言落盘文件搜不到）
+- [ ] resume 之后生产预算是**累计**的，不是重置的
+- [ ] 没有引入任何第三方依赖（见 §11）
 - [ ] 新代码能在 `LLM_MOCK=1` 下离线跑通测试
 
 ---
@@ -486,3 +567,67 @@ roles{planner,executor,validator,synthesizer}, stop_on
 2. spec / RUNBOOK 文档，以及每一轮验证抓到的缺陷。
 
 代码本身回不回流可以再说，但**契约一旦只存在于盒子里，外网这边的每一份建议都会开始漂**。
+
+---
+
+## 11. 为什么不引入 LangChain / LangGraph（结论已定，别再重开）
+
+> 这一节是给**下一个接手的人**看的。「手动管状态很麻烦，装个框架吧」是个很自然的念头，
+> 2026-08-16 认真评估过一次，结论是**不装**。理由在下面，**除非其中某一条不再成立，否则不要重开这个议题**。
+
+### 11.1 先把「状态很麻烦」拆开
+
+现在被一个词裹在一起的其实是四样东西：
+
+| 在管的东西 | 框架能不能替我们管 |
+| --- | --- |
+| 聊天记录、会话标题、按浏览器隔离、原始日志侧存 | **不能**。这是产品 UX，框架不碰 |
+| 上下文预算分车道 + **按结构**裁剪工具返回包 | **框架不如我们现在的**（见 11.2） |
+| 执行状态（哪个任务完成、证据台账） | 能 ✅ |
+| 跑一半崩了/刷新了怎么续 | 能 ✅ |
+
+**只有两样是框架的强项，而这两样就是 B2 那 200 行。**
+
+### 11.2 我们已经领先框架的一处
+
+LangChain 的历史裁剪是**按消息**裁的（丢整条、或者切文本），它**不理解工具返回包的 JSON 结构**。
+我们的 `context_budget.fit_tool_result` 是**按结构**裁的 —— 当初正是因为按字节切，
+模型拿到半截 JSON 却认不出那是半截的。**这块迁过去是降级，不是升级。**
+
+### 11.3 LangGraph 真正会给我们的三样（不贬低它）
+
+断点续跑、中断问人、带 reducer 的只追加状态通道。这三样是真的有价值 ——
+**所以我们把它们自己实现了，就是 B2.1 / B2.2 / B2.3**，而且零件已经有一半：
+`atomic_json.py` 就是现成的检查点落盘，「BLOCKING 拒绝 → 问用户」就是现成的中断语义。
+
+补一句技术判断：LangGraph 最擅长**编译期定死的图**；我们的任务图是规划器**每次现生的数据**，
+这种动态图在它那里要走 Send API，反而别扭 —— **调度器无论如何都得自己写**。
+
+### 11.4 在这个环境里的代价（决定性的五条）
+
+1. **依赖树 vs 断网银行。** LangChain+LangGraph 会拖进一棵传递依赖（pydantic v2、httpx、
+   tenacity、jsonpatch 之类）。审一个包是个项目，审一棵树并跟住它的版本变动是一份长期税。
+   钉死一个升不动的旧版本，比标准库更糟。（`BACKLOG.md` 守则：优先标准库，pip 可能被封。）
+2. **provider 层白写，还得再包一层。** Copilot direct / Copilot responses / OpenAI chat、
+   token 与 tunnel 双模、凭据存储、按用户路由、auth 错误归一化、streaming 降级 ——
+   LangChain 的 ChatModel 抽象接不住这套凭据模型，结局是**留着现有层 + 再加一个适配器**。
+3. **1355 个测试。** 里面编码的是五轮真机验证抓到的缺陷（`hk1`→`hkl`、响应形状、
+   `alert_time` 格式、alarm name 泄漏）。**这是这个仓库最值钱的东西**，重写编排会作废一大片。
+4. **控制流就是我们的安全模型。**「缺时区 → 零次调用」「`caller_policy` 是引擎硬闸门」
+   「出口按值整包指纹化」—— 这些保证今天靠**读一个函数**就能证明。
+   搬进别人的运行时之后，「没有任何代码路径能绕过这道闸门到达生产」这句话就难证明了。
+   在银行里，这句话能不能证明，值很多钱。
+5. **LangSmith 用不了。** 很多人上 LangGraph 是冲着它的可观测性 —— 那是托管服务，不能出网。
+   这部分收益直接归零。
+
+### 11.5 什么情况下才重开这个议题
+
+四条**全部**满足才值得再谈；目前**一条都不满足**：
+
+- 要做真正的多 agent 编排（复杂 fan-out/join、跨长流程）—— 我们明确不做，
+  现有唯一的子代理是按「原始日志不能进主上下文」拆的，理由是数据边界不是工具数量；
+- 环境不再断网，且依赖审批变便宜；
+- 是绿地项目，还没有 provider 层和这批测试；
+- 团队规模大到需要一套通用词汇来降低上手成本。
+
+**一句话：我们缺的从来不是编排框架，是 B2 那 200 行状态原语。**

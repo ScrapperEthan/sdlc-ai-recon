@@ -22,13 +22,21 @@
 
 ## 0. 一句话
 
-内网的诊断对了三分之二：**三态被压成布尔**、**空结论算通过**这两条成立。
-漏掉的第三条才是"结论：无"的直接原因 —— **证据拿不到出身标签，于是全部落成 gap**，
-而这一条是 [`agent-mode-implementation-zh.md`](agent-mode-implementation-zh.md) §B2.0 那条规矩写错的，
-责任在这边。
+> 🔴 **2026-08-17 修订（RUNBOOK-83 回报之后）**：本文档 §2.2 提出的根因
+> **「证据拿不到出身标签，于是全部落成 gap」已被内网实测证伪** ——
+> `webapp/tool_subset.py::TOOL_METADATA` 已经在给这些工具补出身，
+> 同形状重放里 fact 和 claim 都生成了。**真实机制是 claim 生成后被引用校验闸门拒掉**
+> （`one or more citations failed verification`）。
+> 逐条更正见 §2.2 与 §11；错的推断**保留在文中不删**，因为"我们当时凭什么这么想"
+> 和"后来测出来是什么"一样重要。
+>
+> 定案的方向见 [`agent-mode-phase-plan-zh.md`](agent-mode-phase-plan-zh.md)。
 
-修法不是放松闸门，是**补一张证据出身表**。这张表说的全是我们自己工具的字段，
-**不涉及内网环境里的名字、形状、格式 —— 这是本轮唯一不用等内网就能做完的事。**
+内网的诊断对了：**三态被压成布尔**、**空结论算通过**这两条成立（后者已被探针 4 四个场景实测确认）。
+
+外网当时提的第三条根因是错的。**但 schema 那一节（§3、§4）不受影响，反而被回报证实**：
+`impact` 真机返回里 `relation` / `rank` / `direct` 三个字段都在，`relation` 取值落在
+`channel_evidence.relation_order` 那六个受控值里 —— 有序词表确实已经存在，不该重建。
 
 ---
 
@@ -119,7 +127,31 @@ OWNERSHIP_RELATIONS = frozenset({"direct_code_evidence", "direct_config_evidence
 - **改完的效果**：能力需求是三态；`unknown` 永远不许被读成"不需要"；
   `required` 的能力任何一层都不许裁掉。
 
-### 2.2 证据没有出身标签，于是全部落成 gap（内网漏掉；本 spec 前一版的错）
+### 2.2 ~~证据没有出身标签，于是全部落成 gap~~ 🔴 已证伪 → 真正的问题是**粒度**
+
+> **2026-08-17 内网实测（RUNBOOK-83 探针 2/3）**：
+> `webapp/tool_subset.py::TOOL_METADATA` 已经在给工具补出身，
+> `unified_impact` / `search_code` / `read_file` → `environment=code` ＋
+> `evidence_grade=direct_code_evidence`，`incident_impact` → `snapshot` ＋
+> `direct_config_evidence`，`impact` → 3 条 fact。
+> 同形状重放：`facts=1`、`draft_claims=1`、`gate_accepted=0`、`gate_rejected=1`，
+> 拒绝原因 **`one or more citations failed verification`**。
+> **所以证据没有"全部落成 gap"，claim 也不是"从来没生成"。下面这一整段的推断是错的。**
+> 真实机制与修法见 §11。
+
+**仍然成立的那一半 —— 粒度，不是缺失。** `TOOL_METADATA` 是**按工具**给一个固定评级，
+而实测数据表明按工具太粗，会**过度评级**（这个项目最贵的那类错）：
+
+| 实测事实 | 现在被标成 | 应该是 |
+| --- | --- | --- |
+| `unified_impact.dependency_edges.source = internal_edges.csv`（从 pom 收割的依赖声明） | `direct_code_evidence` | `cited_config` —— 是声明，不是代码观测 |
+| `message_edges` 的 `routing_source` 有四个取值：`builder` / `runtime-unresolved` / `source-scan` / `wrapper`（412 条边，**全部带 `evidence` 列**） | 一律 `direct_code_evidence` | 🔴 `runtime-unresolved` 字面意思就是**没解析出来**，绝不能算代码证据；四个值必须分开映射 |
+| `incident_impact` 读的是**用户粘的告警原文** | `snapshot` ＋ `direct_config_evidence` | `user_supplied` —— "告警文本里含 Connection reset" 和"配置证据显示…"是两回事 |
+
+**粒度应该是 `(工具, 块)` 或 `(工具, 行的某个字段)`，不是 `(工具)`。**
+详见 §5 的注意事项。以下保留原文，作为"当时凭什么这么想"的记录 ——
+
+#### （已证伪，保留原文）证据没有出身标签，于是全部落成 gap
 
 原文（[`agent-mode-implementation-zh.md`](agent-mode-implementation-zh.md) §B2.0）：
 
@@ -353,7 +385,12 @@ provenance_table_miss   <- 新增：产地表缺这一行（§6.3）
 
 ---
 
-## 5. `config/evidence_provenance.json` —— 产地表（外网填，内网只审）
+## 5. 产地表 —— **内网维护**（业主 2026-08-17 决定）；本节只留注意事项
+
+> **它已经存在**：`webapp/tool_subset.py::TOOL_METADATA`。
+> 所以这一节不是"去建一张表"，而是**"把已有的那张表搬到配置里、并把粒度改细"**。
+> 下面的 JSON 只作**参考形状**（它的价值是把产物名和已实测的映射列全了），
+> 字段名和取值以内网现有实现为准 —— 表由你们维护，外网不再提交这个文件。
 
 **设计要点：按产物建，不按工具建。** 因为 [`unified_impact`](../../retriever/unified_impact.py)
 的每个块**已经在 `source` 字段里报出它来自哪个产物**
@@ -473,15 +510,32 @@ provenance_table_miss   <- 新增：产地表缺这一行（§6.3）
 }
 ```
 
-**这张表的三个规矩：**
+### 5.1 注意事项（八条，内网维护时按这个来）
 
-1. **匹配顺序不许调**：工具自带字段 > 产地表 > gap。产地表**永远不能覆盖**工具自己说的话。
-2. **`"?"` 一律走 gap**，不给默认值 —— 占位符判定复用
+1. **别重建，搬 ＋ 细化。** 起点是现有的 `TOOL_METADATA`，不是空文件。
+   重建一张新表最可能的结果是两张表并存、而且不一致。
+2. 🔴 **粒度：`(工具, 块)` 或 `(工具, 行的某字段)`，不是 `(工具)`。**
+   已实测的三处过度评级见 §2.2 的表。特别是
+   `message_edges.routing_source` 的四个值必须分开映射，
+   **`runtime-unresolved` 绝不能落在任何 `cited_*` 档上**。
+3. **匹配顺序不许调**：工具自带字段 > 产地表 > gap。
+   **产地表永远不能覆盖工具自己说的话** —— 工具说 `available:false`，表不能把它变成有值。
+4. **`"?"` 一律走 gap，不给默认值。** 占位符判定复用
    [`retriever/glossary.py`](../../retriever/glossary.py) 的 `is_unfilled()`，不写第二道闸门。
-3. **表里没有的 artifact → `cause: provenance_table_miss` 并把 artifact 名写进 gap 文本。**
-   这样"没标签"是一条**可运维的待办**，不是一个黑洞。
+5. **表里没有的产物 → `cause: provenance_table_miss`，并把缺的那一行的名字写进 gap 文本。**
+   "没标签"要是一条**可运维的待办**，不是一个黑洞 —— 这是外网这轮踩过的坑（§2.2）。
+6. **搬到 `config/evidence_provenance.json` ＋ `.local.json` 自动优先读**（和
+   `db_queries.json` 完全同一条缝，4028315 定的规矩）。
+   理由很具体：现在每改一条评级都要改 Python，**而外网看不见你们改了什么** ——
+   这一轮外网整条推理链跑偏，根源就是对着一份看不见的实现写建议。
+   模板留在仓库里（全 `"?"`），真实值留在盒子上，**契约回流、数据不回流**。
+7. **packet 里禁止出现裸 `tier` / 裸 `confidence`**（撞名，见 §3 结尾那段）。
+   现有实现用的是 `evidence_grade`，可以沿用，但**不要**再引入一个叫 `tier` 的字段。
+8. **不许跨环境比 `rank`。** 生产运行时观测和代码证据没有强弱关系（§3 铁律 1），
+   代码里不要提供这个比较入口。
 
-上表除三处标 🔴 / `"?"` 的以外，其余都是从外网代码实测推出来的，可以直接用。
+参考形状里除三处标 🔴 / `"?"` 的以外，其余都是从外网代码实测推出来的；
+`routing_source` 那一行现在可以按内网回报的四个值填了。
 
 ---
 
@@ -625,3 +679,28 @@ provenance_table_miss   <- 新增：产地表缺这一行（§6.3）
 3. **`blocked` 时给什么**：建议不只报状态，**把 gap 清单当答案的一部分交出去**
    （"我查到了 A、B，C 查不到是因为某字段说不可用，能补上的是谁"）。
 4. **不退化的比较口径**：建议**语义不退化，不要求逐字一致**（内网决策 1，同意）。
+
+---
+
+## 11. RUNBOOK-83 回报之后：真实机制（2026-08-17 定案）
+
+四条实测结论，取代 §1.4 那条推断：
+
+| 实测 | 说明什么 |
+| --- | --- |
+| `draft_claims=1`、`gate_accepted=0`、`gate_rejected=1`，原因 **`one or more citations failed verification`** | claim 生成了、被**引用校验闸门**拒了。§2.2 的推断作废 |
+| `webapp_data/agent_turns/` **文件数 0** | 🔴 B2.2 标 `done`，但检查点**一个都没落盘** → 历史那一轮**无法复盘**，这一轮的诊断（含外网的错误推断）全是猜的 |
+| 分类器实测 `alert_diagnostic=true`、`alert_structured_exception=true` → `incident_required=true`；且 `incident_required=true` 时 planner **会**校验计划含 `incident_investigate`，`incident_investigate` 的兜底集合是**空数组** | 路由这一条**在当前代码里可能已经是对的**。原因是代码已变、还是分析文档的数字来自更早的代码状态，**无法从这边判定** |
+| 探针 4 四个场景全部复现：`facts=3, claims=[] → valid=true`；空 repair **胜出**且无 `empty_repair_erased_supported_facts` 标记；3 过 2 拒时**被拒的不转 gap**；全工具不可用**没有 `blocked` 态**；**根本没有 `answer_status` 这个概念**；前端顶栏显示的是执行状态 | §6.4 一条不改，全部成立，而且是**唯一被四个场景独立确认的缺陷区** |
+
+外加两处真机与外网快照的分叉，写下来免得下一份 spec 又错：
+
+- **`read_file` 在盒子上返回裸字符串**（135 字符），不是外网的 `{path, total, start, end, line, lines[]}` 对象。
+  `search_code` 也是裸行列表。**能产出可核引用的两个工具，返回的都是非结构化文本** ——
+  这与引用校验失败高度相关，是 §11 之后第一个要查的点。
+- **命名契约不同**：内网用 `investigation_mode` / `investigation_policy.py`，
+  没有 `mode` / `turn_policy.py` / `config/agent_modes.json`；工具缓存在
+  `ExecutionState.data["tool_cache"]` 里。**后续所有文档一律用内网的名字。**
+
+方向定案（六期、产地表归属、blocked 渲染契约、不退化口径）见
+[`agent-mode-phase-plan-zh.md`](agent-mode-phase-plan-zh.md)。

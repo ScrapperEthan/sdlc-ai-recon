@@ -117,15 +117,29 @@ P0 无开关（只增加落盘和 telemetry，不改行为）。P4 复用现有 
 
 ### `answer_status` 的判定（**纯代码算，模型不许写**，spec §4.6）
 
+> **2026-08-18 更正**：本节原来写的是"按 `accepted_claims` / `evidence` 计数"的公式，
+> 它和 §4 渲染契约里"blocked 也可能保留辅助 Claim/Evidence"**自相矛盾** ——
+> 内网 §17.2 第 4 条抓到了，改法采纳他们的：**按 required deliverable 覆盖度推导**。
+
 ```
-complete : 所有 P0 deliverable 闭合，且 accepted_claims > 0
-partial  : accepted_claims > 0 但有 deliverable 未闭合
-           —— 或 —— accepted_claims == 0 但 evidence > 0     ← 本次那一轮属于这一格
-blocked  : accepted_claims == 0 且 evidence == 0，且原因明确（能力全被拒/预算耗尽/窗口拒绝）
+complete : 所有 required deliverable 都已闭合
+partial  : 部分 required deliverable 闭合
+blocked  : 零个 required deliverable 闭合，且有明确阻塞原因
+           （能力全被拒 / 预算耗尽 / 窗口拒绝 / 引用全不可核）
 ```
 
-🔴 **`evidence > 0 && accepted_claims == 0` 时 `complete` 是非法状态**，
-代码层面拒绝构造出来（不是事后校验）。
+`blocked` 和 `partial` **都可以携带辅助 claim 和 evidence** —— 例如用户问"要不要重发"，
+这一条没闭合（blocked），但"这个告警对应哪个仓库"已经确认，那条辅助 claim 照常输出。
+
+🔴 **两条护栏，缺一不可：**
+
+1. **"deliverable 闭合"的定义只有一种：被一条 accepted claim 闭合，或被一条显式 gap 闭合。**
+   **绝不能由 task 的 `done_when` 判定。** 否则就是内网自己 §2.3 诊断的那个缺陷原样重演 ——
+   三个本地 task 各自 `done_when` 都满足 → 系统进入 `completed` → 而用户真正要的维度从未执行。
+   **"任务做完了"和"问题回答了"是两件事，这是整份计划的起点，不能在状态推导这里又合回去。**
+2. **保留 `evidence > 0 && accepted_claims == 0 → status != complete` 作为冗余断言。**
+   它现在不是主判据了，但它是**唯一被真机复现过的那个失败形状**的直接守卫 ——
+   主判据换了实现，这条独立断言要留着（成本一行，收益是这次的 bug 不会以别的路径回来）。
 
 ### repair 质量比较（不许只比 rejected 数）
 
@@ -210,12 +224,20 @@ opencode（终端 AI 编码 agent）里和这件事同构的机制是 **mode**�
 
 | 轴 | 从 Packet 取什么 | 通过条件 | 什么叫退化 |
 | --- | --- | --- | --- |
-| **能力** | `executed_capabilities` | agent ⊇ ask 中被标 `required` 的那些 | 少一个 required 能力 |
+| **能力** | `executed_capabilities` ＋ Intent Contract 的 `required` | ① agent 满足 contract 的 required；② agent 的实际工具链 ⊇ ask 的实际工具链 | ① 判红；② **只判黄，不判红**（见下） |
 | **结论** | `claim_key` 集合（`subject / predicate / object`，spec §4.7） | agent ⊇ ask；缺的必须带 `superseded_by` ＋ reason ＋ 新证据 id | **静默**少一条 |
 | **强度** | 每个共同 `claim_key` 的 `environment` ＋ `evidence_grade` | 🔴 **不许更弱，也不许更强** | 更弱＝丢证据；**更强＝过度声称**（把 snapshot 说成 production），后者更危险 |
 | **未知** | `gap.cause` 集合 | agent 的 gap 不得凭空消失；消失必须伴随一条闭合它的新 claim | gap 静默蒸发 |
 | **视图** | `views[].kind` | agent ⊇ ask | 丢图（内网自己承认现在会丢） |
 | **状态** | `answer_status` | 有 evidence 时不得渲染成"无" | 本次那一轮 |
+
+> **2026-08-18 补充（采纳内网 §17.2 第 6 条）**：**`required` 只能来自 Intent Contract，
+> 不能拿"ask 实际调过什么"倒推。** 理由：ask 可能顺手调了辅助工具，
+> 把它固化成硬性要求会让这个测试变成噪音，而**一个总是红的测试等于没有测试**。
+> 所以能力轴出**两个判定**：契约合规判红；实际工具链差异判黄。
+> 🔴 黄的处理方式很关键：**黄 = 去修 Intent Contract，不是去改 agent。**
+> "ask 调了它、agent 没调、而且答案确实更差"这件事说明的是**契约漏标了一条 required**，
+> 这正是契约需要被修正的信号 —— 把它判红只会逼人把噪音断言注释掉。
 
 ### 5.3 四条设计要点（这是"怎么定口径"这件事本身的答案）
 
@@ -269,10 +291,24 @@ Use Case 路由 / 业务主数据 / UAT named query / inline 架构视图 / inci
 
 1. **先定位，别先改。** P0 的逐条 telemetry 上线后，回报**具体哪一条引用、哪一项校验失败**
    （路径不存在？行号超范围？后缀不在白名单？根本没解析出 `path:line`？）。
-2. **一条引用不合格 ≠ 整条 claim 作废。** 改成三档：
-   引用可核 → 正常 claim；引用不可核但证据存在 → **claim 降级为带限定的 claim**
-   （"代码证据显示 X，但引用行号未能核实"）＋ 一条 `cause: citation_unverified` 的 gap；
-   连证据都没有 → 才拒。
+2. **一条引用不合格 ≠ 整条 claim 作废 —— 但也不是一律降级保留。**
+
+   > **2026-08-18 更正**：本节原来写的"引用不可核 → 一律降级保留"和
+   > [spec §4.2](agent-ask-parity-and-answer-packet-zh.md) 那张表**自相矛盾** ——
+   > 那张表明写着 `code_location` 类结论**必须**有 `verified: true` 的行号引用。
+   > 内网 §17.2 第 5 条抓到了，改法采纳他们的：**按 claim 类型分档处理**。
+
+   | claim 类型 | 引用不可核时 | 为什么 |
+   | --- | --- | --- |
+   | `code_location` | **拒绝该 claim**，转成 Evidence ＋ 一条 gap | 没有可核行号就不能声称精确位置（spec §4.2、ask 提示词第 8 条） |
+   | `count` / `impact_set` / `routing` | **降级为带限定的 claim** ＋ gap | 数字和集合来自工具的字段，不依赖行号；限定说清"未能核实引用" |
+   | `operational_decision` / `mechanism` | **拒绝**（这两类本来就要求生产或代码证据） | 引用是它唯一的落地点 |
+   | `ownership` / `status` | 降级 ＋ gap | 出处是数据集，不是文件行 |
+
+   🔴 **无论落到哪一档，都不许静默消失**：被拒的 claim 必须以
+   Evidence ＋ `cause: citation_unverified` 的 gap 形式出现在答案里 ——
+   探针 4 场景 3 实测"被拒的 2 条不转 gap"，那条缺陷在这里同样适用。
+   **分档决定"能不能当结论说"，不决定"要不要告诉用户"。**
 3. 🔴 **顺手补一个已知缺口**：引用后缀白名单**漏了 `.js` / `.groovy`**（2026-08-07 实测），
    命中这两种后缀时引用守卫**被整个跳过**。这条与本次可能无关，但同一个模块，一起修。
 
@@ -291,6 +327,29 @@ Use Case 路由 / 业务主数据 / UAT named query / inline 架构视图 / inci
 - [ ] 没有引入第三方依赖
 - [ ] 新代码能在 `LLM_MOCK=1` 下离线跑通
 - [ ] **每期做完，仓库可运行、测试全绿**（当前基线 1637）
+
+---
+
+## 8.5 内网 §17.2 的九条"未原样采纳"—— 外网逐条回应（2026-08-18）
+
+**九条全部认可**，其中两条抓到了本文档真实的自相矛盾，已按他们的改法改在正文里。
+
+| # | 内网的处理 | 外网 | 落在哪 |
+| --- | --- | --- | --- |
+| 1 | 不再把"Router boolean 必然返回 false"写成已证实的历史第一根因 | ✅ 认可，本文档 §0.3 / §6 本来就是这个口径 | — |
+| 2 | 旧推断改成"工具级 provenance 粒度过粗，有过度评级风险" | ✅ 认可，即 spec §2.2 的更正 | — |
+| 3 | 完整 Provenance JSON 不当最终配置，只吸收匹配规则 / 粒度 / 代表性映射 | ✅ 认可，与业主"产地表内网维护"的决定一致 | spec §5.1 |
+| 4 | `answer_status` 改按 required deliverable 覆盖度推导 | ✅ **他们抓到了矛盾**：原公式与"blocked 也可保留辅助 Claim"冲突。已改，**附两条护栏** | §3 |
+| 5 | 引用不可核按 claim 类型分档，不是一律降级保留 | ✅ **他们抓到了第二处矛盾**：原写法与 spec §4.2「`code_location` 必须有可核行号」冲突。已改，**附一条底线** | §7 |
+| 6 | `required` 只能来自 Intent Contract，parity 同时比契约与实际工具链 | ✅ 认可，**补了黄灯的处理方式** | §5.2 |
+| 7 | opencode 类比不作为设计证据写入正文，只留可独立成立的原则 | ✅ 认可，**而且这条比外网做得对**：未核验的外部类比不该成为规格的承重墙 | — |
+| 8 | Ledger（P3）与 lineage UI（P6）分开，后者不作前置阻塞 | ✅ 认可，与本文档排期一致 | — |
+| 9 | 开关六个收敛为两个 | ✅ 认可（本就是外网建议） | §1 |
+
+三条附加条件已写进正文，此处只列指针：**§3 的两条护栏**（deliverable 闭合只能由
+accepted claim 或显式 gap 判定，绝不能由 `done_when` 判定；保留计数不变式作冗余断言）、
+**§7 的底线**（分档决定"能不能当结论说"，不决定"要不要告诉用户"）、
+**§5.2 的黄灯语义**（工具链差异 = 去修契约，不是去改 agent）。
 
 ---
 

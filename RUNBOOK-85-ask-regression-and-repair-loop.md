@@ -109,6 +109,127 @@ ceiling、approval、budget 三道闸门一条都没动。
 模型改完参数**还要再走一遍完整的 preflight + harness**。
 "不回喂"换来的不是安全，只是一次白白浪费的往返。
 
+### 1.4 截图一（Ask，问「什么是MDC」，20s）—— "答案空泛"的完整因果就在这一屏上
+
+屏幕上的原样事实：
+
+- 答案第一句：**「抱歉，当前文档查询参数不兼容，未能取得 MDC 的受控定义。」**
+- 之后整段是**通用常识**（"一般在本平台语境中，MDC 是……"），
+  结尾自己标了 **「未验证」**，底部 **`no citations to verify`**；
+- trace：`mdc_knowledge` 调了 **一次**，带 **`failed`**；
+- 失败之后跑了 `更新执行预算` → **`根据当前证据选择下一种能力`** → `Built the canonical Ask baseline packet`
+  —— **中间没有第二次工具调用**；
+- 底栏：**`tools 1/∞`** · `incident 0/1` · `MCP 0/10` · `20s/90s`；
+- Usage：**`2 model calls`**。
+
+三条推论，都不需要看代码：
+
+1. 🔴 **不是预算。** `tools 1/∞` —— 工具次数是**无限**的，它只用了 1 次。
+   时间也没到（20s/90s）。
+2. 🔴 **确实没有自愈循环。** "根据当前证据选择下一种能力"这一步**跑了**，
+   但**没有产生第二次工具调用**。`2 model calls` = 选一次能力 + 写一次答案。
+   **一次失败，整轮就到此为止。** 这把 §1.2 从推断变成了实测。
+3. **闸门和诚实性标注工作正常。** 工具读不到 → 没有证据 → 没有 claim →
+   `no citations to verify` → 只能用常识 + 标"未验证"。
+   **答案空泛是结果，不是原因。**
+
+**最可能的机理 —— 这条是你们文档自己写出来的，不是外网猜的：**
+
+| 你们文档 | 原话 |
+| --- | --- |
+| §4.1-4 | `mdc_knowledge` 的运行时路径和 active dataset context **由 trusted code 注入 `runtime_context`**，不是模型可见参数 |
+| §6.3 | `dispatch` 有历史兼容调用方式……新 runtime 会传 `runtime_context`。**调用方应使用兼容签名，不应假设所有 wrapper 都已升级** |
+
+→ 如果 Ask baseline executor 这条路上的 wrapper 还是老签名 `dispatch(name, args)`，
+`mdc_knowledge` 就**拿不到 runtime_context**，于是报"参数不兼容"，
+**知识层对 Ask 整个是黑的**。
+
+**一行验证**：在那条路径上把实际传给 `dispatch` 的第三个参数打出来，看是不是 `None`。
+
+**这条的后果要单独说给业主听**：
+「什么是MDC」是这套系统**最基础的一个问题**，而答案盒子里是有的
+（45 个业务确认仓库 ＋ MDC Common Knowledge 文档）。
+现在助手拿通用常识回答，并诚实地标了"未验证"。
+**对使用者来说，这就是"它突然什么都不知道了"。**
+
+---
+
+### 1.5 🔴🔴 截图二（事故调查，53s）—— 同一块屏幕的左右两半互相矛盾
+
+**左边**（执行 step 列表 ＋ 底栏计数器）说：
+
+```
+Dispatched the task through the code-owned Incident Contract
+Entered the approved Incident specialist runtime
+portal MCP SSE unreachable: connection_refused [after 2 attempt(s)]
+SMS specialist 调查完成: decision=unknown, Portal 查询 0 次, 证据闭合=否
+底栏：tools 4/∞ · incident 1/1 · MCP 1/10 · 53s/90s
+```
+
+**右边**（"本轮执行" Safe trace 面板）说：
+
+```
+本轮未触发 Incident Contract。
+Harness 未批准进入 Incident runtime。
+Contract Triggered  否
+Runtime Entered     否
+Mcp Attempted       0
+Mcp Executed        0
+First Blocked Step  7
+  3. Incident Context               Not reached
+  4. Production Access Preflight    Not reached
+  7. Harness / Scope Gate           Blocked
+```
+
+**这两件事不可能同时为真**：`connection_refused` 必须先真的发起连接才拿得到；
+`MCP 1/10` 和 `Mcp Attempted: 0` 不能都对。
+
+按上一轮定下的规矩：**内部不一致 = bug，不是 gap。**
+**不管哪一边是对的，两边不一致本身就已经是缺陷。**
+
+而这个 bug 的代价是**把用户指向错误的那扇门**：
+
+| 屏幕告诉用户 | 用户会去查 | 但左边的证据指向 |
+| --- | --- | --- |
+| 「Harness 未批准进入 Incident runtime」 | policy / ceiling / approval / 权限配置 | **Portal MCP 连不上（`connection_refused`）** —— 对端或网络问题，跟审批毫无关系 |
+
+🔴 **所以"trace 老半天"的准确原因不是 trace 不够详细，是 trace 在讲一个和事实相反的故事。**
+
+再看第 7 步的详情，屏幕上写的是：
+
+```
+关键输入字段与来源：本步骤没有额外输入字段。
+规则输出 / 决策结果：本步骤没有输出字段。
+```
+
+**一个 `Blocked` 的步骤，既没有输入字段也没有输出字段** ——
+它只说了"停了"，没说"为什么"。这就是探针 3 要修的东西，
+现在它有了一个具体的、可复现的实例。
+
+**外网的主假设**：左右两个面板**读的不是同一本账**。
+左边是执行过程边跑边写的事件流；右边是事后**另外重建**的一份"为什么执行/没执行"。
+重建的那份漏掉了 specialist runtime 里真实发生的事，于是把
+「对端连不上」重新渲染成了「我们的闸门没批准」。
+—— **这个假设对不对，由探针 8 的最后一问决定。**
+
+### 1.6 顺带：截图二里那句 `Applied default HKT timezone policy` 必须单独确认
+
+上一轮（`857de51`）的结论是"**一个事实两个作者**"，
+spec `agent-single-source-facts-and-specialist-zh.md` §1.1 定的裁决顺序是
+**告警原文 > 调用方传入 > BLOCKING**。
+
+现在多出来一档：**默认 HKT**。
+
+默认本身不一定错（这是港资银行），但请回答两件事：
+
+1. 这个默认**有没有作为一条带出身的 fact 落账**（`source = default_policy` 之类）？
+2. 🔴 **答案正文里有没有告诉用户"时区是默认补上的，不是从告警里读到的"？**
+
+如果第 2 条是"没有"，那么 `evals/cases.jsonl` 的第一条
+`honesty-no-timezone-must-not-describe-logs` **应该是红的** ——
+那条 case 要的正是："一个裸的 `03:15` 既没说哪一天、也没说哪个时区，不许往下走。"
+**请在探针 0 的结果里单独确认这一条的颜色。**
+
 ---
 
 ## 探针 0 —— 先把"变差"变成数字（最便宜，先跑这个）
@@ -387,6 +508,37 @@ done | cancelled | budget_exhausted
 
 ---
 
+## 探针 8 —— 🔴 这两次 run 的本地 session 记录（业主已同意让内网 codex 去查）
+
+**这一条可能比上面七个加起来都快**，因为这两次 run **已经发生过了**，记录就在盒子上。
+
+要两份，**原样 JSON，按 §0 第 3 条脱敏**（字段名和结构原样，值可占位符化）：
+
+1. 会话 **「MDC消息投递平台介绍」**（2 messages，就是 §1.4 那张截图）；
+2. §1.5 那次事故调查 run（53s、`incident 1/1`、`MCP 1/10`、`First Blocked Step 7` 的那次）。
+
+### 8a 第一份要什么
+
+| # | 要什么 |
+| --- | --- |
+| 1 | 🔴 `mdc_knowledge` 那次调用的**实际入参**：键名全列，值给类型即可。**特别是有没有 `runtime_context`，值是不是 `None`** |
+| 2 | 🔴 它返回的**错误对象原样** —— 就是"当前文档查询参数不兼容"那句话的**机器可读形式**（哪个字段、期望什么、实际拿到什么） |
+| 3 | 这次失败**之后到 run 结束之间**的全部事件，原样。用来数一个整数：**模型又被调用了几次** |
+| 4 | 那一轮传给模型的 **schema 数量**（对应探针 2-2） |
+| 5 | "根据当前证据选择下一种能力"这一步的**输入和输出** —— 它当时手上有哪些候选能力？为什么一个都没选？ |
+
+### 8b 第二份要什么
+
+| # | 要什么 |
+| --- | --- |
+| 1 | 🔴🔴 `Contract Triggered` / `Runtime Entered` / `Mcp Attempted` 这三个值**是从哪个记录、哪个字段读出来的**？ |
+| 2 | 🔴🔴 左边那些 step 文本（`Entered the approved Incident specialist runtime`、`portal MCP SSE unreachable: connection_refused`）**又是从哪个记录、哪个字段读出来的**？ |
+| 3 | **如果 1 和 2 是两个不同的来源 —— 那就是根因**，请直接说，探针 3 的其它问题都可以先放着 |
+| 4 | 第 7 步 `Harness / Scope Gate` 那次的 **HarnessDecision 对象原样**（七个枚举值里的哪一个 ＋ 它带的字段） |
+| 5 | `Applied default HKT timezone policy` 这条落账了没有？带不带出身字段？（对应 §1.6） |
+
+---
+
 ## 回报格式
 
 每个探针一段，**按编号**，回答不了的写"没测"，不要留空。
@@ -398,9 +550,10 @@ done | cancelled | budget_exhausted
 
 | | 做什么 | 触发条件 | 为什么排这个位置 |
 | --- | --- | --- | --- |
-| **F1** | 🔴 **工具错误回喂模型 = 自愈循环** | 探针 1a-2 回报 `0` | 最小、最高杠杆、**零权限风险**（论证见 §1.3）。这一条就是"不如 claude code"的主因 |
+| **F0** | 🔴 **把 `runtime_context` 传到 `mdc_knowledge`**（或者说：把那条路径上的 wrapper 升到新签名） | 探针 8a-1 回报入参里没有 `runtime_context` | **比 F1 还便宜，而且直接解释"什么都不知道了"**。知识层现在对 Ask 是黑的 |
+| **F1** | 🔴 **工具错误回喂模型 = 自愈循环** | **已由截图一确认**（`tools 1/∞` ＋ `2 model calls` ＋ 失败后零次重试） | 最小、最高杠杆、**零权限风险**（论证见 §1.3）。这一条就是"不如 claude code"的主因 |
 | **F2** | 七个 decision 接成七条不同的下一步 | 探针 1b `invalid_proposal` 计数高 | 分类你们已经做完了，**只差接线** |
-| **F3** | terminal event 加 `blocked` + 三段渲染（为什么停 / 谁能解开 / 解开会怎样） | 探针 3 | 直接消掉"不知道为什么停、trace 老半天" |
+| **F3** | 🔴 **两个面板读同一本账** ＋ terminal event 加 `blocked` ＋ 三段渲染（为什么停 / 谁能解开 / 解开会怎样） | 探针 8b-3 回报"两个来源" | 直接消掉"不知道为什么停、trace 老半天"。**现在的代价是把用户指向错误的那扇门**（见 §1.5） |
 | **F4** | 工具预选改成"执行时选"，或**至少 Ask 不裁** | 探针 2 回报 (a) | "决策要贴着数据"的第二个实例 |
 | **F5** | `ask_user_question`（`pause` → 下一轮 `resume`） | F2 落地后 | **这条已经在 RUNBOOK-84 保留下来了**，spec 在 `docs/specs/harness-borrowings-implement-zh.md` §B。它正好是 F2 里 `user_input_required` 那一类的正规出口 |
 | **不做** | ❌ **不要松 answer_gate** | —— | gate 是对的（`857de51` 真机证明过）。松了 = 把"空泛但诚实"换成"自信但错误" |

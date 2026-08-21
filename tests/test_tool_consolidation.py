@@ -70,7 +70,11 @@ class LegacyToolBackwardCompatTests(unittest.TestCase):
     old names directly."""
 
     def _assert_routed(self, name, result):
-        self.assertNotEqual(result, {"error": f"unknown tool: {name}"})
+        # Derived from what dispatch ACTUALLY returns for a name it does not know, not pinned to a
+        # literal: a pinned one keeps passing after that shape changes, including for a legacy name
+        # that has genuinely stopped routing.
+        unknown = dict(tools.dispatch("definitely_not_a_tool", {}), error=f"unknown tool: {name}")
+        self.assertNotEqual(result, unknown)
 
     def test_consumers_still_routes(self):
         with mock.patch.object(tools.msg, "who_consumes", return_value=["repoA"]) as fn:

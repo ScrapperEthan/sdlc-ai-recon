@@ -71,6 +71,19 @@ developers just open the URL. Nobody installs opencode or anything.
   `plan.targets[].source: "supplied by the caller"` so a nil result keeps its weaker provenance.
   The tool is re-callable within one turn; the schema and system prompt name the signals that mean
   "sweep again" and the one refusal (blocking window) that only the user can clear.
+- **Clickable tool trace** (`webapp/tool_trace.py`): every chip under an answer is a button over one
+  ledger entry — click it for that call's arguments, its output, how long it took, and, when it
+  failed, `failure_class`, which ARGUMENT was wrong (`field` / `expected` / `actual_type`, all taken
+  from the tool's own schema) and who can unblock it. The output shown is the exact string the model
+  was handed, plus the untruncated result size beside it, so a shortened result never reads as the
+  whole one. Two failure classes are new gates rather than reports: unreadable tool-call JSON
+  (`bad_call_syntax`) and a missing/unusable required argument (`bad_arguments`) are caught BEFORE
+  dispatch and fed back to the model as structured fields, which is what lets the turn repair itself
+  instead of dying on `{"error": "'repo'"}`. Anything unclassified is `internal_error` — never
+  `bad_arguments`, and never pointed at the user. Type mismatches the tools already tolerate (a
+  `"50"` where an integer belongs) still dispatch unchanged and are recorded as notes, so nothing
+  that worked before now fails. Cap the stored copy with `SDLC_TRACE_OUTPUT_CHARS` (default 4000
+  characters per call).
 - Incident-investigator progress steps are saved with the assistant message (`subagent_steps`) and
   re-rendered on reload. They are the already-sanitized stream events, and `history_for_agent` sends
   the model role+content only — so replaying them reaches the browser, never the model. Raw log text

@@ -507,7 +507,7 @@ def dispatch_events(name, a, owner=""):
         text = (a.get("alert_text") or "").strip()
         if not text:
             yield {"type": "result",
-                   "packet": {"ok": False,
+                   "packet": {"ok": False, "failure_class": "bad_arguments",
                               "error": "alert_text is required (paste the raw alert verbatim)"}}
             return
         # Imported here, not at module import time: this is the only tool that can reach production,
@@ -578,13 +578,18 @@ def dispatch(name, a):
                 return {"direction": "both", "consumers": msg.who_consumes(dest),
                         "producers": msg.who_produces(dest)}
             return {"direction": "consume", "matches": msg.who_consumes(dest)}
-        return {"error": "message_flow needs one of: destination, repo, or use_case_id"}
+        # `failure_class` is the closed enum in webapp/tool_trace.py. Declaring it here is what
+        # keeps an argument mistake OUT of the `internal_error` bucket: undeclared failures are
+        # attributed to us on purpose, and this one is the model's to fix.
+        return {"ok": False, "failure_class": "bad_arguments",
+                "error": "message_flow needs one of: destination, repo, or use_case_id"}
     if name == "usecase_routing":
         # Merges usecase_route (forward) + use_cases_for_topic (reverse=true).
         if a.get("reverse"):
             topic = (a.get("topic") or "").strip()
             if not topic:
-                return {"error": "usecase_routing reverse=true needs a topic"}
+                return {"ok": False, "failure_class": "bad_arguments",
+                        "error": "usecase_routing reverse=true needs a topic"}
             return msg.reverse_lookup_use_cases(topic, a.get("exact", True), a.get("limit", 50))
         return msg.usecase_route(a.get("use_case_id") or None, a.get("topic") or None)
     if name == "list_repos":
@@ -599,7 +604,8 @@ def dispatch(name, a):
                     return repo_tags.mdc_repos()
                 # An unregistered group used to fall through to an unfiltered filter_repos and
                 # SILENTLY return all 392 repos (RUNBOOK-48 D1). Reject it explicitly instead.
-                return {"ok": False, "error": f"unknown group: {a.get('group')}",
+                return {"ok": False, "failure_class": "bad_arguments",
+                        "error": f"unknown group: {a.get('group')}",
                         "allowed_groups": ["mdc"],
                         "hint": "omit group and use query=<substring> to search repo names, "
                                 "e.g. query='campaign'"}
@@ -611,7 +617,8 @@ def dispatch(name, a):
                 mdc_common=a.get("mdc_common"),
             )
         except FileNotFoundError:
-            return {"ok": False, "error": "repo_tags.json not built; run make_repo_tags.py"}
+            return {"ok": False, "failure_class": "internal_error",
+                    "error": "repo_tags.json not built; run make_repo_tags.py"}
     if name == "search_code":
         return code.search_code(a["pattern"], a.get("glob", "*.java"), a.get("max_results", 50),
                                  a.get("repos"))
@@ -637,7 +644,8 @@ def dispatch(name, a):
     if name == "source_system_impact":
         value = (a.get("source_system") or "").strip()
         if not value:
-            return {"ok": False, "error": "source_system is required"}
+            return {"ok": False, "failure_class": "bad_arguments",
+                    "error": "source_system is required"}
         try:
             return impact_report.build_report(
                 f"source-system:{value}",
@@ -646,17 +654,18 @@ def dispatch(name, a):
                 limit=int(a.get("limit") or 50),
             )
         except (FileNotFoundError, ValueError) as error:
-            return {"ok": False, "error": str(error)}
+            return {"ok": False, "failure_class": "internal_error", "error": str(error)}
     if name == "list_source_systems":
         return {"items": usecase_master.source_systems()}
     if name == "usecase_impact":
         value = (a.get("use_case_id") or "").strip()
         if not value:
-            return {"ok": False, "error": "use_case_id is required"}
+            return {"ok": False, "failure_class": "bad_arguments",
+                    "error": "use_case_id is required"}
         try:
             return impact_report.build_report(f"use-case:{value}")
         except (FileNotFoundError, ValueError) as error:
-            return {"ok": False, "error": str(error)}
+            return {"ok": False, "failure_class": "internal_error", "error": str(error)}
     if name == "search_usecases":
         return usecase_master.search_usecases(
             query=a.get("query") or None,
@@ -679,7 +688,8 @@ def dispatch(name, a):
     if name == "incident_impact":
         text = (a.get("alert_text") or "").strip()
         if not text:
-            return {"ok": False, "error": "alert_text is required (paste the raw alert verbatim)"}
+            return {"ok": False, "failure_class": "bad_arguments",
+                    "error": "alert_text is required (paste the raw alert verbatim)"}
         return incident.incident_impact(text, max_use_cases=int(a.get("max_use_cases") or 40))
     if name == "critical_repos":
         return criticality.rank(top=int(a.get("top") or 10))
@@ -701,4 +711,7 @@ def dispatch(name, a):
         # `caller="product"` is the model asking. It is the stricter setting, and the default in
         # db_registry is 'internal', so wiring a query's SQL does not by itself hand it to the chat.
         return db_readonly.run(query, a.get("params") or {}, caller="product")
-    return {"error": f"unknown tool: {name}"}
+    # Declared, not left to the fallback: an unknown NAME is the caller's to fix, and an
+    # unclassified failure is attributed to us. Without this line a hallucinated tool name would be
+    # reported to the model as our own internal error, which it can only respond to by giving up.
+    return {"ok": False, "failure_class": "bad_arguments", "error": f"unknown tool: {name}"}

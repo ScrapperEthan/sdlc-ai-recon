@@ -757,9 +757,19 @@
     padding: 0 12px 12px;
   }
 
+  .tools summary .tools-hint {
+    font-weight: 500;
+    font-size: 12px;
+    opacity: .8;
+  }
+
+  /* A chip is a BUTTON now: one click opens what went into that call and what came back. The
+     colour carries the outcome, because a rejected call and an answered one used to look the
+     same — and telling them apart meant reading the answer and guessing. */
   .tool-chip {
     display: inline-flex;
     align-items: center;
+    gap: 5px;
     min-height: 28px;
     padding: 3px 9px;
     border-radius: 999px;
@@ -767,6 +777,133 @@
     background: var(--success-soft);
     border: 1px solid #b9e6dc;
     font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .tool-chip .mark { opacity: .75; }
+  .tool-chip:hover { filter: brightness(.97); }
+  .tool-chip.is-open { box-shadow: 0 0 0 2px rgba(37, 99, 235, .35); }
+
+  .tool-chip.is-error {
+    color: #a12d2d;
+    background: rgba(176, 106, 106, .1);
+    border-color: #d9a5a5;
+  }
+
+  .tool-chip.is-running,
+  .tool-chip.is-unknown {
+    color: var(--muted);
+    background: var(--surface-soft);
+    border-color: var(--line);
+  }
+
+  .tool-detail-host:empty { display: none; }
+
+  .tool-detail {
+    margin: 0 12px 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-soft);
+    font-size: 12.5px;
+  }
+
+  .td-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .td-head span { color: var(--muted); font-size: 11.5px; }
+
+  /* Why it stopped / who can unblock it. Three lines, always in the same order, because the whole
+     complaint being answered here is "it blocked and I could not tell why". */
+  .td-why {
+    margin: 8px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid #d9a5a5;
+    background: rgba(176, 106, 106, .08);
+    color: #7d2f2f;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .td-why .td-key {
+    display: inline-block;
+    min-width: 84px;
+    opacity: .75;
+  }
+
+  .td-section { margin-top: 10px; }
+
+  .td-section h5 {
+    margin: 0 0 5px;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: none;
+  }
+
+  .td-none { margin: 0; color: var(--muted); }
+
+  /* A remark about the CALL rather than about one argument (e.g. "this tool is not in the model's
+     tool list, so its arguments were not checked"). */
+  .td-note-line {
+    margin: 8px 0 0;
+    color: #8a5a12;
+    font-size: 11.5px;
+  }
+
+  .td-args {
+    width: 100%;
+    border-collapse: collapse;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .td-args th,
+  .td-args td {
+    padding: 3px 6px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+    word-break: break-word;
+  }
+
+  .td-args th { width: 30%; font-weight: 650; color: var(--muted); }
+  .td-args tr.is-invalid th, .td-args tr.is-invalid td { color: #a12d2d; }
+  .td-args tr.is-note th, .td-args tr.is-note td { color: #8a5a12; }
+
+  .td-arg-note td {
+    border-bottom: 0;
+    font-size: 11px;
+    opacity: .85;
+  }
+
+  .td-pre {
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 320px;
+    overflow: auto;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Says what the model got versus what the tool produced. Without it a shortened result reads as
+     the whole one, which is the same class of mistake as an unknown rendered as a zero. */
+  .td-size {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 11px;
   }
 
   /* Sub-agent activity. Visually distinct from the retrieval-step chips because it IS different:

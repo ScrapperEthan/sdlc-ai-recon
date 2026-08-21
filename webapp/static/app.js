@@ -1225,49 +1225,295 @@ function add(role, text, who) {
   return m;
 }
 
-function addToolTrace(container, trace) {
+// ---------------------------------------------------------------------------------------------
+// Retrieval steps. A chip used to carry the tool NAME and nothing else, which made every outcome
+// look identical: a call that answered, a call that was rejected for a mistyped argument and a call
+// that never happened all rendered as the same grey pill. Reconstructing which was which meant
+// reading the answer text and guessing. Each chip is now a button over one ledger entry
+// (webapp/tool_trace.py) and opens the input, the output, and — when it failed — WHICH argument and
+// who can fix it.
+//
+// The output shown is the exact string the model was handed, not a second rendering of the result.
+// One call, one account of it: two accounts is how a screen ends up blaming our own gate for a
+// connection the peer refused.
+const TOOL_STATUS_LABEL = {ok: '成功', error: '失败', running: '进行中',
+                           unknown: '结果没有记录（升级前的旧记录）'};
+const TOOL_STATUS_MARK = {ok: '✓', error: '✖', running: '⋯', unknown: '·'};
+
+const FAILURE_LABEL = {
+  bad_call_syntax: '参数不是合法 JSON',
+  bad_arguments: '参数不对',
+  empty_result: '结果为空',
+  unavailable: '对端不可达',
+  refused: '配置里的故意限制',
+  duplicate: '这一轮已经调过',
+  contract_only: '要走它自己的前置校验',
+  internal_error: '我们这边出错'
+};
+
+// The three answers lead to three different next moves, which is the entire reason the field
+// exists. `us` must never be phrased as something the reader can go and fill in — being sent to
+// supply a fact that would not have helped is worse than being told nothing.
+const WHO_CAN_CLOSE_LABEL = {
+  assistant: '助手自己改参数再调一次（本轮就能修）',
+  peer: '对端系统 / 网络 —— 不是"查不到数据"',
+  config_owner: '配置拥有者（这是故意设的限制）',
+  us: '我们 —— 这是我们的缺陷，不用你补任何东西',
+  user: '需要你补一个我们拿不到的事实'
+};
+
+const ARG_PROBLEM_LABEL = {
+  missing: '必填参数，这次没给',
+  empty: '必填参数，给的是空字符串',
+  wrong_type: '类型对不上，工具用不了 —— 这次没有真的调用',
+  loose_type: '类型和 schema 不一致（仍按原值调用了，结果可能不是你以为的那个）',
+  unknown_field: '工具没有这个参数，已被忽略',
+  // 这个工具不在模型看得见的工具表里（十个旧名字仍然由 dispatch 路由给 CLI/MCP 用）。
+  // 没有 schema 可以对照，所以这次的参数没有被校验 —— 说出来，不假装检查过。
+  no_schema: '这个工具不在模型的工具表里，所以参数没有被校验'
+};
+
+function toolStatusOf(item) {
+  if (item.status) return item.status;
+  if (item.failure_class) return 'error';
+  // A turn saved before this panel existed carries the tool name and nothing else. Calling that
+  // "成功" would be an assertion nothing backs — the same shape of mistake as rendering an unknown
+  // count as a zero.
+  return item.output ? 'ok' : 'unknown';
+}
+
+function formatCount(value) {
+  // `—` for unknown, never 0. "We do not know how big it was" and "it was empty" are different
+  // facts, and rendering the first as the second is the exact bug this panel exists to stop.
+  return (value == null) ? '—' : Number(value).toLocaleString('en-US');
+}
+
+function argValueText(value) {
+  if (value === undefined) return '(未传)';
+  try {
+    return typeof value === 'string' ? value : JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+}
+
+function toolDetailNode(item, seq) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tool-detail';
+  const status = toolStatusOf(item);
+
+  const head = document.createElement('div');
+  head.className = 'td-head';
+  const title = document.createElement('b');
+  title.textContent = `#${seq} ${item.tool || 'tool'}`;
+  const meta = document.createElement('span');
+  const bits = [TOOL_STATUS_LABEL[status] || status];
+  if (item.duration_ms != null) bits.push(`${formatCount(item.duration_ms)} ms`);
+  if (item.iteration != null) bits.push(`第 ${item.iteration} 轮`);
+  if (item.attempt != null) bits.push(`这个工具第 ${item.attempt} 次`);
+  if (item.lane) bits.push(`预算 lane: ${item.lane}`);
+  meta.textContent = bits.join(' · ');
+  head.append(title, meta);
+  wrap.appendChild(head);
+
+  if (status === 'error') {
+    const why = document.createElement('div');
+    why.className = 'td-why';
+    const rows = [
+      ['为什么失败', FAILURE_LABEL[item.failure_class] || item.failure_class || '—'],
+      // "never ran" and "ran and failed" are different facts. Collapsing them is how a panel ends
+      // up blaming our own gate for a connection the peer refused.
+      ['工具跑了吗', item.dispatched ? '跑了，是它自己报的失败' : '没跑 —— 这次调用在发出前就被拦下了'],
+      ['工具自己说的', item.message || '—'],
+      ['谁能解开', WHO_CAN_CLOSE_LABEL[item.who_can_close] || item.who_can_close || '—']
+    ];
+    rows.forEach(([label, value]) => {
+      const row = document.createElement('div');
+      const key = document.createElement('span');
+      key.className = 'td-key';
+      key.textContent = label;
+      const val = document.createElement('span');
+      val.textContent = value;
+      row.append(key, val);
+      why.appendChild(row);
+    });
+    wrap.appendChild(why);
+  }
+
+  // `field: "tool"` is about the CALL, not about an argument — listing it in the argument table
+  // would invent a parameter nobody passed. It gets its own line instead.
+  const problems = new Map();
+  (item.invalid || []).concat(item.notes || []).forEach((entry) => {
+    if (!entry || !entry.field || entry.field === 'tool') return;
+    problems.set(entry.field, entry);
+  });
+  (item.notes || []).concat(item.invalid || []).forEach((entry) => {
+    if (!entry || entry.field !== 'tool') return;
+    const line = document.createElement('p');
+    line.className = 'td-note-line';
+    line.textContent = ARG_PROBLEM_LABEL[entry.problem] || entry.problem;
+    wrap.appendChild(line);
+  });
+
+  const inputs = document.createElement('div');
+  inputs.className = 'td-section';
+  const inputTitle = document.createElement('h5');
+  inputTitle.textContent = '输入参数';
+  inputs.appendChild(inputTitle);
+
+  const fields = new Set(Object.keys(item.args || {}));
+  problems.forEach((_entry, field) => fields.add(field));
+  if (!fields.size) {
+    const none = document.createElement('p');
+    none.className = 'td-none';
+    none.textContent = '这次调用没有参数。';
+    inputs.appendChild(none);
+  } else {
+    const table = document.createElement('table');
+    table.className = 'td-args';
+    fields.forEach((field) => {
+      const entry = problems.get(field);
+      const row = document.createElement('tr');
+      if (entry) row.className = (item.invalid || []).includes(entry) ? 'is-invalid' : 'is-note';
+      const name = document.createElement('th');
+      name.textContent = field;
+      const value = document.createElement('td');
+      value.textContent = argValueText((item.args || {})[field]);
+      row.append(name, value);
+      table.appendChild(row);
+      if (entry) {
+        const note = document.createElement('tr');
+        note.className = 'td-arg-note';
+        const spacer = document.createElement('th');
+        const text = document.createElement('td');
+        // `expected` is copied from the tool schema. When the schema does not constrain a field it
+        // says so — a made-up expectation is how a wrong argument becomes a confidently wrong one.
+        text.textContent = `${ARG_PROBLEM_LABEL[entry.problem] || entry.problem}`
+          + ` · schema 要求: ${entry.expected || '未知'} · 实际收到: ${entry.actual_type || '—'}`;
+        note.append(spacer, text);
+        table.appendChild(note);
+      }
+    });
+    inputs.appendChild(table);
+  }
+  wrap.appendChild(inputs);
+
+  if (item.arguments_raw != null) {
+    const raw = document.createElement('div');
+    raw.className = 'td-section';
+    const rawTitle = document.createElement('h5');
+    rawTitle.textContent = '模型原样发出的 arguments（没解析成功的就是这段）';
+    const pre = document.createElement('pre');
+    pre.className = 'td-pre';
+    pre.textContent = item.arguments_raw;
+    raw.append(rawTitle, pre);
+    wrap.appendChild(raw);
+  }
+
+  const output = document.createElement('div');
+  output.className = 'td-section';
+  const outTitle = document.createElement('h5');
+  outTitle.textContent = '输出（模型收到的就是这一段）';
+  output.appendChild(outTitle);
+  const box = item.output || {};
+  const pre = document.createElement('pre');
+  pre.className = 'td-pre';
+  // Three different absences, said as three different things. A turn saved before this panel
+  // existed has no output stored, and rendering that as "still running" or as an empty result
+  // would be the same mistake the panel was built to stop.
+  pre.textContent = box.text != null ? box.text
+    : (toolStatusOf(item) === 'running' ? '（这一步还在跑，还没有输出）'
+       : '（这条是旧记录：当时还没有保存输入/输出，只留下了工具名）');
+  output.appendChild(pre);
+  if (box.model_chars != null) {
+    const size = document.createElement('p');
+    size.className = 'td-size';
+    size.textContent = `工具返回 ${formatCount(box.result_chars)} 字符 → 模型收到 `
+      + `${formatCount(box.model_chars)} 字符（超出的部分由上下文预算按结构裁剪）→ `
+      + `这里显示 ${formatCount(box.shown_chars)} 字符`;
+    output.appendChild(size);
+  }
+  wrap.appendChild(output);
+  return wrap;
+}
+
+function renderToolTrace(container, trace, completed = false) {
+  const existing = container.querySelector('.tools');
+  // Survive the re-render: the live stream redraws this block on every tool event, and an open
+  // detail that closes itself mid-read is worse than no detail at all.
+  const openSeq = existing ? existing.dataset.openSeq : '';
+  if (existing) existing.remove();
+  if (!trace || !trace.length) return;
+
   const details = document.createElement('details');
   details.className = 'tools';
   details.open = true;
+  if (openSeq) details.dataset.openSeq = openSeq;
 
+  const failed = trace.filter((item) => toolStatusOf(item) === 'error').length;
   const summary = document.createElement('summary');
-  summary.textContent = `${trace.length} retrieval step${trace.length === 1 ? '' : 's'} completed`;
+  const label = document.createElement('span');
+  label.textContent = `${trace.length} 个检索步骤${completed ? '' : '（进行中）'}`
+    + (failed ? ` · ${failed} 个失败` : '');
+  const hint = document.createElement('span');
+  hint.className = 'tools-hint';
+  hint.textContent = '点任意一步看输入 / 输出';
+  summary.append(label, hint);
 
   const list = document.createElement('div');
   list.className = 'tools-list';
-  trace.forEach((item) => {
-    const chip = document.createElement('span');
-    chip.className = 'tool-chip';
-    chip.textContent = item.tool || 'tool';
+  const host = document.createElement('div');
+  host.className = 'tool-detail-host';
+
+  const show = (item, seq) => {
+    host.replaceChildren(toolDetailNode(item, seq));
+  };
+
+  trace.forEach((item, index) => {
+    const seq = item.seq == null ? index + 1 : item.seq;
+    const status = toolStatusOf(item);
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `tool-chip is-${status}`;
+    chip.dataset.seq = String(seq);
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = TOOL_STATUS_MARK[status] || '·';
+    chip.append(mark, document.createTextNode(item.tool || 'tool'));
+    // The tool name goes in the title too: a screen reader announces the title over the chip's own
+    // text, and "成功" on its own does not say WHICH call succeeded.
+    chip.title = `${item.tool || 'tool'} — ${TOOL_STATUS_LABEL[status] || status}，点开看这次调用的输入和输出`;
+    chip.addEventListener('click', () => {
+      if (details.dataset.openSeq === String(seq)) {
+        details.dataset.openSeq = '';
+        host.replaceChildren();
+        chip.classList.remove('is-open');
+        return;
+      }
+      details.dataset.openSeq = String(seq);
+      list.querySelectorAll('.tool-chip.is-open').forEach((other) => other.classList.remove('is-open'));
+      chip.classList.add('is-open');
+      show(item, seq);
+    });
+    if (String(seq) === openSeq) {
+      chip.classList.add('is-open');
+      show(item, seq);
+    }
     list.appendChild(chip);
   });
 
-  details.append(summary, list);
+  details.append(summary, list, host);
   container.appendChild(details);
 }
 
+// Kept as names because two call sites read as what they do: replaying a stored turn, and redrawing
+// a live one. Both render the same ledger — there is only one renderer now.
+function addToolTrace(container, trace) {
+  renderToolTrace(container, trace, true);
+}
+
 function showLiveTools(container, trace, completed = false) {
-  const existing = container.querySelector('.tools');
-  if (existing) existing.remove();
-  if (!trace.length) return;
-  const details = document.createElement('details');
-  details.className = 'tools';
-  details.open = true;
-
-  const summary = document.createElement('summary');
-  summary.textContent = `${trace.length} retrieval step${trace.length === 1 ? '' : 's'} ${completed ? 'completed' : 'running'}`;
-
-  const list = document.createElement('div');
-  list.className = 'tools-list';
-  trace.forEach((item) => {
-    const chip = document.createElement('span');
-    chip.className = 'tool-chip';
-    chip.textContent = item.tool || 'tool';
-    list.appendChild(chip);
-  });
-
-  details.append(summary, list);
-  container.appendChild(details);
+  renderToolTrace(container, trace, completed);
   log.scrollTop = log.scrollHeight;
 }
 
@@ -1763,8 +2009,19 @@ async function askStream(text) {
 
         const event = JSON.parse(line);
         if (event.type === 'tool_start') {
-          trace.push({tool: event.name || 'tool'});
+          trace.push(event.record || {tool: event.name || 'tool', seq: trace.length + 1,
+                                      status: 'running'});
           showLiveTools(pending, trace);
+        } else if (event.type === 'tool_end') {
+          // The finished entry REPLACES the running one it matches on `seq`. Appending instead
+          // would double every chip, and leaving the running one in place would leave a step that
+          // has already failed still showing as in progress.
+          const record = event.record;
+          if (record) {
+            const at = trace.findIndex((item) => item.seq === record.seq);
+            if (at >= 0) trace[at] = record; else trace.push(record);
+            showLiveTools(pending, trace);
+          }
         } else if (event.type === 'subagent_step') {
           subagentSteps.push(event);
           showSubagent(pending, subagentSteps, event.step === 'summary');

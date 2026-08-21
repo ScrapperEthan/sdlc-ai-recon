@@ -143,6 +143,11 @@ HISTORY_MAX_ROUNDS = int(os.environ.get("SDLC_HISTORY_MAX_ROUNDS", "10"))
 # mangled worst -- a single enormous string, i.e. exactly what a log excerpt is -- while leaving
 # the surrounding JSON intact and marking what was dropped.
 TOOL_STRING_CAP = int(os.environ.get("SDLC_TOOL_STRING_CAP", "4000"))
+# Per-call cap, in characters, on the copy of a tool result kept in the clickable trace panel
+# (webapp/tool_trace.py). What the panel shows is the exact string the MODEL was handed, so this
+# bounds one turn's contribution to chat_sessions.json rather than changing what the model sees.
+# The entry always states the true length beside the shown one, so a cut is never silent.
+TRACE_OUTPUT_CHARS = int(os.environ.get("SDLC_TRACE_OUTPUT_CHARS", "4000"))
 SESSION_STORE = os.environ.get(
     "SDLC_SESSION_STORE", os.path.join(os.getcwd(), "webapp_data", "chat_sessions.json")
 )

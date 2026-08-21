@@ -3,8 +3,9 @@ Model-agnostic; the model call goes through the `llm` facade. Token/credit usage
 is aggregated across the (possibly several) model calls one question triggers."""
 import json
 import re
+import time
 from retriever import citations
-from . import llm, tools, config, llm_usage, context_budget
+from . import llm, tools, config, llm_usage, context_budget, tool_trace
 
 
 # The model sometimes narrates the inline view it already triggered, e.g.
@@ -151,6 +152,11 @@ def answer_events(question, history=None, owner=""):
     messages.append({"role": "user", "content": question})
 
     trace = []
+    # One ledger for the whole turn: `call_seq` numbers every dispatch attempt in order (the chip a
+    # reader clicks), `attempts` counts per tool so a repaired second call is visibly a second call
+    # and not a duplicate of the first.
+    call_seq = 0
+    attempts = {}
     emitted_views = []
     # Sub-agent progress steps are collected as well as relayed, so the terminal `done` event can
     # carry them into the session store. Streaming them alone meant the investigator panel existed
@@ -195,16 +201,43 @@ def answer_events(question, history=None, owner=""):
         for position, call in enumerate(calls):
             fn = call.get("function", {})
             name = fn.get("name", "")
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            yield {"type": "tool_start", "name": name, "args": args}
-            if name in tools.SUBAGENT_TOOLS:
+            call_seq += 1
+            attempts[name] = attempts.get(name, 0) + 1
+            # Unreadable arguments are their OWN failure, not an absent field. Parsing them to `{}`
+            # and dispatching anyway told the model a required field was missing when the real fault
+            # was its JSON — so it resent the same field, correctly, for as many rounds as it had.
+            args, syntax = tool_trace.parse_arguments(fn.get("arguments"))
+            lane = "subagent" if name in tools.SUBAGENT_TOOLS else "tools"
+            entry = tool_trace.record(
+                tool=name, call_id=call.get("id", ""), seq=call_seq, iteration=iteration + 1,
+                attempt=attempts[name], lane=lane, args=args,
+                arguments_raw=(fn.get("arguments") if syntax else None))
+            yield {"type": "tool_start", "name": name, "args": args, "record": dict(entry)}
+            began = time.monotonic()
+
+            checks = ({"invalid": [], "notes": []} if syntax
+                      else tool_trace.check_arguments(name, args))
+            entry["invalid"] = checks["invalid"]
+            entry["notes"] = checks["notes"]
+            failure_class = (syntax["failure_class"] if syntax
+                             else ("bad_arguments" if checks["invalid"] else None))
+
+            if failure_class:
+                # Rejected before dispatch: nothing ran, so there is no result — the model gets the
+                # named field(s) and a further round to fix them, which is the whole self-repair
+                # loop. It is safe by construction: this is a check on a PROPOSED call, so no tool,
+                # no MCP call and no production query has happened yet.
+                result = tool_trace.failure_payload(
+                    failure_class, invalid=checks["invalid"], notes=checks["notes"],
+                    attempt=attempts[name], detail=(syntax or {}).get("detail", ""))
+                entry["lane"] = lane = "tools"   # nothing ran, so nothing is charged to `subagent`
+                dispatched = False
+            elif name in tools.SUBAGENT_TOOLS:
                 # Relay the sub-agent's own steps as they happen. The user watching a 30-second log
                 # sweep should see which app, source and keyword is being spent — the events are
                 # already through the investigator's exit gate, so they carry no raw log text.
                 result = {}
+                dispatched = True
                 try:
                     for event in tools.dispatch_events(name, args, owner=owner):
                         if event.get("type") == "result":
@@ -215,13 +248,28 @@ def answer_events(question, history=None, owner=""):
                                 emitted_subagent_steps.append(relayed)
                             yield relayed
                 except Exception as e:  # noqa: BLE001
-                    result = {"error": str(e)}
+                    result = tool_trace.failure_payload(
+                        "internal_error", attempt=attempts[name],
+                        error_type=type(e).__name__, detail=str(e))
+                    failure_class = "internal_error"
             else:
+                dispatched = True
                 try:
                     result = tools.dispatch(name, args)
                 except Exception as e:  # noqa: BLE001
-                    result = {"error": str(e)}
-            yield {"type": "tool_end", "name": name}
+                    # An exception is an observation, not the end of the run — that has been true
+                    # here since the first version and is the difference between a turn that repairs
+                    # itself and one that stops. What is new is that the model is told WHAT kind of
+                    # failure it was instead of receiving a bare `str(KeyError)`.
+                    result = tool_trace.failure_payload(
+                        "internal_error", attempt=attempts[name],
+                        error_type=type(e).__name__, detail=str(e))
+                    failure_class = "internal_error"
+            if failure_class is None:
+                # A tool that returned normally can still be reporting a failure. It may DECLARE the
+                # class itself; anything undeclared lands on `internal_error`, never on
+                # `bad_arguments`, so nobody is sent to fix an argument that was never shown wrong.
+                failure_class = tool_trace.classify_result(result)
             # Inline-rendering tools hand the frontend a view directive so the diagram appears in
             # the answer itself (the user never opens a page or clicks a node). Gate on the RESULT
             # carrying a `view` key rather than the tool name, so the merged tools also emit:
@@ -230,8 +278,7 @@ def answer_events(question, history=None, owner=""):
             if isinstance(result, dict) and result.get("ok") and (result.get("view") or name == "show_arch"):
                 emitted_views.append(result)
                 yield {"type": "view", "view": result}
-            trace.append({"tool": name, "args": args})
-            if name in tools.SUBAGENT_TOOLS:
+            if lane == "subagent":
                 # A sub-agent evidence packet spends the lane reserved for it, so a log packet
                 # arriving mid-turn cannot eat the room the other tools in the same turn need.
                 content = budget.fit_subagent_result(result)
@@ -251,6 +298,14 @@ def answer_events(question, history=None, owner=""):
                 "tool_call_id": call.get("id", ""),
                 "content": content,
             })
+            # `content` — the exact string the model was just handed — is what the trace keeps, so
+            # the panel and the conversation are one account of this call rather than two.
+            trace.append(tool_trace.finish(
+                entry, output_text=content, result=result,
+                duration_ms=int((time.monotonic() - began) * 1000),
+                failure_class=failure_class, dispatched=dispatched,
+                message=tool_trace.human_message_for(result, failure_class)))
+            yield {"type": "tool_end", "name": name, "record": dict(entry)}
 
     # tool budget exhausted — force a final answer
     messages.append({"role": "user",
